@@ -1,7 +1,7 @@
 // ============================================================
-// GeoForge L0 MVP — 最小可行原型入口
-// 验证 L0 基础层所有 29 个模块的正确性，并用 WebGPU 渲染一个
-// 墨卡托投影三角形，证明 CPU 数学库 → GPU 渲染管线贯通。
+// GeoForge L0+L1 MVP — 最小可行原型入口
+// 验证 L0 基础层（29 模块）和 L1 GPU 层（8 模块）的正确性，
+// 并通过 L1 模块管理 GPU 资源渲染墨卡托投影三角形。
 // ============================================================
 
 import * as vec2 from '../packages/core/src/math/vec2.ts';
@@ -86,13 +86,27 @@ function group(name: string): void {
 }
 
 /**
- * 运行单个测试用例。
+ * 运行单个测试用例（同步版本）。
  * @param name - 测试名称
  * @param fn - 测试函数，抛异常表示失败
  */
 function test(name: string, fn: () => void): void {
   try {
     fn();
+    currentGroup!.results.push({ name, pass: true });
+  } catch (e: any) {
+    currentGroup!.results.push({ name, pass: false, error: e.message ?? String(e) });
+  }
+}
+
+/**
+ * 运行单个异步测试用例。
+ * @param name - 测试名称
+ * @param fn - 异步测试函数
+ */
+async function testAsync(name: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
     currentGroup!.results.push({ name, pass: true });
   } catch (e: any) {
     currentGroup!.results.push({ name, pass: false, error: e.message ?? String(e) });
@@ -590,6 +604,456 @@ test('transform 4326→3857', () => {
 });
 
 // ============================================================
+// 7. L1 GPU 层模块测试（需要 WebGPU）
+// ============================================================
+
+import { createDeviceManager } from '../packages/gpu/src/l1/device.ts';
+import { createSurfaceManager } from '../packages/gpu/src/l1/surface.ts';
+import { createGPUMemoryTracker } from '../packages/gpu/src/l1/memory-tracker.ts';
+import { createBufferPool } from '../packages/gpu/src/l1/buffer-pool.ts';
+import { createTextureManager } from '../packages/gpu/src/l1/texture-manager.ts';
+import { createBindGroupCache } from '../packages/gpu/src/l1/bind-group-cache.ts';
+import { createIndirectDrawManager } from '../packages/gpu/src/l1/indirect-draw.ts';
+import { createGPUUploader } from '../packages/gpu/src/l1/uploader.ts';
+import { initializeL1 } from '../packages/gpu/src/l1/index.ts';
+
+/**
+ * 运行 L1 层的集成测试。
+ * 这些测试需要 WebGPU 可用——在浏览器环境中执行。
+ *
+ * @param canvas - Canvas 元素，用于 SurfaceManager 测试
+ */
+async function runL1Tests(canvas: HTMLCanvasElement): Promise<void> {
+  // 检测 WebGPU
+  if (!navigator.gpu) {
+    group('L1/prerequisite');
+    test('WebGPU available', () => {
+      throw new Error('WebGPU not supported in this browser');
+    });
+    return;
+  }
+
+  // ---- DeviceManager ----
+  group('L1/DeviceManager');
+
+  const dm = createDeviceManager();
+
+  test('create DeviceManager', () => {
+    assert(dm !== null, 'should create');
+    assert(!dm.isInitialized, 'should not be initialized yet');
+  });
+
+  let deviceReady = false;
+  try {
+    await dm.initialize({ powerPreference: 'high-performance' });
+    deviceReady = true;
+  } catch (err: any) {
+    test('initialize', () => { throw err; });
+    return;
+  }
+
+  test('initialize', () => {
+    assert(deviceReady, 'should initialize');
+    assert(dm.isInitialized, 'should be initialized');
+  });
+
+  test('device & queue', () => {
+    assert(dm.device !== null, 'device should exist');
+    assert(dm.queue !== null, 'queue should exist');
+  });
+
+  test('capabilities', () => {
+    const caps = dm.capabilities;
+    assert(caps.maxTextureSize >= 2048, `maxTextureSize=${caps.maxTextureSize}`);
+    assert(caps.maxBufferSize > 0, `maxBufferSize=${caps.maxBufferSize}`);
+    assert(caps.preferredCanvasFormat.length > 0, 'should have canvas format');
+    assert(typeof caps.vendor === 'string', 'should have vendor');
+  });
+
+  test('needsWorkaround', () => {
+    const result = dm.needsWorkaround('unknown-workaround-xyz');
+    assert(result === false, 'unknown workaround should return false');
+  });
+
+  test('onDeviceLost callback', () => {
+    let called = false;
+    const unsub = dm.onDeviceLost(() => { called = true; });
+    assert(typeof unsub === 'function', 'should return unsubscribe fn');
+    unsub();
+  });
+
+  const device = dm.device;
+
+  // ---- GPUMemoryTracker ----
+  group('L1/GPUMemoryTracker');
+
+  const memTracker = createGPUMemoryTracker();
+
+  test('create tracker', () => {
+    assert(memTracker !== null);
+    assert(memTracker.totalBytes === 0, 'should start at 0');
+    assert(memTracker.entryCount === 0, 'should start with 0 entries');
+  });
+
+  test('track + addRef + releaseRef', () => {
+    memTracker.track({ id: 'test-buf-1', type: 'buffer', size: 1024, label: 'test' });
+    assert(memTracker.totalBytes === 1024, `expected 1024, got ${memTracker.totalBytes}`);
+    assert(memTracker.entryCount === 1);
+
+    memTracker.addRef('test-buf-1');
+    const entry = memTracker.entries.get('test-buf-1')!;
+    assert(entry.refCount === 2, `refCount should be 2, got ${entry.refCount}`);
+
+    memTracker.releaseRef('test-buf-1');
+    const entry2 = memTracker.entries.get('test-buf-1')!;
+    assert(entry2.refCount === 1, `refCount should be 1, got ${entry2.refCount}`);
+  });
+
+  test('markUsed + audit', () => {
+    memTracker.markUsed('test-buf-1', 100);
+    const stale = memTracker.audit(200, 50);
+    assert(stale.length === 1, 'should find 1 stale resource');
+    assert(stale[0].id === 'test-buf-1');
+  });
+
+  test('enforceBudget', () => {
+    memTracker.releaseRef('test-buf-1');
+    const evicted = memTracker.enforceBudget(0, 300);
+    assert(evicted.length === 1, 'should evict 1 resource');
+    assert(evicted[0] === 'test-buf-1');
+    assert(memTracker.totalBytes === 0, 'should be 0 after eviction');
+  });
+
+  // ---- SurfaceManager ----
+  group('L1/SurfaceManager');
+
+  const surface = createSurfaceManager();
+
+  test('create SurfaceManager', () => {
+    assert(surface !== null);
+  });
+
+  test('initialize', () => {
+    surface.initialize(canvas, device, { sampleCount: 1, maxPixelRatio: 2 });
+    const cfg = surface.config;
+    assert(cfg.canvas === canvas, 'should reference canvas');
+    assert(cfg.physicalWidth > 0, 'physicalWidth should be > 0');
+    assert(cfg.sampleCount === 1, `sampleCount should be 1, got ${cfg.sampleCount}`);
+  });
+
+  test('getCurrentTexture', () => {
+    const tex = surface.getCurrentTexture();
+    assert(tex !== null, 'should return texture');
+  });
+
+  test('getCurrentTextureView', () => {
+    const view = surface.getCurrentTextureView();
+    assert(view !== null, 'should return view');
+  });
+
+  test('getMSAATextureView (sampleCount=1)', () => {
+    const msaaView = surface.getMSAATextureView();
+    assert(msaaView === null, 'should be null for sampleCount=1');
+  });
+
+  test('cssToPhysical', () => {
+    const [px, py] = surface.cssToPhysical(100, 200);
+    assert(px > 0, 'physical X should be > 0');
+    assert(py > 0, 'physical Y should be > 0');
+  });
+
+  test('cssToNDC center', () => {
+    const cfg = surface.config;
+    const [nx, ny] = surface.cssToNDC(cfg.width / 2, cfg.height / 2);
+    assertApprox(nx, 0, 0.01, 'center NDC X');
+    assertApprox(ny, 0, 0.01, 'center NDC Y');
+  });
+
+  test('getViewport', () => {
+    const vp = surface.getViewport();
+    assert(vp.width > 0, 'viewport width');
+    assert(vp.height > 0, 'viewport height');
+    assert(vp.pixelRatio > 0, 'viewport pixelRatio');
+  });
+
+  test('onResize callback', () => {
+    let called = false;
+    const unsub = surface.onResize(() => { called = true; });
+    surface.resize(800, 600);
+    assert(called, 'resize callback should fire');
+    unsub();
+  });
+
+  // ---- BufferPool ----
+  group('L1/BufferPool');
+
+  const memTracker2 = createGPUMemoryTracker();
+  const bufPool = createBufferPool(device, memTracker2, {
+    stagingRingSize: 1 * 1024 * 1024,
+    stagingRingSlots: 2,
+  });
+
+  test('create BufferPool', () => {
+    assert(bufPool !== null);
+    assert(bufPool.stats.totalAllocated === 0, 'should start at 0');
+  });
+
+  test('acquire buffer', () => {
+    const handle = bufPool.acquire(256, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, 'test-vb');
+    assert(handle.id.startsWith('buf_'), `id should start with buf_, got ${handle.id}`);
+    assert(handle.buffer !== null, 'buffer should exist');
+    assert(handle.size >= 256, `size should be >= 256, got ${handle.size}`);
+    assert(bufPool.stats.totalAllocated > 0, 'totalAllocated should increase');
+    bufPool.release(handle);
+  });
+
+  test('release & reacquire (pooling)', () => {
+    const h1 = bufPool.acquire(512, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    const id1 = h1.id;
+    bufPool.release(h1);
+    assert(bufPool.stats.pooledFree >= 1, 'should have 1 pooled buffer');
+
+    const h2 = bufPool.acquire(512, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    assert(h2.id === id1, 'should reuse the same buffer');
+  });
+
+  test('destroy buffer', () => {
+    const h = bufPool.acquire(128, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+    bufPool.destroy(h);
+  });
+
+  // ---- BindGroupCache ----
+  group('L1/BindGroupCache');
+
+  const bgCache = createBindGroupCache(device);
+
+  test('create BindGroupCache', () => {
+    assert(bgCache !== null);
+    assert(bgCache.size === 0, 'should start empty');
+  });
+
+  test('getOrCreate + cache hit', () => {
+    const uniformBuf = device.createBuffer({
+      size: 64,
+      usage: GPUBufferUsage.UNIFORM,
+    });
+
+    const layout = device.createBindGroupLayout({
+      entries: [{
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX,
+        buffer: { type: 'uniform' },
+      }],
+    });
+
+    const bg1 = bgCache.getOrCreate(
+      layout, 'test-layout',
+      [{ binding: 0, resourceId: 'test-uniform' }],
+      [{ binding: 0, resource: { buffer: uniformBuf } }],
+    );
+    assert(bg1 !== null, 'should create bind group');
+    assert(bgCache.stats.misses === 1, 'should have 1 miss');
+
+    const bg2 = bgCache.getOrCreate(
+      layout, 'test-layout',
+      [{ binding: 0, resourceId: 'test-uniform' }],
+      [{ binding: 0, resource: { buffer: uniformBuf } }],
+    );
+    assert(bg2 === bg1, 'should return cached bind group');
+    assert(bgCache.stats.hits === 1, 'should have 1 hit');
+
+    uniformBuf.destroy();
+  });
+
+  test('invalidateByResource', () => {
+    const removed = bgCache.invalidateByResource('test-uniform');
+    assert(removed === 1, `should remove 1, got ${removed}`);
+    assert(bgCache.size === 0, 'cache should be empty');
+  });
+
+  // ---- Sampler Cache ----
+  test('sampler getOrCreate', () => {
+    const s1 = bgCache.sampler.getOrCreate({
+      magFilter: 'linear',
+      minFilter: 'linear',
+    });
+    assert(s1 !== null, 'should create sampler');
+
+    const s2 = bgCache.sampler.getOrCreate({
+      magFilter: 'linear',
+      minFilter: 'linear',
+    });
+    assert(s1 === s2, 'should return cached sampler');
+    assert(bgCache.sampler.stats.hits === 1, 'sampler should have 1 hit');
+  });
+
+  // ---- TextureManager ----
+  group('L1/TextureManager');
+
+  const memTracker3 = createGPUMemoryTracker();
+  const texMgr = createTextureManager(device, memTracker3, {
+    defaultAtlasSize: 512,
+  });
+
+  test('create TextureManager', () => {
+    assert(texMgr !== null);
+    assert(texMgr.stats.textureCount === 0);
+  });
+
+  test('create texture', () => {
+    const handle = texMgr.create({
+      size: { width: 64, height: 64 },
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    }, 'test-texture');
+    assert(handle.id.startsWith('tex_'), 'id should start with tex_');
+    assert(handle.width === 64, `width should be 64, got ${handle.width}`);
+    assert(handle.height === 64, `height should be 64, got ${handle.height}`);
+    texMgr.release(handle);
+  });
+
+  // ---- IndirectDrawManager ----
+  group('L1/IndirectDrawManager');
+
+  const memTracker4 = createGPUMemoryTracker();
+  const bufPool2 = createBufferPool(device, memTracker4, {
+    stagingRingSize: 256 * 1024,
+    stagingRingSlots: 2,
+  });
+  const indirectMgr = createIndirectDrawManager(device, bufPool2);
+
+  test('create IndirectDrawManager', () => {
+    assert(indirectMgr !== null);
+  });
+
+  test('createIndirectBuffer (indexed)', () => {
+    const ib = indirectMgr.createIndirectBuffer(10, true, 'test-indirect');
+    assert(ib.buffer !== null, 'buffer should exist');
+    assert(ib.size >= 10 * 20, `size should be >= 200, got ${ib.size}`);
+    bufPool2.destroy(ib);
+  });
+
+  test('createWriteBindGroupLayout', () => {
+    const layout = indirectMgr.createWriteBindGroupLayout();
+    assert(layout !== null, 'layout should exist');
+  });
+
+  test('writeDrawParams', () => {
+    const ib = indirectMgr.createIndirectBuffer(5, true);
+    indirectMgr.writeDrawParams(ib, 0, { count: 36, instanceCount: 1 }, true);
+    bufPool2.destroy(ib);
+  });
+
+  // ---- GPUUploader ----
+  group('L1/GPUUploader');
+
+  const memTracker5 = createGPUMemoryTracker();
+  const bufPool3 = createBufferPool(device, memTracker5, {
+    stagingRingSize: 1 * 1024 * 1024,
+    stagingRingSlots: 2,
+  });
+  const texMgr2 = createTextureManager(device, memTracker5, { defaultAtlasSize: 256 });
+  const uploader = createGPUUploader(device, bufPool3, texMgr2);
+
+  test('create GPUUploader', () => {
+    assert(uploader !== null);
+  });
+
+  test('uploadBuffer', () => {
+    const data = new Float32Array([0, 0, 1, 0, 0.5, 1]);
+    const handle = uploader.uploadBuffer(data, GPUBufferUsage.VERTEX);
+    assert(handle.id.startsWith('buf_'), 'id should start with buf_');
+    assert(handle.size >= data.byteLength, 'size should fit data');
+    bufPool3.release(handle);
+  });
+
+  test('uploadMat4', () => {
+    const identity = mat4.create();
+    const handle = uploader.uploadMat4(identity, 'test-mat4');
+    assert(handle.size >= 64, 'should be at least 64 bytes');
+    bufPool3.release(handle);
+  });
+
+  test('writeUniform', () => {
+    const buf = bufPool3.acquire(64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    const data = new Float32Array(16);
+    data[0] = 1; data[5] = 1; data[10] = 1; data[15] = 1;
+    uploader.writeUniform(buf, data);
+    bufPool3.release(buf);
+  });
+
+  test('uploadDoublePrecisionPositions', () => {
+    const positions = new Float64Array([116.39, 39.91, 0.0, 116.40, 39.92, 100.0]);
+    const [ch, cl] = splitDouble(116.395);
+    const [ch2, cl2] = splitDouble(39.915);
+    const rtcCenter = {
+      high: new Float32Array([ch, ch2, 0]),
+      low: new Float32Array([cl, cl2, 0]),
+    };
+    const result = uploader.uploadDoublePrecisionPositions(positions, rtcCenter, 'test-split');
+    assert(result.highBuffer.id.startsWith('buf_'), 'highBuffer should have valid id');
+    assert(result.lowBuffer.id.startsWith('buf_'), 'lowBuffer should have valid id');
+    bufPool3.release(result.highBuffer);
+    bufPool3.release(result.lowBuffer);
+  });
+
+  await testAsync('readbackBuffer', async () => {
+    const data = new Float32Array([1.0, 2.0, 3.0, 4.0]);
+    const handle = uploader.uploadBuffer(data, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC);
+    const readback = await uploader.readbackBuffer(handle);
+    const readData = new Float32Array(readback);
+    assertApprox(readData[0], 1.0, 0.001, 'readback[0]');
+    assertApprox(readData[1], 2.0, 0.001, 'readback[1]');
+    assertApprox(readData[2], 3.0, 0.001, 'readback[2]');
+    assertApprox(readData[3], 4.0, 0.001, 'readback[3]');
+    bufPool3.release(handle);
+  });
+
+  // ---- initializeL1 integration ----
+  group('L1/initializeL1');
+
+  await testAsync('full L1 initialization', async () => {
+    const l1 = await initializeL1(canvas, {
+      surface: { sampleCount: 1, maxPixelRatio: 2 },
+      stagingRingSize: 512 * 1024,
+      stagingRingSlots: 2,
+    });
+    assert(l1.deviceManager.isInitialized, 'deviceManager should be initialized');
+    assert(l1.surface.config.physicalWidth > 0, 'surface should have size');
+    assert(l1.memoryTracker !== null, 'memoryTracker should exist');
+    assert(l1.bufferPool !== null, 'bufferPool should exist');
+    assert(l1.textureManager !== null, 'textureManager should exist');
+    assert(l1.bindGroupCache !== null, 'bindGroupCache should exist');
+    assert(l1.indirectDraw !== null, 'indirectDraw should exist');
+    assert(l1.uploader !== null, 'uploader should exist');
+
+    // 验证完整管线：uploader→bufferPool→GPU
+    const vb = l1.uploader.uploadBuffer(
+      new Float32Array([0, 0, 1, 0, 0.5, 1]),
+      GPUBufferUsage.VERTEX
+    );
+    assert(vb.buffer !== null, 'should upload via L1 pipeline');
+    l1.bufferPool.release(vb);
+
+    // 清理——释放这个集成测试的 L1 实例
+    l1.surface.destroy();
+    l1.bufferPool.destroyAll();
+    l1.textureManager.destroyAll();
+    l1.bindGroupCache.clear();
+    l1.deviceManager.destroy();
+  });
+
+  // 清理测试模块的资源
+  surface.destroy();
+  bufPool.destroyAll();
+  bufPool2.destroyAll();
+  bufPool3.destroyAll();
+  texMgr.destroyAll();
+  texMgr2.destroyAll();
+  bgCache.clear();
+}
+
+// ============================================================
 // 渲染测试结果到 DOM
 // ============================================================
 
@@ -621,7 +1085,7 @@ function renderResults(): void {
     <div class="stat"><div class="value" style="color:#3fb950">${totalPass}</div><div class="label">Passed</div></div>
     <div class="stat"><div class="value" style="color:${totalFail > 0 ? '#f85149' : '#3fb950'}">${totalFail}</div><div class="label">Failed</div></div>
     <div class="stat"><div class="value">${allTests.length}</div><div class="label">Modules</div></div>
-    <div class="stat"><div class="value">29</div><div class="label">L0 Files</div></div>
+    <div class="stat"><div class="value">37</div><div class="label">Total Files</div></div>
     <div class="stat"><div class="value">0</div><div class="label">Dependencies</div></div>
   `;
 }
@@ -893,5 +1357,19 @@ function drawFallbackCanvas(canvas: HTMLCanvasElement): void {
 // 启动
 // ============================================================
 
-renderResults();
-initWebGPU();
+async function main(): Promise<void> {
+  // L0 测试已在模块顶层同步执行
+  renderResults();
+
+  // L1 测试需要 WebGPU，异步执行
+  const canvas = document.getElementById('webgpu-canvas') as HTMLCanvasElement;
+  await runL1Tests(canvas);
+
+  // 重新渲染结果（包含 L1 测试）
+  renderResults();
+
+  // 启动 WebGPU 渲染演示
+  await initWebGPU();
+}
+
+main();
