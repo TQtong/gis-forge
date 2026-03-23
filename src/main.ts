@@ -617,6 +617,19 @@ import { createIndirectDrawManager } from '../packages/gpu/src/l1/indirect-draw.
 import { createGPUUploader } from '../packages/gpu/src/l1/uploader.ts';
 import { initializeL1 } from '../packages/gpu/src/l1/index.ts';
 
+import { createBlendPresets } from '../packages/gpu/src/l2/blend-presets.ts';
+import { createUniformLayoutBuilder } from '../packages/gpu/src/l2/uniform-layout.ts';
+import { createWGSLTemplates } from '../packages/gpu/src/l2/wgsl-templates.ts';
+import { createDepthManager } from '../packages/gpu/src/l2/depth-manager.ts';
+import { createStencilManager } from '../packages/gpu/src/l2/stencil-manager.ts';
+import { createRenderStats } from '../packages/gpu/src/l2/render-stats.ts';
+import { createShaderAssembler } from '../packages/gpu/src/l2/shader-assembler.ts';
+import { createPipelineCache } from '../packages/gpu/src/l2/pipeline-cache.ts';
+import { createComputePassManager } from '../packages/gpu/src/l2/compute-pass.ts';
+import { createRenderGraph } from '../packages/gpu/src/l2/render-graph.ts';
+import { createFrameGraphBuilder } from '../packages/gpu/src/l2/frame-graph-builder.ts';
+import { initializeL2 } from '../packages/gpu/src/l2/index.ts';
+
 /**
  * 运行 L1 层的集成测试。
  * 这些测试需要 WebGPU 可用——在浏览器环境中执行。
@@ -1054,6 +1067,342 @@ async function runL1Tests(canvas: HTMLCanvasElement): Promise<void> {
 }
 
 // ============================================================
+// 8. L2 渲染层模块测试（需要 WebGPU）
+// ============================================================
+
+/**
+ * 运行 L2 渲染层的集成测试。
+ * 覆盖 BlendPresets / UniformLayoutBuilder / WGSLTemplates / DepthManager /
+ * StencilManager / RenderStats / ShaderAssembler / PipelineCache /
+ * ComputePassManager / RenderGraph / initializeL2 共 11 个模块。
+ *
+ * @param canvas - Canvas 元素，用于 initializeL2 测试
+ */
+async function runL2Tests(canvas: HTMLCanvasElement): Promise<void> {
+  // WebGPU 不可用时跳过全部 L2 测试
+  if (!navigator.gpu) {
+    group('L2/prerequisite');
+    test('WebGPU available', () => {
+      throw new Error('WebGPU not supported — L2 tests skipped');
+    });
+    return;
+  }
+
+  // 创建独立 DeviceManager 供 L2 测试使用，避免与 L1 测试共享状态
+  const dm = createDeviceManager();
+  let deviceReady = false;
+  try {
+    await dm.initialize();
+    deviceReady = true;
+  } catch {
+    group('L2/prerequisite');
+    test('device initialize', () => {
+      throw new Error('Failed to initialize GPU device for L2 tests');
+    });
+    return;
+  }
+
+  const device = dm.device;
+
+  // ---- BlendPresets ----
+  group('L2/BlendPresets');
+
+  test('create presets', () => {
+    const bp = createBlendPresets();
+    // opaque 表示不启用混合，应为 undefined
+    assert(bp.opaque === undefined, 'opaque should be undefined');
+    // alphaBlend 应包含完整的 color + alpha 分量配置
+    assert(bp.alphaBlend !== undefined, 'alphaBlend should exist');
+    assert(bp.alphaBlend.color !== undefined, 'alphaBlend.color should exist');
+    assert(bp.alphaBlend.alpha !== undefined, 'alphaBlend.alpha should exist');
+    assert(bp.premultipliedAlpha !== undefined, 'premultipliedAlpha should exist');
+    assert(bp.additive !== undefined, 'additive should exist');
+    assert(bp.multiply !== undefined, 'multiply should exist');
+    assert(bp.screen !== undefined, 'screen should exist');
+    assert(bp.stencilOnly !== undefined, 'stencilOnly should exist');
+  });
+
+  test('custom blend', () => {
+    const bp = createBlendPresets();
+    // 自定义混合：与标准 alpha 等价的参数
+    const custom = bp.custom(
+      'src-alpha', 'one-minus-src-alpha', 'add',
+      'one', 'one-minus-src-alpha', 'add',
+    );
+    assert(custom.color !== undefined, 'custom.color should exist');
+    assert(custom.alpha !== undefined, 'custom.alpha should exist');
+    assert(custom.color.srcFactor === 'src-alpha', `colorSrc should be src-alpha, got ${custom.color.srcFactor}`);
+    assert(custom.color.dstFactor === 'one-minus-src-alpha', `colorDst should be one-minus-src-alpha`);
+    assert(custom.color.operation === 'add', `colorOp should be add`);
+    assert(custom.alpha.srcFactor === 'one', `alphaSrc should be one`);
+  });
+
+  // ---- UniformLayoutBuilder ----
+  group('L2/UniformLayoutBuilder');
+
+  test('build layout with alignment', () => {
+    const ulb = createUniformLayoutBuilder();
+    // f32 → 4B, vec3f → 16B 对齐 12B 存储, mat4x4f → 64B
+    ulb.addField('opacity', 'f32');
+    ulb.addField('normal', 'vec3f');
+    ulb.addField('mvp', 'mat4x4f');
+    const layout = ulb.build(0, 0);
+    assert(layout.totalSize > 0, 'totalSize should be > 0');
+    // WGSL struct 总大小必须对齐到最大成员对齐值（mat4x4f 为 16）
+    assert(layout.totalSize % 16 === 0, `totalSize should be 16-aligned, got ${layout.totalSize}`);
+    assert(layout.offsets.size === 3, `should have 3 field offsets, got ${layout.offsets.size}`);
+    assert(layout.wgslStructCode.includes('opacity'), 'struct code should contain opacity');
+    assert(layout.wgslBindingCode.includes('@group(0)'), 'binding code should reference group 0');
+  });
+
+  test('UniformWriter set/get', () => {
+    const ulb = createUniformLayoutBuilder();
+    ulb.addField('alpha', 'f32');
+    const layout = ulb.build(1, 0);
+    const writer = ulb.createWriter(layout);
+    // setFloat 写入 f32 字段并验证通过 DataView 回读一致
+    writer.setFloat('alpha', 0.75);
+    const readback = new DataView(writer.getData());
+    const alphaOffset = layout.offsets.get('alpha')!;
+    assertApprox(readback.getFloat32(alphaOffset, true), 0.75, 1e-5, 'writer alpha readback');
+  });
+
+  // ---- WGSLTemplates ----
+  group('L2/WGSLTemplates');
+
+  test('templates exist', () => {
+    const tpl = createWGSLTemplates();
+    // 顶点模板需包含 ShaderAssembler 依赖的关键占位符
+    assert(tpl.vertexTemplate.includes('{{PROJECTION_MODULE}}'), 'vertex should have PROJECTION_MODULE');
+    assert(tpl.vertexTemplate.includes('{{GEOMETRY_MODULE}}'), 'vertex should have GEOMETRY_MODULE');
+    assert(tpl.vertexTemplate.includes('{{FEATURE_MODULES}}'), 'vertex should have FEATURE_MODULES');
+    assert(tpl.fragmentTemplate.includes('{{STYLE_MODULE}}'), 'fragment should have STYLE_MODULE');
+    assert(tpl.fragmentTemplate.includes('{{PER_LAYER_UNIFORMS}}'), 'fragment should have PER_LAYER_UNIFORMS');
+    assert(tpl.vertexTemplate.length > 100, 'vertex template should be substantial');
+    assert(tpl.fragmentTemplate.length > 100, 'fragment template should be substantial');
+  });
+
+  test('builtin modules', () => {
+    const tpl = createWGSLTemplates();
+    // 三种内置投影
+    assert(typeof tpl.projectionModules['mercator'] === 'string' && tpl.projectionModules['mercator'].length > 0, 'mercator projection should be non-empty');
+    assert(typeof tpl.projectionModules['globe'] === 'string' && tpl.projectionModules['globe'].length > 0, 'globe projection should be non-empty');
+    assert(typeof tpl.projectionModules['ortho'] === 'string' && tpl.projectionModules['ortho'].length > 0, 'ortho projection should be non-empty');
+    // 三种内置几何
+    assert(typeof tpl.geometryModules['polygon'] === 'string' && tpl.geometryModules['polygon'].length > 0, 'polygon geometry should be non-empty');
+    // 三种内置样式
+    assert(typeof tpl.styleModules['fill_solid'] === 'string' && tpl.styleModules['fill_solid'].length > 0, 'fill_solid style should be non-empty');
+    // 四种内置特性
+    assert(typeof tpl.featureModules['logDepth'] === 'string' && tpl.featureModules['logDepth'].length > 0, 'logDepth feature should be non-empty');
+    assert(typeof tpl.featureModules['splitDouble'] === 'string', 'splitDouble feature should exist');
+    // Compute 模板
+    assert(typeof tpl.computeTemplates['frustumCull'] === 'string' && tpl.computeTemplates['frustumCull'].length > 0, 'frustumCull compute should be non-empty');
+  });
+
+  // ---- DepthManager ----
+  group('L2/DepthManager');
+
+  test('reversed-z config', () => {
+    const depth = createDepthManager(device, { antialias: false, reversedZ: true });
+    // GeoForge 硬约束 #10: Reversed-Z → depthCompare 'greater', clear 0.0
+    assert(depth.depthCompare === 'greater', `depthCompare should be greater, got ${depth.depthCompare}`);
+    assertApprox(depth.clearDepthValue, 0.0, 0, 'clearDepthValue should be 0');
+    assert(depth.config.depthFormat === 'depth32float', `format should be depth32float, got ${depth.config.depthFormat}`);
+    assert(depth.config.useReversedZ === true, 'useReversedZ should be true');
+    assert(depth.config.nearPlane > 0, 'nearPlane should be positive');
+    assert(depth.config.farPlane > depth.config.nearPlane, 'farPlane should exceed nearPlane');
+  });
+
+  test('WGSL snippets', () => {
+    const depth = createDepthManager(device, { antialias: false, reversedZ: true });
+    // 对数深度与线性化 WGSL 片段供 ShaderAssembler 注入
+    assert(typeof depth.logDepthVertexCode === 'string' && depth.logDepthVertexCode.length > 0, 'logDepthVertexCode should be non-empty');
+    assert(typeof depth.logDepthFragmentCode === 'string' && depth.logDepthFragmentCode.length > 0, 'logDepthFragmentCode should be non-empty');
+    assert(typeof depth.linearizeDepthCode === 'string' && depth.linearizeDepthCode.length > 0, 'linearizeDepthCode should be non-empty');
+    // 顶点片段应包含关键函数名
+    assert(depth.logDepthVertexCode.includes('geoforge_log_depth'), 'logDepthVertexCode should contain log depth function');
+  });
+
+  // ---- StencilManager ----
+  group('L2/StencilManager');
+
+  test('presets exist', () => {
+    const sm = createStencilManager(device);
+    // 三个 GIS 场景预设：多边形遮罩、地形叠盖、反相分类
+    assert(sm.presets.polygonMask !== undefined, 'polygonMask should exist');
+    assert(sm.presets.polygonMask.depthStencilState !== undefined, 'polygonMask.depthStencilState should exist');
+    assert(sm.presets.polygonMask.colorWriteMask === 0, `polygonMask.colorWriteMask should be 0, got ${sm.presets.polygonMask.colorWriteMask}`);
+    assert(sm.presets.terrainDrape !== undefined, 'terrainDrape should exist');
+    assert(sm.presets.terrainDrape.writeState !== undefined, 'terrainDrape.writeState should exist');
+    assert(sm.presets.terrainDrape.testState !== undefined, 'terrainDrape.testState should exist');
+    // writeState 使用 Reversed-Z 的 greater 比较
+    assert(sm.presets.terrainDrape.writeState.depthCompare === 'greater', 'terrainDrape.writeState should use greater');
+    assert(sm.presets.invertedClassification !== undefined, 'invertedClassification should exist');
+    assert(sm.presets.invertedClassification.depthStencilState !== undefined, 'invertedClassification.depthStencilState should exist');
+  });
+
+  // ---- RenderStats ----
+  group('L2/RenderStats');
+
+  test('frame lifecycle', () => {
+    const stats = createRenderStats(device, dm.capabilities);
+    // 完整帧生命周期：begin → record → end → 读取快照
+    stats.beginFrame(0);
+    stats.recordDrawCall(100, 1);
+    stats.recordDrawCall(200, 2);
+    stats.recordPass();
+    stats.recordUpload('buffer', 4096);
+    stats.recordUpload('texture', 8192);
+    stats.endFrame();
+    const frame = stats.currentFrame;
+    assert(frame.frameIndex === 0, `frameIndex should be 0, got ${frame.frameIndex}`);
+    assert(frame.drawCallCount === 2, `drawCallCount should be 2, got ${frame.drawCallCount}`);
+    assert(frame.triangleCount === 300, `triangleCount should be 300, got ${frame.triangleCount}`);
+    assert(frame.instanceCount === 3, `instanceCount should be 3, got ${frame.instanceCount}`);
+    assert(frame.passCount === 1, `passCount should be 1, got ${frame.passCount}`);
+    assert(frame.bufferUploadBytes === 4096, `bufferUploadBytes should be 4096, got ${frame.bufferUploadBytes}`);
+    assert(frame.textureUploadBytes === 8192, `textureUploadBytes should be 8192, got ${frame.textureUploadBytes}`);
+    assert(frame.frameDurationMs >= 0, 'frameDurationMs should be non-negative');
+  });
+
+  // ---- ShaderAssembler ----
+  group('L2/ShaderAssembler');
+
+  test('assemble mercator/polygon/fill_solid', () => {
+    const ulb = createUniformLayoutBuilder();
+    const asm = createShaderAssembler(ulb);
+    // 使用内置模块组合：墨卡托投影 + 多边形几何 + 实色填充
+    const result = asm.assemble({
+      projection: 'mercator',
+      geometry: 'polygon',
+      style: 'fill_solid',
+      features: [],
+    });
+    assert(typeof result.vertexCode === 'string' && result.vertexCode.length > 0, 'vertexCode should be non-empty');
+    assert(typeof result.fragmentCode === 'string' && result.fragmentCode.length > 0, 'fragmentCode should be non-empty');
+    // 拼装结果应包含对应模块的关键函数
+    assert(result.vertexCode.includes('projectPosition'), 'vertex should contain projectPosition');
+    assert(result.vertexCode.includes('processVertex'), 'vertex should contain processVertex');
+    assert(result.fragmentCode.includes('computeColor'), 'fragment should contain computeColor');
+    assert(typeof result.key === 'string' && result.key.length > 0, 'variant key should be non-empty');
+  });
+
+  // ---- PipelineCache ----
+  group('L2/PipelineCache');
+
+  test('create and stats', () => {
+    const ulb = createUniformLayoutBuilder();
+    const asm = createShaderAssembler(ulb);
+    const cache = createPipelineCache(device, asm);
+    // 初始状态应为空缓存
+    assert(cache.stats.cacheSize === 0, `initial cacheSize should be 0, got ${cache.stats.cacheSize}`);
+    assert(cache.stats.cacheHits === 0, `initial cacheHits should be 0, got ${cache.stats.cacheHits}`);
+    assert(cache.stats.cacheMisses === 0, `initial cacheMisses should be 0, got ${cache.stats.cacheMisses}`);
+    assert(cache.stats.compilationTimeMs === 0, `initial compilationTimeMs should be 0, got ${cache.stats.compilationTimeMs}`);
+    cache.clear();
+  });
+
+  // ---- ComputePassManager ----
+  group('L2/ComputePassManager');
+
+  test('builtin shaders exist', () => {
+    const ulb = createUniformLayoutBuilder();
+    const asm = createShaderAssembler(ulb);
+    const cache = createPipelineCache(device, asm);
+    const cpm = createComputePassManager(device, cache);
+    // 5 种内置 WGSL 源码应全部存在
+    assert(typeof cpm.builtinShaders.frustumCull === 'string' && cpm.builtinShaders.frustumCull.length > 0, 'frustumCull WGSL should be non-empty');
+    assert(typeof cpm.builtinShaders.radixSort === 'string' && cpm.builtinShaders.radixSort.length > 0, 'radixSort WGSL should be non-empty');
+    assert(typeof cpm.builtinShaders.labelCollision === 'string' && cpm.builtinShaders.labelCollision.length > 0, 'labelCollision WGSL should be non-empty');
+    assert(typeof cpm.builtinShaders.spatialHash === 'string' && cpm.builtinShaders.spatialHash.length > 0, 'spatialHash WGSL should be non-empty');
+    assert(typeof cpm.builtinShaders.terrainTessellation === 'string' && cpm.builtinShaders.terrainTessellation.length > 0, 'terrainTessellation WGSL should be non-empty');
+    cache.clear();
+  });
+
+  // ---- RenderGraph ----
+  group('L2/RenderGraph');
+
+  test('add and sort passes', () => {
+    const rg = createRenderGraph(device);
+    // 两个 Pass：A 无依赖，B 依赖 A → 拓扑序应为 [A, B]
+    rg.addPass({
+      id: 'passA',
+      type: 'compute',
+      dependencies: [],
+      inputs: [],
+      outputs: [],
+      execute: () => {},
+    });
+    rg.addPass({
+      id: 'passB',
+      type: 'render',
+      projection: 'mercator',
+      dependencies: ['passA'],
+      inputs: [],
+      outputs: [],
+      execute: () => {},
+    });
+    const order = rg.topologicalSort();
+    assert(order.length === 2, `should have 2 passes, got ${order.length}`);
+    assert(order[0] === 'passA', `first should be passA, got ${order[0]}`);
+    assert(order[1] === 'passB', `second should be passB, got ${order[1]}`);
+    // 验证 passes 只读映射
+    assert(rg.passes.size === 2, `passes map should have 2 entries, got ${rg.passes.size}`);
+  });
+
+  // ---- initializeL2 集成 ----
+  group('L2/initializeL2');
+
+  await testAsync('full L2 initialization', async () => {
+    // 先初始化 L1，再用 L1Context 初始化 L2
+    const l1 = await initializeL1(canvas, {
+      surface: { sampleCount: 1, maxPixelRatio: 2 },
+      stagingRingSize: 512 * 1024,
+      stagingRingSlots: 2,
+    });
+    const l2 = initializeL2(l1);
+
+    // 验证所有 12 个 L2 子模块均被正确创建
+    assert(l2.blendPresets !== null && l2.blendPresets !== undefined, 'blendPresets should exist');
+    assert(l2.depthManager !== null && l2.depthManager !== undefined, 'depthManager should exist');
+    assert(l2.stencilManager !== null && l2.stencilManager !== undefined, 'stencilManager should exist');
+    assert(l2.uniformLayoutBuilder !== null && l2.uniformLayoutBuilder !== undefined, 'uniformLayoutBuilder should exist');
+    assert(l2.shaderAssembler !== null && l2.shaderAssembler !== undefined, 'shaderAssembler should exist');
+    assert(l2.pipelineCache !== null && l2.pipelineCache !== undefined, 'pipelineCache should exist');
+    assert(l2.computePassManager !== null && l2.computePassManager !== undefined, 'computePassManager should exist');
+    assert(l2.renderStats !== null && l2.renderStats !== undefined, 'renderStats should exist');
+    assert(l2.compositor !== null && l2.compositor !== undefined, 'compositor should exist');
+    assert(l2.pickingEngine !== null && l2.pickingEngine !== undefined, 'pickingEngine should exist');
+    assert(l2.renderGraph !== null && l2.renderGraph !== undefined, 'renderGraph should exist');
+    assert(l2.frameGraphBuilder !== null && l2.frameGraphBuilder !== undefined, 'frameGraphBuilder should exist');
+
+    // 验证 ShaderAssembler 可通过 L2 上下文正常组装内置变体
+    const shader = l2.shaderAssembler.assemble({
+      projection: 'mercator',
+      geometry: 'polygon',
+      style: 'fill_solid',
+      features: [],
+    });
+    assert(shader.vertexCode.length > 0, 'assembled vertexCode via L2 should be non-empty');
+    assert(shader.fragmentCode.length > 0, 'assembled fragmentCode via L2 should be non-empty');
+
+    // 验证 DepthManager 默认 Reversed-Z 配置
+    assert(l2.depthManager.depthCompare === 'greater', 'L2 depthManager should use reversed-z');
+
+    // 清理集成测试的 L2 + L1 资源
+    l2.pipelineCache.clear();
+    l1.surface.destroy();
+    l1.bufferPool.destroyAll();
+    l1.textureManager.destroyAll();
+    l1.bindGroupCache.clear();
+    l1.deviceManager.destroy();
+  });
+
+  // 清理 L2 测试专用的 DeviceManager
+  dm.destroy();
+}
+
+// ============================================================
 // 渲染测试结果到 DOM
 // ============================================================
 
@@ -1085,7 +1434,7 @@ function renderResults(): void {
     <div class="stat"><div class="value" style="color:#3fb950">${totalPass}</div><div class="label">Passed</div></div>
     <div class="stat"><div class="value" style="color:${totalFail > 0 ? '#f85149' : '#3fb950'}">${totalFail}</div><div class="label">Failed</div></div>
     <div class="stat"><div class="value">${allTests.length}</div><div class="label">Modules</div></div>
-    <div class="stat"><div class="value">37</div><div class="label">Total Files</div></div>
+    <div class="stat"><div class="value">51</div><div class="label">Total Files</div></div>
     <div class="stat"><div class="value">0</div><div class="label">Dependencies</div></div>
   `;
 }
@@ -1366,6 +1715,12 @@ async function main(): Promise<void> {
   await runL1Tests(canvas);
 
   // 重新渲染结果（包含 L1 测试）
+  renderResults();
+
+  // L2 测试需要 WebGPU，异步执行
+  await runL2Tests(canvas);
+
+  // 重新渲染结果（包含 L2 测试）
   renderResults();
 
   // 启动 WebGPU 渲染演示
