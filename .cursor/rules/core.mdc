@@ -80,6 +80,27 @@ L0 基础层  math/ geo/ algorithm/ index/ precision/ types/ infra/
 ```
 依赖：L6→L5→L4→L3→L2→L1→L0，禁止反向或跨层。
 
+## 目录结构
+```
+packages/
+├── core/src/              L0 — math/ geo/ algorithm/ index/ precision/ types/ infra/
+├── gpu/src/               L1+L2 — l1/(device/surface/buffer-pool/texture-manager/memory-tracker/bind-group-cache/indirect-draw/uploader) + l2/(shader-assembler/pipeline-cache/depth-manager/render-graph/frame-graph-builder/compositor/picking-engine/stencil-manager/render-stats/compute-pass-manager/blend-presets/uniform-layout-builder/wgsl-templates) + wgsl/(templates/projection/geometry/style/feature/compute)
+├── runtime/src/           L3 — frame-scheduler/tile-scheduler/worker-pool/worker-entry/resource-manager/memory-budget/request-scheduler/error-recovery/camera-controller
+├── scene/src/             L4 — scene-graph/layer-manager/source-manager/style-engine/label-manager/glyph-manager/feature-state/antimeridian/animation/spatial-query/a11y
+├── extensions/src/        L5 — registry/lifecycle/custom-layer/custom-projection/custom-source/shader-hook/custom-postprocess/custom-interaction/interaction-manager
+├── preset-2d/25d/3d/full/ L6 — Map2D/Map25D/Globe3D/MapFull + controls/
+├── camera-2d/25d/3d/      相机实现
+├── view-morph/            视图过渡
+├── layer-tile-raster/vector/ layer-geojson/ layer-terrain/ layer-3dtiles/ layer-heatmap/ layer-pointcloud/ layer-marker/ layer-extrusion/
+├── globe/src/             GlobeRenderer + atmosphere + skybox + sun
+├── interaction-draw/measure/select/
+├── postprocess-bloom/ssao/shadow/
+├── source-wmts/wms/wfs/pmtiles/
+├── compat-mobile/hidpi/
+└── analysis/src/          boolean/ buffer/ interpolation/ classification/ grid/ raster/ transform/ aggregation/ topology/
+```
+完整目录树见 `docs/architecture/GeoForge_Directory_Structure.md`（@GeoForge_Directory_Structure.md）
+
 ## 14 条硬约束
 1. **先查架构再写代码**——确认模块在七层中的位置
 2. **类型从 L0 import**——Feature/CameraState/PickResult/Viewport/BBox2D/TileCoord/StyleExpression 禁止重定义
