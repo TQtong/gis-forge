@@ -1,0 +1,80 @@
+---
+description: 共享类型定义规范（Feature/CameraState/PickResult/Viewport/Tile/StyleSpec）。编辑 types 目录或引用这些类型时应用。
+globs:
+  - "packages/core/src/types/**"
+alwaysApply: false
+---
+
+> **提醒**：所有代码必须完整实现 + 逐行注释 + 完整类型注释 + 完整错误处理。禁止省略、骨架、TODO。详见 core.mdc。
+# 共享类型规范
+
+所有全局共享类型**只在 `@geoforge/core/types/` 定义一次**，其他包统一 import。
+
+## types/viewport.ts
+```typescript
+export interface Viewport {
+  readonly width: number; readonly height: number;        // CSS 像素
+  readonly physicalWidth: number; readonly physicalHeight: number; // 物理像素
+  readonly pixelRatio: number;
+}
+
+export interface CameraState {
+  readonly center: [number, number];    // [lon, lat] 度
+  readonly zoom: number;
+  readonly bearing: number;             // 弧度 0=正北（禁止 heading）
+  readonly pitch: number;               // 弧度 0=正俯视
+  readonly roll: number;                // 弧度
+  readonly viewMatrix: Mat4f;
+  readonly projectionMatrix: Mat4f;
+  readonly vpMatrix: Mat4f;
+  readonly inverseVPMatrix: Mat4f;
+  readonly position: Vec3f;
+  readonly altitude: number;            // 米
+  readonly fov: number;                 // 弧度
+}
+
+export interface PickResult {
+  readonly featureId: string | number | null;
+  readonly layerId: string;
+  readonly sourceId: string;
+  readonly coordinates: [number, number] | [number, number, number];
+  readonly screenPosition: [number, number];
+  readonly properties?: Record<string, any>;
+  readonly depth: number;               // 归一化 [0,1]
+  readonly worldPosition?: Vec3f;
+  readonly normal?: Vec3f;
+}
+```
+
+## types/feature.ts
+```typescript
+export interface Feature<G extends Geometry = Geometry, P = Record<string, any>> {
+  readonly type: 'Feature';
+  readonly id?: string | number;
+  readonly geometry: G;
+  readonly properties: P;
+  // 引擎运行时附加（非 GeoJSON 标准）
+  readonly _sourceId?: string;
+  readonly _layerId?: string;
+  readonly _tileCoord?: TileCoord;
+  readonly _state?: Record<string, any>;
+}
+```
+
+## types/geometry.ts
+RFC 7946 兼容：Point/MultiPoint/LineString/MultiLineString/Polygon/MultiPolygon/GeometryCollection
+
+## types/tile.ts
+```typescript
+export interface TileCoord { readonly x: number; readonly y: number; readonly z: number; }
+export interface TileParams { readonly x: number; readonly y: number; readonly z: number; readonly extent: BBox2D; readonly signal: AbortSignal; }
+export interface TileData<T = any> { readonly data: T; readonly extent: BBox2D; readonly transferables?: Transferable[]; readonly byteSize?: number; readonly expiresAt?: number; }
+export type TileState = 'empty' | 'loading' | 'loaded' | 'error' | 'cached';
+```
+
+## types/style-spec.ts
+StyleSpec（v8 兼容 MapLibre）/ SourceSpec / LayerStyleSpec / StyleExpression / FilterExpression / LightSpec
+
+## 禁止
+- L1~L6 中重新定义以上任何类型
+- 如需扩展用 `extends` 或 `&` 交叉类型

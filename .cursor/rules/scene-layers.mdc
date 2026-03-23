@@ -1,0 +1,84 @@
+---
+description: L4 场景层 + 图层包规范——Layer 接口、StyleEngine、LabelManager、核心图层包。编辑 scene 或 layer 包代码时应用。
+globs:
+  - "packages/scene/**"
+  - "packages/layer-*/**"
+  - "packages/globe/**"
+alwaysApply: false
+---
+
+> **提醒**：所有代码必须完整实现 + 逐行注释 + 完整类型注释 + 完整错误处理。禁止省略、骨架、TODO。详见 core.mdc。
+# 场景与图层规范
+
+## Layer 接口（L2 和 L4 统一使用此接口）
+```typescript
+interface Layer {
+  readonly id: string;
+  readonly type: string;
+  readonly source: string;
+  readonly projection: string;
+  visible: boolean; opacity: number; zIndex: number;
+  readonly isTransparent: boolean;
+  readonly renderOrder: number;
+  readonly isLoaded: boolean;
+
+  onAdd(context: LayerContext): void;
+  onRemove(): void;
+  onUpdate(deltaTime: number, camera: CameraState): void;
+  encode(encoder: GPURenderPassEncoder, camera: CameraState): void;
+  encodePicking?(encoder: GPURenderPassEncoder, camera: CameraState): void;
+  setPaintProperty(name: string, value: any): void;
+  setLayoutProperty(name: string, value: any): void;
+  getPaintProperty(name: string): any;
+  getLayoutProperty(name: string): any;
+  setData?(data: any): void;
+  getData?(): any;
+  queryFeatures?(bbox: BBox2D, filter?: FilterExpression): Feature[];
+  queryRenderedFeatures?(point: [number, number]): Feature[];
+  setFeatureState?(featureId: string, state: Record<string, any>): void;
+  getFeatureState?(featureId: string): Record<string, any> | undefined;
+}
+```
+
+## StyleEngine
+```typescript
+interface StyleEngine {
+  compile(expression: StyleExpression, outputType: 'f32' | 'vec4f'): CompiledStyle;
+  compileFilter(filter: FilterExpression): CompiledStyle;
+  evaluate(expression: StyleExpression, feature: Feature, zoom: number): any;
+}
+interface CompiledStyle {
+  wgslCode: string;
+  uniformValues: Float32Array;
+  isConstant: boolean;
+  dependsOnZoom: boolean;
+  dependsOnFeature: boolean;
+  requiredAttributes: string[];
+}
+```
+
+### 数据驱动样式（#10.3）
+StyleExpression（来自 L0/types/style-spec）→ `StyleEngine.compile()` → 编译为 WGSL 函数代码。
+示例：`['interpolate', ['linear'], ['zoom'], 10, 'red', 15, 'blue']` 编译为 `fn computeColor() { mix(red, blue, clamp((zoom-10)/5, 0, 1)) }`。
+常量样式在编译时求值写入 Uniform；属性依赖样式在 GPU Shader 中实时求值。
+
+## 核心图层包
+- **RasterTileLayer**：瓦片→解码→GPU 纹理→接缝处理（clamp+texel 内缩+重叠 1px）→亮度/对比度/饱和度
+- **VectorTileLayer**：MVT→Worker(earcut+宽线条带)→GPU→SDF 抗锯齿。queryFeatures/queryRenderedFeatures
+- **GeoJSONLayer**：fetch→Worker(geojson-vt 切片+Supercluster 聚合)→按瓦片取切片→GPU。setData/getCluster*
+- **TerrainLayer**：DEM→Worker(三角网+法线+裙边)→GPU。LOD 边缘约束+Morphing 过渡。getElevation/setExaggeration
+- **GlobeRenderer**：椭球体→大气(Rayleigh+Mie+LUT)→星空→阴影(CSM+PCF)。setSunPosition/setSunFromDateTime
+
+## LabelManager
+- 两阶段碰撞：CPU R-Tree 粗筛 → GPU Compute 精筛
+- 支持 point/line/line-center 放置模式
+- 跨数据源碰撞（crossSourceCollisions）
+- 淡入淡出动画
+
+## GlyphManager
+- MSDF 字体渲染
+- Unicode Block 按需加载
+- 文字 Shaping 在 Worker 中执行
+
+## Worker 16 种任务
+mvt-decode / raster-decode / geojson-parse / triangulate / simplify / rtree-build / rtree-query / label-collision / text-shaping / split-double / terrain-mesh / tiles3d-bvh / antimeridian-cut / cluster / boolean-op / custom

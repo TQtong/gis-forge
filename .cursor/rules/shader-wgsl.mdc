@@ -1,0 +1,124 @@
+---
+description: WGSL Shader 编写规范——模块化签名、Hook 点、Uniform 对齐、BindGroup 分配、模板骨架。编辑 .wgsl 文件或 ShaderAssembler 相关代码时应用。
+globs:
+  - "**/*.wgsl"
+  - "**/shader*/**"
+  - "**/wgsl*/**"
+alwaysApply: false
+---
+
+> **提醒**：所有代码必须完整实现 + 逐行注释 + 完整类型注释 + 完整错误处理。禁止省略、骨架、TODO。详见 core.mdc。
+# WGSL Shader 规范
+
+## 模块化
+禁止写单体 Shader。拆为投影/几何/样式三种模块，通过 ShaderAssembler 拼装。
+
+### 三个标准签名
+```wgsl
+fn projectPosition(worldPos: vec3<f32>) -> vec4<f32>;   // 投影模块
+fn processVertex(input: VertexInput) -> VertexOutput;    // 几何模块
+fn computeColor(input: FragmentInput) -> vec4<f32>;      // 样式模块
+```
+
+## 9 个 Hook 插入点
+```
+Vertex:   vertex_position_before_projection
+          vertex_position_after_projection
+          vertex_output_custom
+Fragment: fragment_color_before_style
+          fragment_color_after_style
+          fragment_discard
+          fragment_alpha
+Compute:  compute_visibility
+          compute_sort_key
+```
+
+## BindGroup 分配
+```
+@group(0) — perFrame（相机/视口/时间，每帧 1 次）
+@group(1) — perLayer（样式/投影参数，切换图层时）
+@group(2) — perObject（位置/颜色，每 draw call）
+@group(3) — 纹理/采样器/用户自定义
+```
+
+## Uniform 对齐（必须遵守）
+- `f32`/`i32`/`u32` → 4 字节
+- `vec2<f32>` → 8 字节
+- `vec3<f32>` → **16 字节**（不是 12！）
+- `vec4<f32>` → 16 字节
+- `mat3x3<f32>` → 48 字节（3×vec4 对齐）
+- `mat4x4<f32>` → 64 字节
+- struct 总大小 = 最大对齐值的倍数
+
+## 顶点着色器模板
+```wgsl
+struct PerFrameUniforms {
+  viewMatrix: mat4x4<f32>,
+  projectionMatrix: mat4x4<f32>,
+  vpMatrix: mat4x4<f32>,
+  cameraPosition: vec3<f32>,
+  viewport: vec2<f32>,
+  time: f32, zoom: f32,
+};
+@group(0) @binding(0) var<uniform> frame: PerFrameUniforms;
+
+// {{PROJECTION_MODULE}}
+// {{GEOMETRY_MODULE}}
+// {{FEATURE_MODULES}}
+
+struct VertexInput {
+  @location(0) position: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) color: vec4<f32>,
+};
+struct VertexOutput {
+  @builtin(position) clipPosition: vec4<f32>,
+  @location(0) worldPosition: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) color: vec4<f32>,
+};
+
+@vertex fn vs_main(input: VertexInput) -> VertexOutput {
+  var output: VertexOutput;
+  var worldPos = input.position;
+  // HOOK: vertex_position_before_projection
+  output.clipPosition = projectPosition(worldPos);
+  // HOOK: vertex_position_after_projection
+  output = processVertex(input);
+  // HOOK: vertex_output_custom
+  return output;
+}
+```
+
+## 片元着色器模板
+```wgsl
+@fragment fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
+  // HOOK: fragment_color_before_style
+  var color = computeColor(input);
+  // HOOK: fragment_color_after_style
+  // HOOK: fragment_alpha
+  // HOOK: fragment_discard
+  return color;
+}
+```
+
+## 内置模块
+```wgsl
+// mercator 投影
+fn projectPosition(worldPos: vec3<f32>) -> vec4<f32> {
+  return frame.vpMatrix * vec4<f32>(worldPos, 1.0);
+}
+
+// Split-Double 重建
+fn reconstructDoublePrecision(high: vec3<f32>, low: vec3<f32>,
+  centerHigh: vec3<f32>, centerLow: vec3<f32>) -> vec3<f32> {
+  return (high - centerHigh) + (low - centerLow);
+}
+
+// SDF 线抗锯齿
+fn sdfLineAlpha(dist: f32, lineWidth: f32, antialias: f32) -> f32 {
+  return 1.0 - smoothstep(lineWidth * 0.5 - antialias, lineWidth * 0.5, abs(dist));
+}
+```

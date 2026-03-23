@@ -1,0 +1,95 @@
+---
+description: L5 扩展层规范——EP1~EP6 接口、Context 注入、错误隔离。编辑 extensions 包或扩展实现代码时应用。
+globs:
+  - "packages/extensions/**"
+  - "packages/interaction-*/**"
+  - "packages/postprocess-*/**"
+  - "packages/source-*/**"
+alwaysApply: false
+---
+
+> **提醒**：所有代码必须完整实现 + 逐行注释 + 完整类型注释 + 完整错误处理。禁止省略、骨架、TODO。详见 core.mdc。
+# 扩展层规范
+
+## 6 个扩展点
+
+| EP | 接口 | 注册 |
+|----|------|------|
+| EP1 | CustomLayer | `registerLayer(id, factory)` |
+| EP2 | ProjectionModule | `registerProjection(id, module)` |
+| EP3 | DataSource | `registerSource(id, factory)` |
+| EP4 | ShaderHookDefinition | `registerShaderHook(id, hook)` |
+| EP5 | PostProcessPass | `registerPostProcess(id, factory)` |
+| EP6 | InteractionTool | `registerInteraction(id, factory)` |
+
+注意：所有 register 方法签名统一为 `(id, factory/module/hook, meta?)`。
+
+## 核心原则
+- **Context 注入**：扩展通过 Context 对象获取引擎服务，**禁止** import 内部模块
+- **错误隔离**：`ExtensionLifecycle.safeExecute()` 包裹所有扩展回调
+- **连续 5 次出错自动禁用**（可手动 reenable）
+- **接口即契约**：stable 后不 breaking change
+
+## CustomLayerContext（EP1 注入）
+```typescript
+interface CustomLayerContext {
+  device: GPUDevice;
+  format: GPUTextureFormat;
+  depthFormat: GPUTextureFormat;
+  sampleCount: 1 | 4;
+  bufferPool: BufferPool;
+  textureManager: TextureManager;
+  uploader: GPUUploader;
+  bindGroupCache: BindGroupCache;
+  shaderAssembler: ShaderAssembler;
+  pipelineCache: PipelineCache;
+  depthManager: DepthManager;
+  blendPresets: BlendPresets;
+  precision: PrecisionManager;
+  camera: Readonly<CameraState>;
+  viewport: Readonly<Viewport>;
+  pixelRatio: number;
+  frameIndex: number;
+  elapsedTime: number;
+}
+```
+
+## ShaderHookDefinition（EP4）
+```typescript
+interface ShaderHookDefinition {
+  hookPoint: ShaderHookPoint;  // 9 个标准位置
+  wgslCode: string;
+  priority?: number;           // 越大越先执行
+  dependencies?: string[];
+  extraUniforms?: Array<{ name: string; type: string }>;
+  extraVaryings?: Array<{ name: string; type: string }>;
+  enableCondition?: () => boolean;
+}
+```
+
+## PostProcessPass（EP5）
+```typescript
+interface PostProcessPass {
+  setup(context: PostProcessContext): void;
+  destroy(): void;
+  onResize(width: number, height: number): void;
+  execute(encoder: GPUCommandEncoder, inputColor: GPUTextureView, inputDepth: GPUTextureView, outputColor: GPUTextureView): void;
+  // 注意：签名是 GPUCommandEncoder，Pass 内部自建 RenderPassEncoder
+  setUniform(name: string, value: number | number[]): void;
+  setEnabled(enabled: boolean): void;
+}
+```
+
+## InteractionTool（EP6）
+- 事件消费链：activeTool → defaultTools → map default
+- 返回 `true` = 已消费，阻止冒泡
+- `renderOverlay()` 绘制辅助图形
+- OverlayRenderer：drawLine/drawPolygon/drawCircle/drawMarker/drawText/update/remove
+
+## OGC 协议数据源（EP3 实现）
+通过 EP3 DataSource 扩展点实现 OGC 标准协议：
+- `source-wmts`：WMTS 瓦片服务（GetTile）
+- `source-wms`：WMS 影像服务（GetMap）
+- `source-wfs`：WFS 矢量要素服务（GetFeature）
+- `source-pmtiles`：PMTiles 单文件瓦片（HTTP Range Request）
+- 每个 DataSource 通过 `SourceContext`（requestScheduler/workerPool/resourceManager）获取引擎服务
