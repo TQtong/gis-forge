@@ -5,6 +5,23 @@
 
 export { EventEmitter } from './event.ts';
 
+export {
+  createInternalBus,
+  type InternalBus,
+  type InternalEventMap,
+} from './internal-bus.ts';
+
+export {
+  GeoForgeError,
+  GeoForgeErrorCode,
+  DEVELOPER_HINTS,
+  formatErrorWithHint,
+  type DeveloperHint,
+  type GeoForgeErrorCodeType,
+} from './errors.ts';
+
+export { createObjectPool, type ObjectPool } from './object-pool.ts';
+
 export { uniqueId, sequentialId, nanoid } from './id.ts';
 
 export {

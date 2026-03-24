@@ -92,6 +92,20 @@ export { computeRTCCenter, offsetPositions, fromECEF } from './precision/rtc.ts'
 
 // --- 基础设施 ---
 export { EventEmitter } from './infra/event.ts';
+export {
+  createInternalBus,
+  type InternalBus,
+  type InternalEventMap,
+} from './infra/internal-bus.ts';
+export {
+  GeoForgeError,
+  GeoForgeErrorCode,
+  DEVELOPER_HINTS,
+  formatErrorWithHint,
+  type DeveloperHint,
+  type GeoForgeErrorCodeType,
+} from './infra/errors.ts';
+export { createObjectPool, type ObjectPool } from './infra/object-pool.ts';
 export { uniqueId, sequentialId, nanoid } from './infra/id.ts';
 export { Logger, createLogger, setLogLevel, getLogLevel } from './infra/logger.ts';
 export { createDefaultConfig, mergeConfig } from './infra/config.ts';
