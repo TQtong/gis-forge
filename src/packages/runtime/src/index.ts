@@ -25,11 +25,20 @@ export { createWorkerPool } from './worker-pool.ts';
 export type { ResourceType, ResourceState, Resource, ResourceManager } from './resource-manager.ts';
 export { createResourceManager } from './resource-manager.ts';
 
-export type { MemoryBudgetConfig, MemorySnapshot, EvictionResult, MemoryBudget } from './memory-budget.ts';
+export type {
+  MemoryBudgetConfig,
+  MemorySnapshot,
+  EvictionResult,
+  MemoryBudget,
+  MemoryBudgetCheckOptions,
+  CameraHistoryEntry,
+  CameraDirectionEstimate,
+  PredictiveEvictionStats,
+} from './memory-budget.ts';
 export { createMemoryBudget } from './memory-budget.ts';
 
 export type { TileState, TilePriority, TileSchedulerConfig, TileSourceOptions, TileScheduleResult, TileScheduler } from './tile-scheduler.ts';
-export { createTileScheduler } from './tile-scheduler.ts';
+export { createTileScheduler, computeTilePriority } from './tile-scheduler.ts';
 
 export type { FramePhase, FrameCallback, FrameScheduler } from './frame-scheduler.ts';
 export { createFrameScheduler } from './frame-scheduler.ts';

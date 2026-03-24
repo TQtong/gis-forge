@@ -6,6 +6,9 @@
 import type { CameraState, Viewport, BBox2D } from '../../core/src/types/index.ts';
 import type { TileCoord } from '../../core/src/types/tile.ts';
 
+/** 开发构建标记；生产构建由打包器剔除调试分支。 */
+declare const __DEV__: boolean | undefined;
+
 /** 瓦片生命周期/缓存状态（调度器视角）。 */
 export type TileState = 'empty' | 'loading' | 'loaded' | 'error' | 'cached';
 
@@ -21,6 +24,12 @@ const DEFAULT_OVERZOOM_LEVELS = 2;
 const DEFAULT_PREFETCH_ZOOM_DELTA = 1;
 /** 默认 pitch 惩罚：pitch 越大，SSE 等效越高（远处瓦片更倾向不加载）。 */
 const DEFAULT_PITCH_PRIORITY_REDUCTION = 0.35;
+/** 默认 SSE 分项权重（与 visibility/cache 组成多因子优先级）。 */
+const DEFAULT_PRIORITY_WEIGHT_SSE = 0.5;
+/** 默认视锥/严格可见性分项权重（2D MVP：内层可见窗口视为视锥代理）。 */
+const DEFAULT_PRIORITY_WEIGHT_VISIBILITY = 0.3;
+/** 默认缓存命中分项权重。 */
+const DEFAULT_PRIORITY_WEIGHT_CACHE = 0.2;
 /** 最小合法瓦片像素边长（避免除零）。 */
 const MIN_TILE_SIZE_PX = 1;
 /** 经纬度合法范围钳制，避免 asinh 域错误。 */
@@ -44,6 +53,11 @@ export interface TilePriority {
    * MVP：由 zoom 与瓦片层级差、pitch、以及距离共同构成的标量；越小越“够清晰”。
    */
   readonly screenSpaceError: number;
+  /**
+   * 多因子综合优先级分数（越大越应优先加载）。
+   * 由 `computeTilePriority` 根据 SSE / 可见性 / 缓存 加权得到。
+   */
+  readonly priorityScore: number;
   /** 当前是否判定为屏幕相关（可见或强预取）。 */
   readonly isVisible: boolean;
   /** 是否被策略判定为“需要持有/加载”的瓦片（可见 + 预取）。 */
@@ -66,6 +80,23 @@ export interface TileSchedulerConfig {
   readonly prefetchZoomDelta: number;
   /** pitch 惩罚强度：越大越降低高 pitch 区域的加载积极性 */
   readonly pitchPriorityReduction: number;
+  /**
+   * SSE 归一化上界（与 `screenSpaceErrorThreshold` 解耦时可单独调）。
+   * 用于 `sse / maxSSE` 计算 SSE 分项；默认与阈值一致。
+   */
+  readonly maxSSE: number;
+  /**
+   * 多因子优先级权重（SSE / 视锥可见 / 缓存），默认 0.5 / 0.3 / 0.2。
+   * 三者不必和为 1；最终得分为加权和。
+   */
+  readonly priorityWeights: {
+    /** SSE 分项权重（higher SSE → higher normalized score） */
+    readonly sse: number;
+    /** 与视锥（2D：严格可见窗口）相交的权重 */
+    readonly visibility: number;
+    /** 已缓存（loaded/cached）分项权重 */
+    readonly cache: number;
+  };
 }
 
 /**
@@ -88,7 +119,7 @@ export interface TileSourceOptions {
  * `update()` 输出：加载队列、卸载队列、可见集、占位映射。
  */
 export interface TileScheduleResult {
-  /** 需要加载的候选（按优先级排序：distance 升序） */
+  /** 需要加载的候选（按多因子优先级分数降序） */
   readonly toLoad: TilePriority[];
   /** 建议卸载的瓦片坐标（LRU/超缓存） */
   readonly toUnload: TileCoord[];
@@ -207,6 +238,8 @@ export interface TileScheduler {
     readonly totalLoaded: number;
     /** 历史累计加载失败次数 */
     readonly totalErrors: number;
+    /** 本帧候选池的平均综合优先级分数（无候选时为 0） */
+    readonly avgTilePriority: number;
   };
 }
 
@@ -444,6 +477,50 @@ function measurePriority(
 }
 
 /**
+ * 计算瓦片的多因子综合优先级（越大越应优先加载）。
+ * SSE 项为 `sse / maxSSE`（钳制到 [0,1]）再乘 `priorityWeights.sse`；
+ * 可见性：与视锥相交为 1 否则 0，乘 `priorityWeights.visibility`；
+ * 缓存：已 resident（loaded/cached）为 1 否则 0，乘 `priorityWeights.cache`。
+ *
+ * @param tile - 瓦片坐标（保留用于未来扩展）
+ * @param camera - 相机状态（保留用于未来真视锥测试；2D MVP 由调用方传入 metrics）
+ * @param config - 含 `maxSSE` 与 `priorityWeights`
+ * @param metrics - 当前瓦片的 SSE、与视锥相交、是否已缓存
+ * @returns 加权和
+ */
+export function computeTilePriority(
+  tile: TileCoord,
+  camera: CameraState,
+  config: TileSchedulerConfig,
+  metrics: {
+    /** 屏幕空间误差代理量（与 measurePriority 一致） */
+    readonly sse: number;
+    /** 与相机视锥相交；2D MVP 使用严格可见窗口 */
+    readonly intersectsFrustum: boolean;
+    /** 已为 loaded 或 cached */
+    readonly inCache: boolean;
+  },
+): number {
+  try {
+    void tile;
+    void camera;
+    const w = config.priorityWeights;
+    const maxS = Math.max(EPS, finiteNumber(config.maxSSE, DEFAULT_SCREEN_SPACE_ERROR_THRESHOLD));
+    const sseRaw = finiteNumber(metrics.sse, 0);
+    const sseNorm = Math.min(1, Math.max(0, sseRaw / maxS));
+    const sseScore = sseNorm * w.sse;
+    const visibilityScore = (metrics.intersectsFrustum ? 1 : 0) * w.visibility;
+    const cacheScore = (metrics.inCache ? 1 : 0) * w.cache;
+    return sseScore + visibilityScore + cacheScore;
+  } catch (err) {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      console.warn('[TileScheduler] computeTilePriority failed', err);
+    }
+    return 0;
+  }
+}
+
+/**
  * 生成瓦片 key（不含 sourceId，用于单表内索引）。
  *
  * @param c - 瓦片坐标
@@ -467,6 +544,7 @@ function tileKey(c: TileCoord): string {
  */
 function mergeTileSchedulerConfig(partial?: Partial<TileSchedulerConfig>): TileSchedulerConfig {
   const p = partial ?? {};
+  const pw: Partial<TileSchedulerConfig['priorityWeights']> = p.priorityWeights ?? {};
   return {
     maxConcurrentLoads: Math.max(1, Math.floor(finiteNumber(p.maxConcurrentLoads ?? DEFAULT_MAX_CONCURRENT_LOADS, DEFAULT_MAX_CONCURRENT_LOADS))),
     maxCacheSize: Math.max(1, Math.floor(finiteNumber(p.maxCacheSize ?? DEFAULT_MAX_CACHE_SIZE, DEFAULT_MAX_CACHE_SIZE))),
@@ -477,6 +555,18 @@ function mergeTileSchedulerConfig(partial?: Partial<TileSchedulerConfig>): TileS
     overzoomLevels: Math.max(0, Math.floor(finiteNumber(p.overzoomLevels ?? DEFAULT_OVERZOOM_LEVELS, DEFAULT_OVERZOOM_LEVELS))),
     prefetchZoomDelta: Math.max(0, Math.floor(finiteNumber(p.prefetchZoomDelta ?? DEFAULT_PREFETCH_ZOOM_DELTA, DEFAULT_PREFETCH_ZOOM_DELTA))),
     pitchPriorityReduction: Math.max(0, finiteNumber(p.pitchPriorityReduction ?? DEFAULT_PITCH_PRIORITY_REDUCTION, DEFAULT_PITCH_PRIORITY_REDUCTION)),
+    maxSSE: Math.max(
+      EPS,
+      finiteNumber(
+        p.maxSSE ?? p.screenSpaceErrorThreshold ?? DEFAULT_SCREEN_SPACE_ERROR_THRESHOLD,
+        DEFAULT_SCREEN_SPACE_ERROR_THRESHOLD,
+      ),
+    ),
+    priorityWeights: {
+      sse: Math.max(0, finiteNumber(pw.sse ?? DEFAULT_PRIORITY_WEIGHT_SSE, DEFAULT_PRIORITY_WEIGHT_SSE)),
+      visibility: Math.max(0, finiteNumber(pw.visibility ?? DEFAULT_PRIORITY_WEIGHT_VISIBILITY, DEFAULT_PRIORITY_WEIGHT_VISIBILITY)),
+      cache: Math.max(0, finiteNumber(pw.cache ?? DEFAULT_PRIORITY_WEIGHT_CACHE, DEFAULT_PRIORITY_WEIGHT_CACHE)),
+    },
   };
 }
 
@@ -607,13 +697,20 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
    */
   type CandidateRow = { readonly sourceId: string; readonly priority: TilePriority };
 
+  /** 最近一帧候选池的平均综合优先级（无候选时为 0） */
+  let lastAvgTilePriority = 0;
+
   const scheduler: TileScheduler = {
     get config(): TileSchedulerConfig {
       return cfg;
     },
 
     updateConfig(partial: Partial<TileSchedulerConfig>): void {
-      cfg = mergeTileSchedulerConfig({ ...cfg, ...partial });
+      const mergedPartial =
+        partial.priorityWeights !== undefined
+          ? { ...partial, priorityWeights: { ...cfg.priorityWeights, ...partial.priorityWeights } }
+          : partial;
+      cfg = mergeTileSchedulerConfig({ ...cfg, ...mergedPartial });
     },
 
     get stats() {
@@ -623,6 +720,7 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
         cachedCount: lastCachedCount,
         totalLoaded,
         totalErrors,
+        avgTilePriority: lastAvgTilePriority,
       };
     },
 
@@ -774,12 +872,18 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
             }
 
             if (rec.state === 'empty' || rec.state === 'error') {
+              const priorityScore = computeTilePriority(coord, camera, cfg, {
+                sse: m.screenSpaceError,
+                intersectsFrustum: isVisible,
+                inCache: false,
+              });
               candidates.push({
                 sourceId,
                 priority: {
                   coord,
                   distance: m.distance,
                   screenSpaceError: m.screenSpaceError,
+                  priorityScore,
                   isVisible,
                   isNeeded,
                 },
@@ -791,8 +895,19 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
         lastVisibleBySource.set(sourceId, visibleForSource);
       }
 
-      // 并发加载限制：按 distance 全局排序后截取，并在对应 source 表内标记 loading
+      let sumTilePriority = 0;
+      for (const row of candidates) {
+        sumTilePriority += row.priority.priorityScore;
+      }
+      lastAvgTilePriority = candidates.length > 0 ? sumTilePriority / candidates.length : 0;
+
+      // 并发加载限制：按多因子优先级降序，再按距离与坐标稳定排序
       candidates.sort((a, b) => {
+        const ap = a.priority.priorityScore;
+        const bp = b.priority.priorityScore;
+        if (bp !== ap) {
+          return bp - ap;
+        }
         if (a.priority.distance !== b.priority.distance) {
           return a.priority.distance - b.priority.distance;
         }
