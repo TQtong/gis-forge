@@ -93,6 +93,12 @@ export interface WorkerPoolConfig {
    * 超时后 Promise reject，并计为 failed。
    */
   readonly taskTimeout: number;
+
+  /**
+   * 是否启用任务类型与 Worker 槽位的亲和路由（O4）。
+   * 默认 `true`；为 `false` 时退化为按负载最少分配。
+   */
+  readonly enableTaskAffinity?: boolean;
 }
 
 /**
@@ -176,6 +182,12 @@ export interface WorkerPool {
     readonly failedTasks: number;
     /** 已完成任务的平均耗时（毫秒）；无完成记录时为 0 */
     readonly averageTaskTimeMs: number;
+
+    /** 亲和路由命中次数：成功路由到偏好槽位（累计） */
+    readonly affinityHitCount: number;
+
+    /** 亲和路由未命中次数：存在偏好但因过载等原因改用其它槽位（累计） */
+    readonly affinityMissCount: number;
   };
 
   /**
@@ -194,6 +206,12 @@ const MIN_WORKER_SLOTS = 1;
 
 /** 并发槽位上限，避免在超大机器上创建过多并发任务 */
 const MAX_WORKER_SLOTS = 32;
+
+/** 连续同类型任务在同槽位完成达到该次数后锁定亲和（O4） */
+const AFFINITY_LOCK_STREAK = 5;
+
+/** 过载判定：偏好槽位等待队列长度超过平均队列长度的该倍数时退避 */
+const AFFINITY_OVERLOAD_QUEUE_FACTOR = 3;
 
 /** 单调递增序列，用于同优先级 FIFO */
 let globalSequence = 0;
@@ -242,6 +260,12 @@ interface InternalTaskNode {
 
   /** 是否已从队列移出并开始执行逻辑 */
   started: boolean;
+
+  /**
+   * 该任务绑定的 Worker 槽位索引 `[0, workerCount)`；
+   * 在 `schedule` 出队时写入，用于亲和统计与完成回调。
+   */
+  assignedWorkerIndex?: number;
 }
 
 // ===================== 工具函数 =====================
@@ -373,8 +397,19 @@ export function createWorkerPool(): WorkerPool {
   /** 配置副本 */
   let config: WorkerPoolConfig | undefined;
 
-  /** 等待队列 */
-  const pendingQueue: InternalTaskNode[] = [];
+  /** 是否启用任务类型亲和（默认 true，由 initialize 写入） */
+  let enableTaskAffinity = true;
+
+  /**
+   * 任务类型 → 偏好 Worker 槽位索引（O4 亲和表；连续同槽完成 5 次同类型任务后锁定）。
+   */
+  const _workerAffinityMap = new Map<string, number>();
+
+  /** 各槽位上的等待队列（优先级队列，与原先全局队列语义一致，仅按亲和分片） */
+  let pendingQueues: InternalTaskNode[][] = [];
+
+  /** 各槽位当前是否正在执行任务（与 `runningById` 一致，便于 O(1) 定位槽位负载） */
+  let runningByWorker: Array<InternalTaskNode | undefined> = [];
 
   /** 等待队列索引 id -> node（用于 O(1) cancel / reprioritize） */
   const pendingById = new Map<string, InternalTaskNode>();
@@ -394,21 +429,171 @@ export function createWorkerPool(): WorkerPool {
   /** 完成耗时总和（用于均值） */
   let totalDurationMs = 0;
 
+  /** 亲和路由命中累计 */
+  let affinityHitCount = 0;
+
+  /** 亲和路由未命中累计 */
+  let affinityMissCount = 0;
+
   /**
-   * 调度下一批任务：在有空槽且队列非空时启动模拟执行。
+   * 任务类型 → 最近一次连续完成的槽位与连击数（用于锁定亲和）。
+   */
+  const affinityStreakByType = new Map<string, { readonly worker: number; streak: number }>();
+
+  /**
+   * 将 `pendingQueues` / `runningByWorker` 调整为当前 `slots` 长度（initialize 时调用）。
+   * 槽位减少时，溢出等待队列合并至最后一个槽位，避免任务丢失。
+   *
+   * @param newSlots - 新的并发槽位数
+   */
+  function ensureWorkerStructures(newSlots: number): void {
+    if (newSlots <= 0 || !Number.isFinite(newSlots)) {
+      return;
+    }
+    if (pendingQueues.length === newSlots && runningByWorker.length === newSlots) {
+      return;
+    }
+    const oldPending = pendingQueues;
+    const oldRunning = runningByWorker;
+    pendingQueues = [];
+    runningByWorker = [];
+    for (let i = 0; i < newSlots; i += 1) {
+      pendingQueues.push(oldPending[i] ?? []);
+      runningByWorker.push(oldRunning[i]);
+    }
+    if (oldPending.length > newSlots) {
+      const sink = pendingQueues[newSlots - 1];
+      if (sink) {
+        for (let j = newSlots; j < oldPending.length; j += 1) {
+          const overflow = oldPending[j];
+          if (!overflow) {
+            continue;
+          }
+          for (let k = 0; k < overflow.length; k += 1) {
+            insertByPriority(sink, overflow[k]!);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * 计算所有槽位等待队列长度的算术平均（用于过载判定）。
+   */
+  function averagePendingQueueLength(): number {
+    if (slots <= 0) {
+      return 0;
+    }
+    let sum = 0;
+    for (let i = 0; i < slots; i += 1) {
+      sum += pendingQueues[i]?.length ?? 0;
+    }
+    return sum / slots;
+  }
+
+  /**
+   * 选取负载最轻的槽位索引（等待数 + 是否运行中计 1）。
+   *
+   * @returns 槽位索引 `[0, slots)`
+   */
+  function pickLeastLoadedWorkerIndex(): number {
+    let best = 0;
+    let bestLoad = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < slots; i += 1) {
+      const q = pendingQueues[i]?.length ?? 0;
+      const run = runningByWorker[i] ? 1 : 0;
+      const load = q + run;
+      if (load < bestLoad) {
+        bestLoad = load;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * 为即将入队的任务选择槽位：亲和优先，过载时退避到最轻载槽位（O4）。
+   *
+   * @param taskType - 任务类型键（与 `WorkerTaskType` 字符串一致）
+   * @returns 槽位索引
+   */
+  function pickWorkerIndexForTask(taskType: string): number {
+    if (!enableTaskAffinity || slots <= 0) {
+      return pickLeastLoadedWorkerIndex();
+    }
+    const preferred = _workerAffinityMap.get(taskType);
+    if (
+      preferred === undefined ||
+      !Number.isFinite(preferred) ||
+      preferred < 0 ||
+      preferred >= slots
+    ) {
+      return pickLeastLoadedWorkerIndex();
+    }
+    const prefQueueLen = pendingQueues[preferred]?.length ?? 0;
+    const avg = averagePendingQueueLength();
+    const overloadThreshold = AFFINITY_OVERLOAD_QUEUE_FACTOR * avg;
+    // 平均为 0 时仅当偏好槽位已有积压才视为过载，避免除零与误伤
+    const isOverloaded =
+      avg > 0 ? prefQueueLen > overloadThreshold : prefQueueLen > 0 && slots > 1;
+    if (!isOverloaded) {
+      affinityHitCount += 1;
+      return preferred;
+    }
+    affinityMissCount += 1;
+    return pickLeastLoadedWorkerIndex();
+  }
+
+  /**
+   * 任务成功完成后更新连续同槽计数，达到阈值则锁定亲和。
+   *
+   * @param node - 已完成节点
+   */
+  function updateAffinityAfterSuccess(node: InternalTaskNode): void {
+    if (!enableTaskAffinity) {
+      return;
+    }
+    const w = node.assignedWorkerIndex;
+    if (w === undefined || !Number.isFinite(w) || w < 0 || w >= slots) {
+      return;
+    }
+    const typeKey = node.type;
+    const prev = affinityStreakByType.get(typeKey);
+    if (prev && prev.worker === w) {
+      const nextStreak = prev.streak + 1;
+      affinityStreakByType.set(typeKey, { worker: w, streak: nextStreak });
+      if (nextStreak >= AFFINITY_LOCK_STREAK) {
+        _workerAffinityMap.set(typeKey, w);
+      }
+    } else {
+      affinityStreakByType.set(typeKey, { worker: w, streak: 1 });
+    }
+  }
+
+  /**
+   * 调度下一批任务：每个空闲槽位从其等待队列取最高优先级任务并启动。
    */
   function schedule(): void {
     // 终止后不再调度，避免 terminate 后仍触发回调
     if (terminated) {
       return;
     }
-    while (runningCount < slots && pendingQueue.length > 0) {
-      const node = pendingQueue.shift();
+    for (let w = 0; w < slots; w += 1) {
+      if (runningByWorker[w]) {
+        continue;
+      }
+      const pq = pendingQueues[w];
+      if (!pq || pq.length === 0) {
+        continue;
+      }
+      const node = pq.shift();
       if (!node) {
-        break;
+        continue;
       }
       pendingById.delete(node.id);
       runningCount += 1;
+      runningByWorker[w] = node;
+      node.assignedWorkerIndex = w;
       runningById.set(node.id, node);
       node.started = true;
       startSimulatedRun(node);
@@ -450,8 +635,19 @@ export function createWorkerPool(): WorkerPool {
         unlinkUser();
         runningById.delete(node.id);
         runningCount -= 1;
+        const wDone = node.assignedWorkerIndex;
+        if (
+          wDone !== undefined &&
+          Number.isFinite(wDone) &&
+          wDone >= 0 &&
+          wDone < slots &&
+          runningByWorker[wDone] === node
+        ) {
+          runningByWorker[wDone] = undefined;
+        }
         completedTasks += 1;
         totalDurationMs += durationMs;
+        updateAffinityAfterSuccess(node);
         node.resolve({
           taskId: node.id,
           output,
@@ -496,6 +692,16 @@ export function createWorkerPool(): WorkerPool {
     if (runningById.has(node.id)) {
       runningById.delete(node.id);
       runningCount -= 1;
+      const wFail = node.assignedWorkerIndex;
+      if (
+        wFail !== undefined &&
+        Number.isFinite(wFail) &&
+        wFail >= 0 &&
+        wFail < slots &&
+        runningByWorker[wFail] === node
+      ) {
+        runningByWorker[wFail] = undefined;
+      }
     }
     failedTasks += 1;
     node.reject(error);
@@ -511,12 +717,30 @@ export function createWorkerPool(): WorkerPool {
   function rejectPending(node: InternalTaskNode, message: string): void {
     clearTimeoutIfAny(node);
     pendingById.delete(node.id);
-    const idx = pendingQueue.indexOf(node);
-    if (idx >= 0) {
-      pendingQueue.splice(idx, 1);
+    for (let w = 0; w < slots; w += 1) {
+      const pq = pendingQueues[w];
+      if (!pq) {
+        continue;
+      }
+      const idx = pq.indexOf(node);
+      if (idx >= 0) {
+        pq.splice(idx, 1);
+        break;
+      }
     }
     failedTasks += 1;
     node.reject(new DOMException(message, 'AbortError'));
+  }
+
+  /**
+   * 所有槽位等待队列长度之和。
+   */
+  function totalPendingCount(): number {
+    let n = 0;
+    for (let w = 0; w < slots; w += 1) {
+      n += pendingQueues[w]?.length ?? 0;
+    }
+    return n;
   }
 
   /** 前向引用：submitBatch 需要调用同实例的 submit */
@@ -536,6 +760,8 @@ export function createWorkerPool(): WorkerPool {
       }
       slots = resolveWorkerCount(initConfig.workerCount);
       config = initConfig;
+      enableTaskAffinity = initConfig.enableTaskAffinity !== false;
+      ensureWorkerStructures(slots);
       initialized = true;
       // 允许微任务链继续，保持 API 为 Promise
       await Promise.resolve();
@@ -562,7 +788,7 @@ export function createWorkerPool(): WorkerPool {
       if (pendingById.has(task.id) || runningById.has(task.id)) {
         return Promise.reject(new Error(`WorkerPool.submit: duplicate task id "${task.id}".`));
       }
-      if (config && pendingQueue.length >= config.maxQueueSize) {
+      if (config && totalPendingCount() >= config.maxQueueSize) {
         return Promise.reject(new Error('WorkerPool.submit: queue is full (maxQueueSize exceeded).'));
       }
       if (task.abortSignal?.aborted) {
@@ -586,7 +812,14 @@ export function createWorkerPool(): WorkerPool {
           started: false,
         };
         pendingById.set(task.id, node);
-        insertByPriority(pendingQueue, node);
+        const workerIndex = pickWorkerIndexForTask(task.type);
+        const pq = pendingQueues[workerIndex];
+        if (!pq) {
+          pendingById.delete(task.id);
+          reject(new Error('WorkerPool.submit: internal worker queue is uninitialized.'));
+          return;
+        }
+        insertByPriority(pq, node);
         schedule();
       });
     },
@@ -626,14 +859,19 @@ export function createWorkerPool(): WorkerPool {
 
     cancelByType(type: WorkerTaskType): number {
       let count = 0;
-      // 遍历副本：避免 splice 时迭代器失效
-      const snapshot = pendingQueue.slice();
-      for (let i = 0; i < snapshot.length; i += 1) {
-        const node = snapshot[i];
-        if (node.type === type) {
-          if (pendingById.has(node.id)) {
-            rejectPending(node, 'Worker task cancelled by type.');
-            count += 1;
+      for (let w = 0; w < slots; w += 1) {
+        const pq = pendingQueues[w];
+        if (!pq || pq.length === 0) {
+          continue;
+        }
+        const snapshot = pq.slice();
+        for (let i = 0; i < snapshot.length; i += 1) {
+          const node = snapshot[i];
+          if (node && node.type === type) {
+            if (pendingById.has(node.id)) {
+              rejectPending(node, 'Worker task cancelled by type.');
+              count += 1;
+            }
           }
         }
       }
@@ -660,15 +898,20 @@ export function createWorkerPool(): WorkerPool {
       if (!node) {
         return false;
       }
-      const idx = pendingQueue.indexOf(node);
-      if (idx < 0) {
-        return false;
+      for (let w = 0; w < slots; w += 1) {
+        const pq = pendingQueues[w];
+        if (!pq) {
+          continue;
+        }
+        const idx = pq.indexOf(node);
+        if (idx >= 0) {
+          pq.splice(idx, 1);
+          node.priority = newPriority;
+          insertByPriority(pq, node);
+          return true;
+        }
       }
-      // 先移除再按新优先级插入，保持全序
-      pendingQueue.splice(idx, 1);
-      node.priority = newPriority;
-      insertByPriority(pendingQueue, node);
-      return true;
+      return false;
     },
 
     get stats() {
@@ -678,11 +921,13 @@ export function createWorkerPool(): WorkerPool {
       return {
         activeWorkers,
         idleWorkers,
-        queuedTasks: pendingQueue.length,
+        queuedTasks: totalPendingCount(),
         runningTasks: runningCount,
         completedTasks,
         failedTasks,
         averageTaskTimeMs,
+        affinityHitCount,
+        affinityMissCount,
       };
     },
 
@@ -693,14 +938,25 @@ export function createWorkerPool(): WorkerPool {
       terminated = true;
       initialized = false;
 
-      // 清空等待队列
-      while (pendingQueue.length > 0) {
-        const node = pendingQueue.shift();
-        if (node) {
-          rejectPending(node, 'WorkerPool terminated.');
+      // 清空各槽位等待队列（已 shift 出队，不可再走 `rejectPending` 的按队列查找逻辑）
+      for (let w = 0; w < pendingQueues.length; w += 1) {
+        const pq = pendingQueues[w];
+        if (!pq) {
+          continue;
+        }
+        while (pq.length > 0) {
+          const node = pq.shift();
+          if (node) {
+            clearTimeoutIfAny(node);
+            pendingById.delete(node.id);
+            failedTasks += 1;
+            node.reject(new DOMException('WorkerPool terminated.', 'AbortError'));
+          }
         }
       }
       pendingById.clear();
+      _workerAffinityMap.clear();
+      affinityStreakByType.clear();
 
       // 取消运行中任务
       const running = Array.from(runningById.values());
