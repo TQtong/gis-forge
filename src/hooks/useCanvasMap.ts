@@ -8,6 +8,132 @@ import { useStatusStore } from '@/stores/statusStore';
  */
 const TILE_SIZE = 256;
 
+/** Mouse wheel: zoom change per pixel of deltaY (after LINE/PAGE normalization). */
+const WHEEL_ZOOM_RATE = 1 / 450;
+/** Trackpad: higher event rate → lower rate to avoid overshooting. */
+const TRACKPAD_ZOOM_RATE = 1 / 1200;
+/** Firefox DOM_DELTA_LINE → scale to pixel-like units. */
+const LINE_DELTA_MULTIPLIER = 40;
+/** DOM_DELTA_PAGE → scale to pixel-like units. */
+const PAGE_DELTA_MULTIPLIER = 300;
+/** Wheel / anchor zoom clamp (interactive canvas). */
+const INTERACTIVE_MIN_ZOOM = 1;
+const INTERACTIVE_MAX_ZOOM = 20;
+
+/** Time window (ms) for counting rapid wheel events (trackpad heuristic). */
+const TRACKPAD_DETECT_WINDOW_MS = 400;
+
+/** Last wheel timestamp and burst count for trackpad detection. */
+let lastWheelTimeMs = 0;
+let wheelBurstCount = 0;
+/** Hysteresis: once trackpad, short-term remember until window resets. */
+let lastTrackpadFlag = false;
+
+/**
+ * Returns true if |deltaY| is consistent with classic mouse wheel steps (multiples of 120).
+ *
+ * @param deltaY - Raw or normalized wheel deltaY.
+ */
+function isLikelyMouseWheelDelta(deltaY: number): boolean {
+    const a = Math.abs(deltaY);
+    if (a < 1e-6) return true;
+    const n = a / 120;
+    return Math.abs(n - Math.round(n)) < 1e-3;
+}
+
+/**
+ * Heuristic: trackpad if deltaY is not a multiple of 120, or many events in 400ms.
+ *
+ * @param event - Wheel event (uses deltaY and timing).
+ */
+function detectTrackpad(event: WheelEvent): boolean {
+    const now = performance.now();
+    if (now - lastWheelTimeMs > TRACKPAD_DETECT_WINDOW_MS) {
+        wheelBurstCount = 0;
+        lastTrackpadFlag = false;
+    }
+    wheelBurstCount += 1;
+    lastWheelTimeMs = now;
+
+    if (wheelBurstCount > 3) {
+        lastTrackpadFlag = true;
+        return true;
+    }
+    if (!isLikelyMouseWheelDelta(event.deltaY)) {
+        lastTrackpadFlag = true;
+        return true;
+    }
+    return lastTrackpadFlag;
+}
+
+/**
+ * Normalizes wheel deltaY to pixel-like units (DOM_DELTA_PIXEL unchanged).
+ *
+ * @param event - Wheel event.
+ */
+function normalizeWheelDeltaY(event: WheelEvent): number {
+    let deltaY = event.deltaY;
+    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+        deltaY *= LINE_DELTA_MULTIPLIER;
+    } else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+        deltaY *= PAGE_DELTA_MULTIPLIER;
+    }
+    return deltaY;
+}
+
+/**
+ * Clamps longitude to [-180, 180] using the same wrap as map utilities.
+ *
+ * @param lng - Degrees longitude.
+ */
+function wrapLng(lng: number): number {
+    if (!Number.isFinite(lng)) return 0;
+    return ((lng + 540) % 360) - 180;
+}
+
+/**
+ * Clamps latitude to Web Mercator–friendly bounds.
+ *
+ * @param lat - Degrees latitude.
+ */
+function clampLatInteractive(lat: number): number {
+    if (!Number.isFinite(lat)) return 0;
+    return Math.max(-85, Math.min(85, lat));
+}
+
+/**
+ * Converts CSS pixel position on the canvas to tile coordinates at floor(zoom),
+ * matching the renderer and pan logic (fractional zoom via tile width scale).
+ *
+ * @param cssX - X relative to canvas left (CSS px).
+ * @param cssY - Y relative to canvas top (CSS px).
+ * @param canvasWidth - Canvas width (CSS px).
+ * @param canvasHeight - Canvas height (CSS px).
+ * @param centerLng - Current center longitude.
+ * @param centerLat - Current center latitude.
+ * @param zoom - Current zoom (fractional).
+ */
+function cssPixelToTileCoords(
+    cssX: number,
+    cssY: number,
+    canvasWidth: number,
+    canvasHeight: number,
+    centerLng: number,
+    centerLat: number,
+    zoom: number
+): { tileX: number; tileY: number; zInt: number } {
+    const zInt = Math.floor(zoom);
+    const scale = Math.pow(2, zoom - zInt);
+    const centerTileX = lngToTileX(centerLng, zInt);
+    const centerTileY = latToTileY(centerLat, zInt);
+    const tileW = TILE_SIZE * scale;
+    const offsetX = canvasWidth / 2 - centerTileX * tileW;
+    const offsetY = canvasHeight / 2 - centerTileY * tileW;
+    const tileX = (cssX - offsetX) / tileW;
+    const tileY = (cssY - offsetY) / tileW;
+    return { tileX, tileY, zInt };
+}
+
 function lngToTileX(lng: number, zoom: number): number {
     return ((lng + 180) / 360) * Math.pow(2, zoom);
 }
@@ -24,6 +150,67 @@ function tileXToLng(x: number, zoom: number): number {
 function tileYToLat(y: number, zoom: number): number {
     const n = Math.PI - (2 * Math.PI * y) / Math.pow(2, zoom);
     return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+/**
+ * Computes new center and zoom so the point under the CSS pixel stays fixed (tile-space anchor formula).
+ *
+ * @param cssX - Pointer X in canvas CSS pixels.
+ * @param cssY - Pointer Y in canvas CSS pixels.
+ * @param canvasWidth - Canvas client width.
+ * @param canvasHeight - Canvas client height.
+ * @param oldZoom - Zoom before change.
+ * @param newZoomRequested - Desired zoom (clamped to [INTERACTIVE_MIN_ZOOM, INTERACTIVE_MAX_ZOOM]).
+ * @param centerLng - Current center longitude.
+ * @param centerLat - Current center latitude.
+ */
+function computeCenterAfterZoomAroundPoint(
+    cssX: number,
+    cssY: number,
+    canvasWidth: number,
+    canvasHeight: number,
+    oldZoom: number,
+    newZoomRequested: number,
+    centerLng: number,
+    centerLat: number
+): { center: [number, number]; zoom: number } {
+    const clampedZoom = Math.max(
+        INTERACTIVE_MIN_ZOOM,
+        Math.min(INTERACTIVE_MAX_ZOOM, newZoomRequested)
+    );
+    if (!Number.isFinite(clampedZoom) || !Number.isFinite(oldZoom)) {
+        return {
+            center: [wrapLng(centerLng), clampLatInteractive(centerLat)],
+            zoom: INTERACTIVE_MIN_ZOOM,
+        };
+    }
+    if (Math.abs(clampedZoom - oldZoom) < 1e-10) {
+        return {
+            center: [wrapLng(centerLng), clampLatInteractive(centerLat)],
+            zoom: clampedZoom,
+        };
+    }
+
+    const zInt = Math.floor(oldZoom);
+    const { tileX: anchorTileX, tileY: anchorTileY } = cssPixelToTileCoords(
+        cssX,
+        cssY,
+        canvasWidth,
+        canvasHeight,
+        centerLng,
+        centerLat,
+        oldZoom
+    );
+    const oldCenterTileX = lngToTileX(centerLng, zInt);
+    const oldCenterTileY = latToTileY(centerLat, zInt);
+
+    const scaleFactor = Math.pow(2, clampedZoom - oldZoom);
+    const newCenterTileX = anchorTileX + (oldCenterTileX - anchorTileX) / scaleFactor;
+    const newCenterTileY = anchorTileY + (oldCenterTileY - anchorTileY) / scaleFactor;
+
+    const newLng = wrapLng(tileXToLng(newCenterTileX, zInt));
+    const newLat = clampLatInteractive(tileYToLat(newCenterTileY, zInt));
+    return { center: [newLng, newLat], zoom: clampedZoom };
 }
 
 const tileCache = new Map<string, HTMLImageElement>();
@@ -150,9 +337,49 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
         const onWheel = (e: WheelEvent) => {
             e.preventDefault();
             const store = useMapStore.getState();
-            const delta = e.deltaY > 0 ? -0.3 : 0.3;
-            const newZoom = Math.max(1, Math.min(20, store.zoom + delta));
-            useMapStore.getState().setZoom(newZoom);
+            const rect = canvas.getBoundingClientRect();
+            const cssX = e.clientX - rect.left;
+            const cssY = e.clientY - rect.top;
+            const deltaY = normalizeWheelDeltaY(e);
+            const isTrackpad = detectTrackpad(e);
+            const zoomRate = isTrackpad ? TRACKPAD_ZOOM_RATE : WHEEL_ZOOM_RATE;
+            const zoomDelta = -deltaY * zoomRate;
+            const newZoomRequested = store.zoom + zoomDelta;
+            const [lng, lat] = store.center;
+            const { center, zoom } = computeCenterAfterZoomAroundPoint(
+                cssX,
+                cssY,
+                rect.width,
+                rect.height,
+                store.zoom,
+                newZoomRequested,
+                lng,
+                lat
+            );
+            useMapStore.getState().flyTo(center, zoom);
+            scheduleRender();
+        };
+
+        const onDblClick = (e: MouseEvent) => {
+            e.preventDefault();
+            const store = useMapStore.getState();
+            const rect = canvas.getBoundingClientRect();
+            const cssX = e.clientX - rect.left;
+            const cssY = e.clientY - rect.top;
+            const step = e.shiftKey ? -1 : 1;
+            const newZoomRequested = store.zoom + step;
+            const [lng, lat] = store.center;
+            const { center, zoom } = computeCenterAfterZoomAroundPoint(
+                cssX,
+                cssY,
+                rect.width,
+                rect.height,
+                store.zoom,
+                newZoomRequested,
+                lng,
+                lat
+            );
+            useMapStore.getState().flyTo(center, zoom);
             scheduleRender();
         };
 
@@ -170,14 +397,17 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
             const py = e.clientY - rect.top;
 
             const zInt = Math.floor(store.zoom);
+            const { tileX: tileXAtMouse, tileY: tileYAtMouse } = cssPixelToTileCoords(
+                px,
+                py,
+                rect.width,
+                rect.height,
+                store.center[0],
+                store.center[1],
+                store.zoom
+            );
             const scale = Math.pow(2, store.zoom - zInt);
-            const centerTileX = lngToTileX(store.center[0], zInt);
-            const centerTileY = latToTileY(store.center[1], zInt);
             const tileW = TILE_SIZE * scale;
-            const offsetX = rect.width / 2 - centerTileX * tileW;
-            const offsetY = rect.height / 2 - centerTileY * tileW;
-            const tileXAtMouse = (px - offsetX) / tileW;
-            const tileYAtMouse = (py - offsetY) / tileW;
             const mouseLng = tileXToLng(tileXAtMouse, zInt);
             const mouseLat = tileYToLat(tileYAtMouse, zInt);
             pendingCoord.current = [mouseLng, mouseLat];
@@ -212,6 +442,7 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
 
         canvas.style.cursor = 'grab';
         canvas.addEventListener('wheel', onWheel, { passive: false });
+        canvas.addEventListener('dblclick', onDblClick);
         canvas.addEventListener('mousedown', onMouseDown);
         window.addEventListener('mousemove', onMouseMove);
         window.addEventListener('mouseup', onMouseUp);
@@ -233,6 +464,7 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
             cancelAnimationFrame(rafId.current);
             ro.disconnect();
             canvas.removeEventListener('wheel', onWheel);
+            canvas.removeEventListener('dblclick', onDblClick);
             canvas.removeEventListener('mousedown', onMouseDown);
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);

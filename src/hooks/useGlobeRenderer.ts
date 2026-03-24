@@ -260,8 +260,90 @@ export function useGlobeRenderer(
         const onWheel = (e: WheelEvent) => {
             e.preventDefault();
             const store = useMapStore.getState();
-            const delta = e.deltaY > 0 ? -0.5 : 0.5;
-            store.setZoom(Math.max(1, Math.min(20, store.zoom + delta)));
+
+            let deltaY = e.deltaY;
+            if (e.deltaMode === 1) deltaY *= 40;
+            else if (e.deltaMode === 2) deltaY *= 300;
+
+            const zoomRate = 1 / 450;
+            const zoomDelta = -deltaY * zoomRate;
+            const newZoom = Math.max(1, Math.min(20, store.zoom + zoomDelta));
+
+            const rect = canvas.getBoundingClientRect();
+            const cx = rect.width / 2;
+            const cy = rect.height / 2;
+            const radius = Math.min(cx, cy) * 0.78;
+            const mx = e.clientX - rect.left - cx;
+            const my = -(e.clientY - rect.top - cy);
+
+            const dist2 = mx * mx + my * my;
+            if (dist2 < radius * radius) {
+                const x = mx / radius;
+                const y = my / radius;
+                const z = Math.sqrt(Math.max(0, 1 - x * x - y * y));
+
+                const [cLon, cLat] = store.center;
+                const cLonRad = (cLon * Math.PI) / 180;
+                const cLatRad = (cLat * Math.PI) / 180;
+
+                const lat = Math.asin(y * Math.cos(cLatRad) + z * Math.sin(cLatRad));
+                const lon =
+                    cLonRad +
+                    Math.atan2(x * Math.cos(cLatRad), z * Math.cos(cLatRad) - y * Math.sin(cLatRad));
+
+                const mouseLon = (lon * 180) / Math.PI;
+                const mouseLat = (lat * 180) / Math.PI;
+
+                const t = 0.15 * Math.sign(zoomDelta);
+                const newLon = cLon + (mouseLon - cLon) * t;
+                const newLat = Math.max(-85, Math.min(85, cLat + (mouseLat - cLat) * t));
+
+                store.flyTo([newLon, newLat]);
+            }
+
+            store.setZoom(newZoom);
+            scheduleRender();
+        };
+
+        const onDblClick = (e: MouseEvent) => {
+            e.preventDefault();
+            const store = useMapStore.getState();
+            const zoomStep = e.shiftKey ? -1 : 1;
+            const newZoom = Math.max(1, Math.min(20, store.zoom + zoomStep));
+
+            const rect = canvas.getBoundingClientRect();
+            const cx = rect.width / 2;
+            const cy = rect.height / 2;
+            const radius = Math.min(cx, cy) * 0.78;
+            const mx = e.clientX - rect.left - cx;
+            const my = -(e.clientY - rect.top - cy);
+
+            const dist2 = mx * mx + my * my;
+            if (dist2 < radius * radius) {
+                const x = mx / radius;
+                const y = my / radius;
+                const z = Math.sqrt(Math.max(0, 1 - x * x - y * y));
+
+                const [cLon, cLat] = store.center;
+                const cLonRad = (cLon * Math.PI) / 180;
+                const cLatRad = (cLat * Math.PI) / 180;
+
+                const lat = Math.asin(y * Math.cos(cLatRad) + z * Math.sin(cLatRad));
+                const lon =
+                    cLonRad +
+                    Math.atan2(x * Math.cos(cLatRad), z * Math.cos(cLatRad) - y * Math.sin(cLatRad));
+
+                const mouseLon = (lon * 180) / Math.PI;
+                const mouseLat = (lat * 180) / Math.PI;
+
+                const t = 0.2 * Math.sign(zoomStep);
+                const newLon = cLon + (mouseLon - cLon) * t;
+                const newLat = Math.max(-85, Math.min(85, cLat + (mouseLat - cLat) * t));
+
+                store.flyTo([newLon, newLat]);
+            }
+
+            store.setZoom(newZoom);
             scheduleRender();
         };
 
@@ -270,6 +352,7 @@ export function useGlobeRenderer(
         window.addEventListener('mousemove', onMouseMove);
         window.addEventListener('mouseup', onMouseUp);
         canvas.addEventListener('wheel', onWheel, { passive: false });
+        canvas.addEventListener('dblclick', onDblClick);
 
         const unsub = useMapStore.subscribe(scheduleRender);
 
@@ -280,6 +363,7 @@ export function useGlobeRenderer(
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);
             canvas.removeEventListener('wheel', onWheel);
+            canvas.removeEventListener('dblclick', onDblClick);
             unsub();
         };
     }, [active, canvasRef, containerRef]);
