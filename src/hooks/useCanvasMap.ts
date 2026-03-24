@@ -2,6 +2,15 @@ import { useEffect, useRef, useCallback } from 'react';
 import type { RefObject } from 'react';
 import { useMapStore } from '@/stores/mapStore';
 import { useStatusStore } from '@/stores/statusStore';
+import {
+    createFogManager,
+    createSkyRenderer,
+    computeHorizonYNormalized,
+} from '@/packages/gpu/src/l2/index.ts';
+
+/** 2.5D 天空 + 雾（与 L2 SkyRenderer / FogManager 共享配置） */
+const skyRenderer = createSkyRenderer();
+const fogManager = createFogManager();
 
 /**
  * Web Mercator helpers
@@ -252,7 +261,7 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        const { center, zoom } = useMapStore.getState();
+        const { center, zoom, mode, pitch } = useMapStore.getState();
         const [lng, lat] = center;
         const w = canvas.width;
         const h = canvas.height;
@@ -275,8 +284,20 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
         const endTileY = Math.ceil((h - offsetY) / tileW);
         const maxTile = Math.pow(2, zInt);
 
+        const is25d = mode === '2.5d';
+        const horizonY = is25d ? computeHorizonYNormalized(pitch) : 0;
+
         ctx.fillStyle = '#0a0e17';
         ctx.fillRect(0, 0, w, h);
+
+        if (is25d) {
+            const skyCfg = skyRenderer.getConfig();
+            if (fogManager.shouldSync(skyCfg)) {
+                fogManager.setConfig({ fogColor: skyCfg.fogColor });
+            }
+            fogManager.computeUniforms(zoom);
+            skyRenderer.renderToCanvas2D(ctx, w, h, horizonY, pitch);
+        }
 
         let needsRedraw = false;
 
@@ -299,6 +320,10 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
                     needsRedraw = true;
                 }
             }
+        }
+
+        if (is25d) {
+            fogManager.applyToCanvas2D(ctx, w, h, horizonY, pitch);
         }
 
         if (needsRedraw) {
