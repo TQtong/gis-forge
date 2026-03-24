@@ -5,6 +5,9 @@
 
 import type { CameraState, Viewport } from '../../core/src/types/viewport.ts';
 
+/** 生产构建由 bundler 注入；未定义时视为 false，避免 `typeof` 分支噪音。 */
+declare const __DEV__: boolean;
+
 // ---------------------------------------------------------------------------
 // 常量：屏幕空间估算与数值稳定（避免魔法数字散落）
 // ---------------------------------------------------------------------------
@@ -20,6 +23,30 @@ const DEFAULT_FONT_SIZE_PX = 16;
 
 /** 判断两个轴对齐矩形是否分离（含相等边界视为重叠）。 */
 const EPS_RECT = 1e-6;
+
+/** 相机 zoom 变化超过该值视为显著移动（与地图缩放级别小数一致）。 */
+const CAMERA_ZOOM_EPSILON = 0.01;
+
+/**
+ * 相机中心在屏幕空间上移动超过该像素数视为显著移动（用于帧间缓存失效）。
+ * 近似：将经纬度差换算为米再除以 Web Mercator 近似 meters-per-pixel。
+ */
+const CAMERA_POSITION_EPS_PX = 1;
+
+/** 地球赤道周长（米），用于近似地理距离与像素换算。 */
+const EARTH_CIRCUMFERENCE_M = 40075016.686;
+
+/** WGS84 赤道半径（米），用于经纬度差分米制换算。 */
+const WGS84_EQUATORIAL_RADIUS_M = 6378137;
+
+/** 脏标注占比低于该阈值时尝试局部碰撞重算（O6 帧间 diff）。 */
+const DIRTY_RATIO_PARTIAL_THRESHOLD = 0.1;
+
+/**
+ * 邻居半径：脏标注包围盒各边外扩 `NEIGHBOR_EXPAND_FACTOR * max(w,h)`，
+ * 与该扩张盒相交的其它标注纳入局部重算集合。
+ */
+const NEIGHBOR_EXPAND_FACTOR = 2;
 
 /**
  * MSDF 图集 UV 区域（最小可复用形状，避免与 L1 Texture 强耦合）。
@@ -223,6 +250,21 @@ export interface LabelManagerStats {
   readonly cpuCullTimeMs: number;
   /** GPU 侧剔除占位（MVP 固定为 0）。 */
   readonly gpuCullTimeMs: number;
+  /**
+   * 帧间优化：`resolve` 因脏集为空且相机未显著移动而直接返回缓存的次数。
+   * 范围 [0, +∞)，单调递增直至 `clearLabels` 重置。
+   */
+  readonly resolveSkipCount: number;
+  /**
+   * 帧间优化：仅对脏标注及其邻居做局部碰撞重算的次数。
+   * 范围 [0, +∞)。
+   */
+  readonly resolveDirtyCount: number;
+  /**
+   * 帧间优化：全量碰撞检测次数（含首帧、相机显著移动、脏占比过高或局部回退）。
+   * 范围 [0, +∞)。
+   */
+  readonly resolveFullCount: number;
 }
 
 /**
@@ -437,6 +479,399 @@ function rectsOverlap(a: ScreenBBox2D, b: ScreenBBox2D, padding: number): boolea
 }
 
 /**
+ * 上一帧 `submitLabels` 的标注快照，用于帧间 diff（字段覆盖包围盒与碰撞相关输入）。
+ */
+interface LabelEntry {
+  /** 锚点位置 x/y（CSS 像素）。 */
+  readonly position: readonly [number, number];
+  /** 额外偏移（CSS 像素）。 */
+  readonly offset: readonly [number, number];
+  /** 文本内容。 */
+  readonly text: string;
+  /** 优先级。 */
+  readonly priority: number;
+  /** 锚点枚举。 */
+  readonly anchor: LabelSpec['anchor'];
+  /** 图层 id（跨图层碰撞规则）。 */
+  readonly layerId: string;
+  /** 是否允许重叠。 */
+  readonly allowOverlap: boolean;
+  /** 放置模式。 */
+  readonly placement: LabelSpec['placement'];
+  /** 旋转角（弧度）。 */
+  readonly rotation: number;
+  /** 解析后的字号（CSS 像素）。 */
+  readonly fontSize: number;
+}
+
+/**
+ * 相机轻量快照，与 `CameraState.center` / `zoom` 对齐，用于显著移动判定。
+ */
+interface PrevCameraSnapshot {
+  /** 相机中心经度（度），对应 `CameraState.center[0]`。 */
+  readonly x: number;
+  /** 相机中心纬度（度），对应 `CameraState.center[1]`。 */
+  readonly y: number;
+  /** 缩放级别，对应 `CameraState.zoom`。 */
+  readonly zoom: number;
+}
+
+/**
+ * 从已通过校验的 `LabelSpec` 构建帧间比较用快照。
+ *
+ * @param spec - 标注规格
+ * @returns 不可变快照
+ */
+function labelEntryFromSpec(spec: LabelSpec): LabelEntry {
+  return {
+    position: [spec.position[0], spec.position[1]],
+    offset: [spec.offset[0], spec.offset[1]],
+    text: spec.text,
+    priority: spec.priority,
+    anchor: spec.anchor,
+    layerId: spec.layerId,
+    allowOverlap: spec.allowOverlap,
+    placement: spec.placement,
+    rotation: spec.rotation,
+    fontSize: readFontSize(spec.optional),
+  };
+}
+
+/**
+ * 判断两快照是否等价（无布局相关字段变化）。
+ *
+ * @param a - 上一帧快照
+ * @param b - 当前帧快照
+ * @returns 是否等价
+ */
+function labelEntriesEqual(a: LabelEntry, b: LabelEntry): boolean {
+  return (
+    a.text === b.text &&
+    a.priority === b.priority &&
+    a.position[0] === b.position[0] &&
+    a.position[1] === b.position[1] &&
+    a.offset[0] === b.offset[0] &&
+    a.offset[1] === b.offset[1] &&
+    a.anchor === b.anchor &&
+    a.layerId === b.layerId &&
+    a.allowOverlap === b.allowOverlap &&
+    a.placement === b.placement &&
+    a.rotation === b.rotation &&
+    a.fontSize === b.fontSize
+  );
+}
+
+/**
+ * 将本帧提交与上一帧快照对比，向脏集中写入新增/删除/内容变更的 id。
+ *
+ * @param nextById - 本帧 id → 规格
+ * @param prevById - 上一帧 id → 快照
+ * @param dirtyOut - 输出脏集（合并写入）
+ */
+function mergeDirtyFromSubmit(
+  nextById: Map<string, LabelSpec>,
+  prevById: Map<string, LabelEntry>,
+  dirtyOut: Set<string>,
+): void {
+  for (const [id, spec] of nextById) {
+    const prev = prevById.get(id);
+    if (prev === undefined) {
+      dirtyOut.add(id);
+      continue;
+    }
+    const snap = labelEntryFromSpec(spec);
+    if (!labelEntriesEqual(prev, snap)) {
+      dirtyOut.add(id);
+    }
+  }
+  for (const id of prevById.keys()) {
+    if (!nextById.has(id)) {
+      dirtyOut.add(id);
+    }
+  }
+}
+
+/**
+ * 从 `CameraState` 构造相机快照；非法数值时返回 null 以触发保守的全量重算。
+ *
+ * @param camera - 相机状态
+ * @returns 快照或 null
+ */
+function tryPrevCameraSnapshot(camera: CameraState): PrevCameraSnapshot | null {
+  const x = camera.center[0];
+  const y = camera.center[1];
+  const z = camera.zoom;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+    return null;
+  }
+  return { x, y, zoom: z };
+}
+
+/**
+ * 判断相机相对上一帧是否发生显著平移或缩放（缓存失效条件）。
+ *
+ * @param prev - 上一帧快照；首帧为 null 时视为显著移动
+ * @param camera - 当前相机
+ * @param viewport - 视口（保留供未来更精确 m/px 估算）
+ * @returns 是否显著移动
+ */
+function cameraMovedSignificantly(
+  prev: PrevCameraSnapshot | null,
+  camera: CameraState,
+  viewport: Viewport,
+): boolean {
+  // 首帧或无有效快照：必须全量解析，避免误用空缓存
+  if (prev === null) {
+    return true;
+  }
+  const cur = tryPrevCameraSnapshot(camera);
+  if (cur === null) {
+    return true;
+  }
+  // 视口尺寸用于后续扩展；当前阈值主要依赖 zoom 与地理差分
+  if (
+    !Number.isFinite(viewport.width) ||
+    !Number.isFinite(viewport.height) ||
+    viewport.width <= 0 ||
+    viewport.height <= 0
+  ) {
+    return true;
+  }
+  if (Math.abs(cur.zoom - prev.zoom) > CAMERA_ZOOM_EPSILON) {
+    return true;
+  }
+  const latRad = (cur.y * Math.PI) / 180;
+  const cosLat = Math.max(1e-6, Math.cos(latRad));
+  const zoomClamped = Math.max(0, Math.min(25, cur.zoom));
+  // Web Mercator 近似：赤道附近每像素米数（与瓦片缩放一致）
+  const mPerPx = (EARTH_CIRCUMFERENCE_M * cosLat) / (256 * Math.pow(2, zoomClamped));
+  if (!Number.isFinite(mPerPx) || mPerPx <= 0) {
+    return true;
+  }
+  const dxM = (cur.x - prev.x) * (Math.PI / 180) * WGS84_EQUATORIAL_RADIUS_M * cosLat;
+  const dyM = (cur.y - prev.y) * (Math.PI / 180) * WGS84_EQUATORIAL_RADIUS_M;
+  const distPx = Math.hypot(dxM, dyM) / mPerPx;
+  if (!Number.isFinite(distPx)) {
+    return true;
+  }
+  return distPx > CAMERA_POSITION_EPS_PX;
+}
+
+/**
+ * 计算标注的屏幕轴对齐包围盒（与 `resolve` 主路径一致，不含 padding）。
+ *
+ * @param spec - 标注规格
+ * @returns 屏幕包围盒
+ */
+function computeScreenBBoxForSpec(spec: LabelSpec): ScreenBBox2D {
+  const fontSize = readFontSize(spec.optional);
+  const [tw, th] = estimateLabelSize(spec.text, fontSize);
+  const ox = spec.position[0] + spec.offset[0];
+  const oy = spec.position[1] + spec.offset[1];
+  const [left, top] = computeBBoxTopLeft([ox, oy], spec.anchor, tw, th);
+  return buildScreenBBox(left, top, tw, th);
+}
+
+/**
+ * 将脏集扩展为「脏标注 + 各向扩张后与脏盒相交的邻居」。
+ *
+ * @param dirtyIds - 本帧脏 id 集合
+ * @param specsById - id → 当前规格
+ * @returns 需参与局部重算的 id 集合
+ */
+function buildNeighborExpandedSet(dirtyIds: Set<string>, specsById: Map<string, LabelSpec>): Set<string> {
+  const out = new Set<string>(dirtyIds);
+  const expandedRegions: ScreenBBox2D[] = [];
+  for (const id of dirtyIds) {
+    const spec = specsById.get(id);
+    if (spec === undefined) {
+      continue;
+    }
+    const box = computeScreenBBoxForSpec(spec);
+    const fs = readFontSize(spec.optional);
+    const [tw, th] = estimateLabelSize(spec.text, fs);
+    const maxDim = Math.max(tw, th);
+    const margin = NEIGHBOR_EXPAND_FACTOR * maxDim;
+    expandedRegions.push({
+      minX: box.minX - margin,
+      minY: box.minY - margin,
+      maxX: box.maxX + margin,
+      maxY: box.maxY + margin,
+    });
+  }
+  for (const [id, spec] of specsById) {
+    if (out.has(id)) {
+      continue;
+    }
+    const box = computeScreenBBoxForSpec(spec);
+    for (let r = 0; r < expandedRegions.length; r++) {
+      if (rectsOverlap(box, expandedRegions[r], 0)) {
+        out.add(id);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 全量优先级排序 + 轴对齐碰撞解析（MVP 主路径）。
+ *
+ * @param sorted - 已按 priority 降序排列的规格列表
+ * @param cfg - 配置
+ * @returns 放置结果与统计元组
+ */
+function runFullCollision(
+  sorted: readonly LabelSpec[],
+  cfg: LabelManagerConfig,
+): { out: PlacedLabel[]; visible: number; collided: number } {
+  const placed: { spec: LabelSpec; box: ScreenBBox2D }[] = [];
+  const out: PlacedLabel[] = [];
+  let collided = 0;
+  let visible = 0;
+
+  for (let i = 0; i < sorted.length; i++) {
+    const spec = sorted[i];
+    const fontSize = readFontSize(spec.optional);
+    const [tw, th] = estimateLabelSize(spec.text, fontSize);
+    const ox = spec.position[0] + spec.offset[0];
+    const oy = spec.position[1] + spec.offset[1];
+    const [left, top] = computeBBoxTopLeft([ox, oy], spec.anchor, tw, th);
+    const box = buildScreenBBox(left, top, tw, th);
+
+    if (spec.allowOverlap) {
+      visible += 1;
+      out.push({
+        id: spec.id,
+        screenBBox: box,
+        screenPosition: [ox, oy],
+        rotation: spec.rotation,
+        visible: true,
+        glyphQuads: [makePlaceholderGlyphQuad(box)],
+      });
+      continue;
+    }
+
+    const hit = conflictsWith(box, placed, spec.layerId, cfg.crossSourceCollisions, cfg.padding);
+    if (hit) {
+      collided += 1;
+      out.push({
+        id: spec.id,
+        screenBBox: box,
+        screenPosition: [ox, oy],
+        rotation: spec.rotation,
+        visible: false,
+        glyphQuads: [],
+      });
+      continue;
+    }
+
+    visible += 1;
+    placed.push({ spec, box });
+    out.push({
+      id: spec.id,
+      screenBBox: box,
+      screenPosition: [ox, oy],
+      rotation: spec.rotation,
+      visible: true,
+      glyphQuads: [makePlaceholderGlyphQuad(box)],
+    });
+  }
+
+  return { out, visible, collided };
+}
+
+/**
+ * 对脏集 ∪ 邻居子集重算碰撞，其余 id 复用上一帧缓存；若缓存缺失则返回 null 以回退全量。
+ *
+ * @param sorted - 已按 priority 降序排列的规格列表
+ * @param cfg - 配置
+ * @param activeIds - 需重新计算的 id（脏 + 邻居）
+ * @param cachedById - 上一帧 `PlacedLabel` 索引
+ * @returns 放置结果与统计，或 null 表示应全量重算
+ */
+function runPartialCollision(
+  sorted: readonly LabelSpec[],
+  cfg: LabelManagerConfig,
+  activeIds: Set<string>,
+  cachedById: Map<string, PlacedLabel>,
+): { out: PlacedLabel[]; visible: number; collided: number } | null {
+  const placed: { spec: LabelSpec; box: ScreenBBox2D }[] = [];
+  const out: PlacedLabel[] = [];
+  let collided = 0;
+  let visible = 0;
+
+  for (let i = 0; i < sorted.length; i++) {
+    const spec = sorted[i];
+
+    if (!activeIds.has(spec.id)) {
+      const cached = cachedById.get(spec.id);
+      if (cached === undefined) {
+        return null;
+      }
+      // 与全量路径一致：allowOverlap 的可见标注不进入阻挡列表
+      if (cached.visible) {
+        visible += 1;
+        if (!spec.allowOverlap) {
+          placed.push({ spec, box: cached.screenBBox });
+        }
+      } else if (!spec.allowOverlap) {
+        collided += 1;
+      }
+      out.push(cached);
+      continue;
+    }
+
+    const fontSize = readFontSize(spec.optional);
+    const [tw, th] = estimateLabelSize(spec.text, fontSize);
+    const ox = spec.position[0] + spec.offset[0];
+    const oy = spec.position[1] + spec.offset[1];
+    const [left, top] = computeBBoxTopLeft([ox, oy], spec.anchor, tw, th);
+    const box = buildScreenBBox(left, top, tw, th);
+
+    if (spec.allowOverlap) {
+      visible += 1;
+      out.push({
+        id: spec.id,
+        screenBBox: box,
+        screenPosition: [ox, oy],
+        rotation: spec.rotation,
+        visible: true,
+        glyphQuads: [makePlaceholderGlyphQuad(box)],
+      });
+      continue;
+    }
+
+    const hit = conflictsWith(box, placed, spec.layerId, cfg.crossSourceCollisions, cfg.padding);
+    if (hit) {
+      collided += 1;
+      out.push({
+        id: spec.id,
+        screenBBox: box,
+        screenPosition: [ox, oy],
+        rotation: spec.rotation,
+        visible: false,
+        glyphQuads: [],
+      });
+      continue;
+    }
+
+    visible += 1;
+    placed.push({ spec, box });
+    out.push({
+      id: spec.id,
+      screenBBox: box,
+      screenPosition: [ox, oy],
+      rotation: spec.rotation,
+      visible: true,
+      glyphQuads: [makePlaceholderGlyphQuad(box)],
+    });
+  }
+
+  return { out, visible, collided };
+}
+
+/**
  * 判断候选盒是否与已放置列表冲突（尊重 crossSource 规则）。
  *
  * @param box - 候选包围盒
@@ -502,8 +937,24 @@ function makePlaceholderGlyphQuad(box: ScreenBBox2D): GlyphQuad {
 export function createLabelManager(): LabelManager {
   /** 当前帧候选标注。 */
   let pending: LabelSpec[] = [];
-  /** 最近一次 resolve 结果缓存。 */
+  /** 最近一次 resolve 结果（供 getLabelAt / getVisibleLabels）。 */
   let lastResolved: PlacedLabel[] = [];
+  /**
+   * 上一帧 `resolve` 的完整输出，用于帧间跳过与局部重算（与 `lastResolved` 同步）。
+   */
+  let _cachedResult: PlacedLabel[] = [];
+  /**
+   * 自上次 `resolve` 起，相对上一帧提交发生新增/删除/内容变更的标注 id（submit 阶段写入，resolve 末尾清空）。
+   */
+  let _dirtySet: Set<string> = new Set();
+  /**
+   * 上一帧 `submitLabels` 结束时的快照（id → 布局相关字段），供下一帧 diff。
+   */
+  let _prevLabels: Map<string, LabelEntry> = new Map();
+  /**
+   * 上一帧 `resolve` 成功后的相机快照；首帧为 null。
+   */
+  let _prevCamera: PrevCameraSnapshot | null = null;
   /** 运行配置。 */
   let cfg: LabelManagerConfig = {
     crossSourceCollisions: true,
@@ -520,6 +971,12 @@ export function createLabelManager(): LabelManager {
   let statCpuMs = 0;
   /** 统计：GPU 耗时（MVP 0）。 */
   const statGpuMs = 0;
+  /** 统计：resolve 直接命中缓存跳过全量碰撞的次数。 */
+  let resolveSkipCount = 0;
+  /** 统计：resolve 走脏集 + 邻居局部碰撞的次数。 */
+  let resolveDirtyCount = 0;
+  /** 统计：resolve 全量碰撞次数。 */
+  let resolveFullCount = 0;
 
   const manager: LabelManager = {
     get config(): LabelManagerConfig {
@@ -587,6 +1044,17 @@ export function createLabelManager(): LabelManager {
         }
         next.push(L);
       }
+      const nextById = new Map<string, LabelSpec>();
+      for (let j = 0; j < next.length; j++) {
+        const spec = next[j];
+        nextById.set(spec.id, spec);
+      }
+      mergeDirtyFromSubmit(nextById, _prevLabels, _dirtySet);
+      const nextSnapshots = new Map<string, LabelEntry>();
+      for (let j = 0; j < next.length; j++) {
+        nextSnapshots.set(next[j].id, labelEntryFromSpec(next[j]));
+      }
+      _prevLabels = nextSnapshots;
       pending = next;
       statTotalSubmitted = pending.length;
     },
@@ -594,10 +1062,17 @@ export function createLabelManager(): LabelManager {
     clearLabels(): void {
       pending = [];
       lastResolved = [];
+      _cachedResult = [];
+      _dirtySet = new Set();
+      _prevLabels = new Map();
+      _prevCamera = null;
       statTotalSubmitted = 0;
       statVisible = 0;
       statCollided = 0;
       statCpuMs = 0;
+      resolveSkipCount = 0;
+      resolveDirtyCount = 0;
+      resolveFullCount = 0;
     },
 
     resolve(camera: CameraState, viewport: Viewport): readonly PlacedLabel[] {
@@ -616,79 +1091,143 @@ export function createLabelManager(): LabelManager {
       ) {
         throw new RangeError('LabelManager.resolve: viewport width/height must be finite and positive.');
       }
+      if (!Array.isArray(camera.center) || camera.center.length < 2) {
+        throw new TypeError('LabelManager.resolve: camera.center must be [lon, lat].');
+      }
+      if (!Number.isFinite(camera.center[0]) || !Number.isFinite(camera.center[1])) {
+        throw new RangeError('LabelManager.resolve: camera.center values must be finite.');
+      }
+      if (!Number.isFinite(camera.zoom)) {
+        throw new RangeError('LabelManager.resolve: camera.zoom must be finite.');
+      }
 
       const t0 =
         typeof performance !== 'undefined' && typeof performance.now === 'function'
           ? performance.now()
           : Date.now();
 
+      const cameraUnstable = cameraMovedSignificantly(_prevCamera, camera, viewport);
+
+      if (pending.length === 0) {
+        const tEmpty =
+          typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? performance.now()
+            : Date.now();
+        statCpuMs = tEmpty - t0;
+        statVisible = 0;
+        statCollided = 0;
+        lastResolved = [];
+        _cachedResult = [];
+        _dirtySet.clear();
+        _prevCamera = tryPrevCameraSnapshot(camera);
+        resolveFullCount += 1;
+        if (__DEV__) {
+          // eslint-disable-next-line no-console
+          console.debug('[LabelManager] resolve: empty pending, full reset.');
+        }
+        return [];
+      }
+
+      const canSkipFullCollision =
+        _dirtySet.size === 0 && _cachedResult.length > 0 && !cameraUnstable;
+
+      if (canSkipFullCollision) {
+        const t1 =
+          typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? performance.now()
+            : Date.now();
+        statCpuMs = t1 - t0;
+        let vis = 0;
+        let col = 0;
+        for (let i = 0; i < _cachedResult.length; i++) {
+          if (_cachedResult[i].visible) {
+            vis += 1;
+          } else {
+            col += 1;
+          }
+        }
+        statVisible = vis;
+        statCollided = col;
+        lastResolved = _cachedResult;
+        _dirtySet.clear();
+        _prevCamera = tryPrevCameraSnapshot(camera);
+        resolveSkipCount += 1;
+        if (__DEV__) {
+          // eslint-disable-next-line no-console
+          console.debug('[LabelManager] resolve: temporal skip (cached collision).');
+        }
+        return _cachedResult;
+      }
+
       // 按优先级降序排序（高优先先放置）
       const sorted = pending.slice().sort((a, b) => b.priority - a.priority);
 
-      const placed: { spec: LabelSpec; box: ScreenBBox2D }[] = [];
-      const out: PlacedLabel[] = [];
-      let collided = 0;
-      let visible = 0;
+      const total = pending.length;
+      const dirtyRatio = total > 0 ? _dirtySet.size / total : 1;
+      const tryPartial =
+        _dirtySet.size > 0 &&
+        dirtyRatio < DIRTY_RATIO_PARTIAL_THRESHOLD &&
+        _cachedResult.length > 0 &&
+        !cameraUnstable;
 
-      for (let i = 0; i < sorted.length; i++) {
-        const spec = sorted[i];
-        const fontSize = readFontSize(spec.optional);
-        const [tw, th] = estimateLabelSize(spec.text, fontSize);
-        const ox = spec.position[0] + spec.offset[0];
-        const oy = spec.position[1] + spec.offset[1];
-        // 线/视口模式 MVP：仍用点近似盒，避免无尺寸
-        const [left, top] = computeBBoxTopLeft([ox, oy], spec.anchor, tw, th);
-        const box = buildScreenBBox(left, top, tw, th);
-
-        // 允许重叠：直接可见，但不加入阻挡列表（与常见“路牌始终显示”一致）
-        if (spec.allowOverlap) {
-          visible += 1;
-          out.push({
-            id: spec.id,
-            screenBBox: box,
-            screenPosition: [ox, oy],
-            rotation: spec.rotation,
-            visible: true,
-            glyphQuads: [makePlaceholderGlyphQuad(box)],
-          });
-          continue;
+      if (tryPartial) {
+        const specsById = new Map<string, LabelSpec>();
+        for (let i = 0; i < pending.length; i++) {
+          specsById.set(pending[i].id, pending[i]);
         }
-
-        const hit = conflictsWith(box, placed, spec.layerId, cfg.crossSourceCollisions, cfg.padding);
-        if (hit) {
-          collided += 1;
-          out.push({
-            id: spec.id,
-            screenBBox: box,
-            screenPosition: [ox, oy],
-            rotation: spec.rotation,
-            visible: false,
-            glyphQuads: [],
-          });
-          continue;
+        const cachedById = new Map<string, PlacedLabel>();
+        for (let i = 0; i < _cachedResult.length; i++) {
+          const pl = _cachedResult[i];
+          cachedById.set(pl.id, pl);
         }
-
-        visible += 1;
-        placed.push({ spec, box });
-        out.push({
-          id: spec.id,
-          screenBBox: box,
-          screenPosition: [ox, oy],
-          rotation: spec.rotation,
-          visible: true,
-          glyphQuads: [makePlaceholderGlyphQuad(box)],
-        });
+        const activeIds = buildNeighborExpandedSet(_dirtySet, specsById);
+        const dirtySizeBefore = _dirtySet.size;
+        const partial = runPartialCollision(sorted, cfg, activeIds, cachedById);
+        if (partial !== null) {
+          const t1 =
+            typeof performance !== 'undefined' && typeof performance.now === 'function'
+              ? performance.now()
+              : Date.now();
+          statCpuMs = t1 - t0;
+          statVisible = partial.visible;
+          statCollided = partial.collided;
+          lastResolved = partial.out;
+          _cachedResult = partial.out;
+          _dirtySet.clear();
+          _prevCamera = tryPrevCameraSnapshot(camera);
+          resolveDirtyCount += 1;
+          if (__DEV__) {
+            // eslint-disable-next-line no-console
+            console.debug(
+              `[LabelManager] resolve: partial collision (dirty=${dirtySizeBefore}, active=${activeIds.size}).`,
+            );
+          }
+          return partial.out;
+        }
+        if (__DEV__) {
+          // eslint-disable-next-line no-console
+          console.debug('[LabelManager] resolve: partial collision failed, falling back to full.');
+        }
       }
 
+      const full = runFullCollision(sorted, cfg);
       const t1 =
         typeof performance !== 'undefined' && typeof performance.now === 'function'
           ? performance.now()
           : Date.now();
       statCpuMs = t1 - t0;
-      statVisible = visible;
-      statCollided = collided;
-      lastResolved = out;
-      return out;
+      statVisible = full.visible;
+      statCollided = full.collided;
+      lastResolved = full.out;
+      _cachedResult = full.out;
+      _dirtySet.clear();
+      _prevCamera = tryPrevCameraSnapshot(camera);
+      resolveFullCount += 1;
+      if (__DEV__) {
+        // eslint-disable-next-line no-console
+        console.debug('[LabelManager] resolve: full collision.');
+      }
+      return full.out;
     },
 
     getLabelAt(screenX: number, screenY: number): PlacedLabel | null {
@@ -726,6 +1265,9 @@ export function createLabelManager(): LabelManager {
         collidedCount: statCollided,
         cpuCullTimeMs: statCpuMs,
         gpuCullTimeMs: statGpuMs,
+        resolveSkipCount,
+        resolveDirtyCount,
+        resolveFullCount,
       };
     },
   };
