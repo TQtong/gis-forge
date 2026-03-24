@@ -17,6 +17,7 @@ import { useState, useMemo, useCallback } from 'react';
 import { ChevronRight, Search, FolderOpen, Folder, FileCode2 } from 'lucide-react';
 import { useSceneStore } from '../stores/sceneStore';
 import { featureTreeData, type TreeNode } from '../data/featureTreeData';
+import { scenes } from '../scenes';
 
 // ═══════════════════════════════════════════════════════════
 // 常量
@@ -169,6 +170,9 @@ function TreeNodeItem({
   /** 当前叶子是否是选中状态 */
   const isSelected = !isFolder && node.sceneId === activeSceneId;
 
+  /** 该叶子节点是否有已实现的场景（在 scenes 注册表中存在） */
+  const hasScene = !isFolder && !!node.sceneId && node.sceneId in scenes;
+
   /** 是否为顶层分组节点（level 0，有 children） */
   const isTopLevelGroup = level === 0 && isFolder;
 
@@ -269,6 +273,15 @@ function TreeNodeItem({
 
         {/* 节点标签文字 */}
         <span className="truncate">{node.label}</span>
+
+        {/* 已实现场景的绿色圆点标记 */}
+        {hasScene && (
+          <span
+            className="shrink-0 inline-block w-1.5 h-1.5 rounded-full ml-auto"
+            style={{ background: 'var(--success)', opacity: isSelected ? 1 : 0.6 }}
+            title="已实现"
+          />
+        )}
       </div>
 
       {/* ─── 子节点列表（仅展开时渲染，避免不必要的 DOM） ─── */}
