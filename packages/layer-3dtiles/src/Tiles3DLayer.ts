@@ -2490,12 +2490,16 @@ export function createTiles3DLayer(opts: Tiles3DLayerOptions): Tiles3DLayer {
      * @param sse - 新阈值（像素），范围 [1, 256]
      */
     setMaximumScreenSpaceError(sse: number): void {
-      if (!Number.isFinite(sse) || sse < MIN_SSE || sse > MAX_SSE) {
-        throw new Error(
-          `[${TILES3D_ERROR_CODES.INVALID_SSE}] maximumScreenSpaceError must be in [${MIN_SSE}, ${MAX_SSE}], got ${sse}`,
+      // 非有限值回退为默认值，超范围值 clamp 到 [MIN_SSE, MAX_SSE]
+      let clamped = Number.isFinite(sse) ? sse : DEFAULT_MAX_SSE;
+      if (clamped < MIN_SSE) clamped = MIN_SSE;
+      if (clamped > MAX_SSE) clamped = MAX_SSE;
+      if (__DEV__ && clamped !== sse) {
+        console.warn(
+          `[Tiles3DLayer:${cfg.id}] maximumScreenSpaceError ${sse} clamped to ${clamped} (valid range [${MIN_SSE}, ${MAX_SSE}])`,
         );
       }
-      maxSSE = sse;
+      maxSSE = clamped;
     },
 
     /**

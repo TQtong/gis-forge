@@ -2292,12 +2292,16 @@ export function createTerrainLayer(opts: TerrainLayerOptions): TerrainLayer {
      * terrain.setExaggeration(0);   // 完全平坦
      */
     setExaggeration(value: number): void {
-      if (!Number.isFinite(value) || value < 0 || value > MAX_EXAGGERATION) {
-        throw new Error(
-          `[${TERRAIN_ERROR_CODES.INVALID_EXAGGERATION}] exaggeration must be in [0, ${MAX_EXAGGERATION}], got ${value}`,
+      // 非有限值回退为默认值，超范围值 clamp 到 [0, MAX_EXAGGERATION]
+      let clamped = Number.isFinite(value) ? value : DEFAULT_EXAGGERATION;
+      if (clamped < 0) clamped = 0;
+      if (clamped > MAX_EXAGGERATION) clamped = MAX_EXAGGERATION;
+      if (__DEV__ && clamped !== value) {
+        console.warn(
+          `[TerrainLayer:${cfg.id}] exaggeration ${value} clamped to ${clamped} (valid range [0, ${MAX_EXAGGERATION}])`,
         );
       }
-      currentExaggeration = value;
+      currentExaggeration = clamped;
       // 同步到 paint 属性缓存
       paintProps.set('terrain-exaggeration', value);
 
