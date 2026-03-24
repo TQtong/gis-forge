@@ -1,0 +1,106 @@
+---
+description: L3 调度层规范——CameraController、TileScheduler、WorkerPool、FrameScheduler。编辑 runtime 或 camera 包代码时应用。
+globs:
+  - "src/packages/runtime/**"
+  - "src/packages/camera-*/**"
+  - "src/packages/view-morph/**"
+alwaysApply: false
+---
+
+> **提醒**：所有代码必须完整实现 + 逐行注释 + 完整类型注释 + 完整错误处理。禁止省略、骨架、TODO。详见 core.mdc。
+# 调度与相机规范
+
+## CameraController 接口
+```typescript
+interface CameraController {
+  readonly type: '2d' | '25d' | '3d';
+  readonly state: CameraState;      // 来自 L0/types
+  readonly isAnimating: boolean;
+  readonly inertiaEnabled: boolean;
+  readonly constraints: CameraConstraints;
+
+  setCenter(center: [number, number]): void;
+  setZoom(zoom: number): void;
+  setBearing(bearing: number): void;   // 弧度，禁止用 heading
+  setPitch(pitch: number): void;       // 弧度
+  jumpTo(options: { center?; zoom?; bearing?; pitch? }): void;
+  flyTo(options: { center?; zoom?; bearing?; pitch?; altitude?; duration?; easing? }): CameraAnimation;
+  easeTo(options: { center?; zoom?; bearing?; pitch?; duration? }): CameraAnimation;
+  stop(): void;
+  setConstraints(c: Partial<CameraConstraints>): void;
+  setInertiaEnabled(enabled: boolean): void;
+
+  update(deltaTime: number, viewport: Viewport): CameraState;
+  handlePanStart(screenX: number, screenY: number): void;
+  handlePanMove(screenX: number, screenY: number): void;
+  handlePanEnd(): void;
+  handleZoom(delta: number, screenX: number, screenY: number): void;
+  handleRotate(bearingDelta: number, pitchDelta: number): void;
+
+  onMoveStart(cb: () => void): () => void;
+  onMove(cb: (state: CameraState) => void): () => void;
+  onMoveEnd(cb: () => void): () => void;
+  destroy(): void;
+}
+
+interface CameraConstraints {
+  minZoom: number; maxZoom: number;
+  minPitch: number; maxPitch: number;
+  maxBounds?: BBox2D;
+}
+```
+
+## Camera2D
+- 正交投影 `mat4.ortho()`
+- bearing=0 pitch=0（固定）
+- 惯性：速度采样最近 5 帧 + 指数衰减
+- flyTo：Bezier 曲线在 zoom/center 空间插值
+
+## Camera25D
+- 透视 `mat4.perspectiveReversedZ()`
+- bearing/pitch 可变，maxPitch 约束
+- 惯性：pan+rotate+pitch 独立衰减
+- 高 pitch 自动调整 far plane
+
+## Camera3D
+- ECEF 坐标系，`perspectiveReversedZInfinite()`
+- 四元数旋转（heading/pitch/roll → bearing/pitch/roll）
+- **地形碰撞**：异步查询 DEM 高度 + 平滑约束
+- 惯性：四元数 slerp 衰减
+- flyTo：Great Circle Arc + 高度抛物线
+- 额外方法：`setPosition(lon,lat,alt)` / `lookAt()` / `queryTerrainHeight()` / `setTerrainCollisionEnabled()`
+
+## ViewMorph
+- `morphTo(targetMode, fromCamera, toCamera, options)` → ViewMorphAnimation
+- 2D→25D：线性插值 pitch + ortho→perspective 渐变
+- 2D→3D：两阶段（pitch 升起 → 墨卡托→ECEF 顶点变形 + 投影混合）
+- 过渡期：两个相机同时计算，RenderGraph 使用混合矩阵
+
+## TileScheduler
+```typescript
+interface TileScheduler {
+  update(camera: CameraState, viewport: Viewport): TileScheduleResult;
+  registerSource(sourceId: string, options: TileSourceOptions): void;
+  unregisterSource(sourceId: string): void;
+  getVisibleTiles(sourceId: string): TileCoord[];
+  onTileLoaded(sourceId: string, coord: TileCoord, data: any): void;
+  onTileError(sourceId: string, coord: TileCoord, error: Error): void;
+  reloadAll(): void;
+  clearCache(sourceId?: string): void;
+}
+interface TileScheduleResult {
+  toLoad: TilePriority[];      // 按优先级排序
+  toUnload: TileCoord[];
+  visible: TileCoord[];
+  placeholder: Map<string, TileCoord>;  // 缺失瓦片替代
+}
+```
+- SSE（Screen Space Error）驱动 LOD
+- 高 pitch 远处降低优先级
+- Placeholder：父瓦片替代未加载的子瓦片
+
+## FrameScheduler
+- 四阶段：UPDATE → RENDER → POST_FRAME → IDLE
+- `hasBudget()` 检查帧预算
+- Page Visibility 自动降频
+- `requestRenderMode` 仅变化时渲染

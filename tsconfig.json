@@ -21,9 +21,9 @@
     "noUncheckedSideEffectImports": true,
 
     "paths": {
-      "@geoforge/core": ["./packages/core/src/index.ts"],
-      "@geoforge/core/*": ["./packages/core/src/*"]
+      "@geoforge/core": ["./src/packages/core/src/index.ts"],
+      "@geoforge/core/*": ["./src/packages/core/src/*"]
     }
   },
-  "include": ["src", "packages"]
+  "include": ["src"]
 }

@@ -8,6 +8,9 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+# 已移除的 DevPlayground；若本机仍有被锁定的 node_modules 残留可忽略
+playground/
+
 dist
 dist-ssr
 *.local

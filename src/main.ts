@@ -4,49 +4,49 @@
 // 并通过 L1 模块管理 GPU 资源渲染墨卡托投影三角形。
 // ============================================================
 
-import * as vec2 from '../packages/core/src/math/vec2.ts';
-import * as vec3 from '../packages/core/src/math/vec3.ts';
-import * as vec4 from '../packages/core/src/math/vec4.ts';
-import * as mat3 from '../packages/core/src/math/mat3.ts';
-import * as mat4 from '../packages/core/src/math/mat4.ts';
-import * as quat from '../packages/core/src/math/quat.ts';
-import * as bbox from '../packages/core/src/math/bbox.ts';
-import * as frustumMod from '../packages/core/src/math/frustum.ts';
-import * as interp from '../packages/core/src/math/interpolate.ts';
-import * as trig from '../packages/core/src/math/trigonometry.ts';
+import * as vec2 from './packages/core/src/math/vec2.ts';
+import * as vec3 from './packages/core/src/math/vec3.ts';
+import * as vec4 from './packages/core/src/math/vec4.ts';
+import * as mat3 from './packages/core/src/math/mat3.ts';
+import * as mat4 from './packages/core/src/math/mat4.ts';
+import * as quat from './packages/core/src/math/quat.ts';
+import * as bbox from './packages/core/src/math/bbox.ts';
+import * as frustumMod from './packages/core/src/math/frustum.ts';
+import * as interp from './packages/core/src/math/interpolate.ts';
+import * as trig from './packages/core/src/math/trigonometry.ts';
 
 import {
   WGS84_A, WGS84_E2,
   geodeticToECEF, ecefToGeodetic,
   haversineDistance, vincentyDistance,
-} from '../packages/core/src/geo/ellipsoid.ts';
+} from './packages/core/src/geo/ellipsoid.ts';
 
 import {
   TILE_SIZE, lngLatToMercator, mercatorToLngLat,
   lngLatToTile, tileToBBox, groundResolution,
   lngLatToPixel,
-} from '../packages/core/src/geo/mercator.ts';
+} from './packages/core/src/geo/mercator.ts';
 
 import {
   initialBearing, midpoint,
-} from '../packages/core/src/geo/geodesic.ts';
+} from './packages/core/src/geo/geodesic.ts';
 
-import { earcut, flatten } from '../packages/core/src/algorithm/earcut.ts';
-import { douglasPeucker } from '../packages/core/src/algorithm/simplify.ts';
-import { pointInPolygon, pointInTriangle } from '../packages/core/src/algorithm/contain.ts';
-import { segmentSegment, bboxOverlap } from '../packages/core/src/algorithm/intersect.ts';
+import { earcut, flatten } from './packages/core/src/algorithm/earcut.ts';
+import { douglasPeucker } from './packages/core/src/algorithm/simplify.ts';
+import { pointInPolygon, pointInTriangle } from './packages/core/src/algorithm/contain.ts';
+import { segmentSegment, bboxOverlap } from './packages/core/src/algorithm/intersect.ts';
 
-import { createRTree } from '../packages/core/src/index/rtree.ts';
-import { createSpatialHash } from '../packages/core/src/index/spatial-hash.ts';
+import { createRTree } from './packages/core/src/index/rtree.ts';
+import { createSpatialHash } from './packages/core/src/index/spatial-hash.ts';
 
-import { splitDouble, recombine } from '../packages/core/src/precision/split-double.ts';
-import { computeRTCCenter, offsetPositions } from '../packages/core/src/precision/rtc.ts';
+import { splitDouble, recombine } from './packages/core/src/precision/split-double.ts';
+import { computeRTCCenter, offsetPositions } from './packages/core/src/precision/rtc.ts';
 
-import { EventEmitter } from '../packages/core/src/infra/event.ts';
-import { uniqueId, nanoid } from '../packages/core/src/infra/id.ts';
-import { createLogger } from '../packages/core/src/infra/logger.ts';
-import { createDefaultConfig } from '../packages/core/src/infra/config.ts';
-import { registerCRS, getCRS, transform } from '../packages/core/src/infra/coordinate.ts';
+import { EventEmitter } from './packages/core/src/infra/event.ts';
+import { uniqueId, nanoid } from './packages/core/src/infra/id.ts';
+import { createLogger } from './packages/core/src/infra/logger.ts';
+import { createDefaultConfig } from './packages/core/src/infra/config.ts';
+import { registerCRS, getCRS, transform } from './packages/core/src/infra/coordinate.ts';
 
 // ============================================================
 // 测试框架
@@ -607,78 +607,78 @@ test('transform 4326→3857', () => {
 // 7. L1 GPU 层模块测试（需要 WebGPU）
 // ============================================================
 
-import { createDeviceManager } from '../packages/gpu/src/l1/device.ts';
-import { createSurfaceManager } from '../packages/gpu/src/l1/surface.ts';
-import { createGPUMemoryTracker } from '../packages/gpu/src/l1/memory-tracker.ts';
-import { createBufferPool } from '../packages/gpu/src/l1/buffer-pool.ts';
-import { createTextureManager } from '../packages/gpu/src/l1/texture-manager.ts';
-import { createBindGroupCache } from '../packages/gpu/src/l1/bind-group-cache.ts';
-import { createIndirectDrawManager } from '../packages/gpu/src/l1/indirect-draw.ts';
-import { createGPUUploader } from '../packages/gpu/src/l1/uploader.ts';
-import { initializeL1 } from '../packages/gpu/src/l1/index.ts';
+import { createDeviceManager } from './packages/gpu/src/l1/device.ts';
+import { createSurfaceManager } from './packages/gpu/src/l1/surface.ts';
+import { createGPUMemoryTracker } from './packages/gpu/src/l1/memory-tracker.ts';
+import { createBufferPool } from './packages/gpu/src/l1/buffer-pool.ts';
+import { createTextureManager } from './packages/gpu/src/l1/texture-manager.ts';
+import { createBindGroupCache } from './packages/gpu/src/l1/bind-group-cache.ts';
+import { createIndirectDrawManager } from './packages/gpu/src/l1/indirect-draw.ts';
+import { createGPUUploader } from './packages/gpu/src/l1/uploader.ts';
+import { initializeL1 } from './packages/gpu/src/l1/index.ts';
 
-import { createBlendPresets } from '../packages/gpu/src/l2/blend-presets.ts';
-import { createUniformLayoutBuilder } from '../packages/gpu/src/l2/uniform-layout.ts';
-import { createWGSLTemplates } from '../packages/gpu/src/l2/wgsl-templates.ts';
-import { createDepthManager } from '../packages/gpu/src/l2/depth-manager.ts';
-import { createStencilManager } from '../packages/gpu/src/l2/stencil-manager.ts';
-import { createRenderStats } from '../packages/gpu/src/l2/render-stats.ts';
-import { createShaderAssembler } from '../packages/gpu/src/l2/shader-assembler.ts';
-import { createPipelineCache } from '../packages/gpu/src/l2/pipeline-cache.ts';
-import { createComputePassManager } from '../packages/gpu/src/l2/compute-pass.ts';
-import { createRenderGraph } from '../packages/gpu/src/l2/render-graph.ts';
-import { createFrameGraphBuilder } from '../packages/gpu/src/l2/frame-graph-builder.ts';
-import { initializeL2 } from '../packages/gpu/src/l2/index.ts';
+import { createBlendPresets } from './packages/gpu/src/l2/blend-presets.ts';
+import { createUniformLayoutBuilder } from './packages/gpu/src/l2/uniform-layout.ts';
+import { createWGSLTemplates } from './packages/gpu/src/l2/wgsl-templates.ts';
+import { createDepthManager } from './packages/gpu/src/l2/depth-manager.ts';
+import { createStencilManager } from './packages/gpu/src/l2/stencil-manager.ts';
+import { createRenderStats } from './packages/gpu/src/l2/render-stats.ts';
+import { createShaderAssembler } from './packages/gpu/src/l2/shader-assembler.ts';
+import { createPipelineCache } from './packages/gpu/src/l2/pipeline-cache.ts';
+import { createComputePassManager } from './packages/gpu/src/l2/compute-pass.ts';
+import { createRenderGraph } from './packages/gpu/src/l2/render-graph.ts';
+import { createFrameGraphBuilder } from './packages/gpu/src/l2/frame-graph-builder.ts';
+import { initializeL2 } from './packages/gpu/src/l2/index.ts';
 
 // ============================================================
 // L3 调度层模块导入
 // ============================================================
 
-import { createErrorRecovery } from '../packages/runtime/src/error-recovery.ts';
-import { createRequestScheduler } from '../packages/runtime/src/request-scheduler.ts';
-import { createWorkerPool } from '../packages/runtime/src/worker-pool.ts';
-import { createResourceManager } from '../packages/runtime/src/resource-manager.ts';
-import { createMemoryBudget } from '../packages/runtime/src/memory-budget.ts';
-import { createTileScheduler } from '../packages/runtime/src/tile-scheduler.ts';
-import { createFrameScheduler } from '../packages/runtime/src/frame-scheduler.ts';
-import { createCamera2D } from '../packages/runtime/src/camera-controller.ts';
-import { createCamera3D } from '../packages/runtime/src/camera-3d.ts';
-import { createViewMorph } from '../packages/runtime/src/view-morph.ts';
-import { initializeL3 } from '../packages/runtime/src/index.ts';
+import { createErrorRecovery } from './packages/runtime/src/error-recovery.ts';
+import { createRequestScheduler } from './packages/runtime/src/request-scheduler.ts';
+import { createWorkerPool } from './packages/runtime/src/worker-pool.ts';
+import { createResourceManager } from './packages/runtime/src/resource-manager.ts';
+import { createMemoryBudget } from './packages/runtime/src/memory-budget.ts';
+import { createTileScheduler } from './packages/runtime/src/tile-scheduler.ts';
+import { createFrameScheduler } from './packages/runtime/src/frame-scheduler.ts';
+import { createCamera2D } from './packages/runtime/src/camera-controller.ts';
+import { createCamera3D } from './packages/runtime/src/camera-3d.ts';
+import { createViewMorph } from './packages/runtime/src/view-morph.ts';
+import { initializeL3 } from './packages/runtime/src/index.ts';
 
 // ============================================================
 // L4 场景层模块导入
 // ============================================================
 
-import { createSceneGraph } from '../packages/scene/src/scene-graph.ts';
-import { createLayerManager, createDefaultLayer } from '../packages/scene/src/layer-manager.ts';
-import { createSourceManager } from '../packages/scene/src/source-manager.ts';
-import { createStyleEngine } from '../packages/scene/src/style-engine.ts';
-import { createFeatureStateManager } from '../packages/scene/src/feature-state.ts';
-import { createLabelManager } from '../packages/scene/src/label-manager.ts';
-import { createGlyphManager } from '../packages/scene/src/glyph-manager.ts';
-import { createAntiMeridianHandler } from '../packages/scene/src/antimeridian.ts';
-import { createAnimationManager } from '../packages/scene/src/animation.ts';
-import { createSpatialQuery } from '../packages/scene/src/spatial-query.ts';
-import { createA11yManager } from '../packages/scene/src/a11y.ts';
-import { initializeL4 } from '../packages/scene/src/index.ts';
+import { createSceneGraph } from './packages/scene/src/scene-graph.ts';
+import { createLayerManager, createDefaultLayer } from './packages/scene/src/layer-manager.ts';
+import { createSourceManager } from './packages/scene/src/source-manager.ts';
+import { createStyleEngine } from './packages/scene/src/style-engine.ts';
+import { createFeatureStateManager } from './packages/scene/src/feature-state.ts';
+import { createLabelManager } from './packages/scene/src/label-manager.ts';
+import { createGlyphManager } from './packages/scene/src/glyph-manager.ts';
+import { createAntiMeridianHandler } from './packages/scene/src/antimeridian.ts';
+import { createAnimationManager } from './packages/scene/src/animation.ts';
+import { createSpatialQuery } from './packages/scene/src/spatial-query.ts';
+import { createA11yManager } from './packages/scene/src/a11y.ts';
+import { initializeL4 } from './packages/scene/src/index.ts';
 
-import { createExtensionRegistry } from '../packages/extensions/src/registry.ts';
-import { createExtensionLifecycle } from '../packages/extensions/src/lifecycle.ts';
-import { initializeL5 } from '../packages/extensions/src/index.ts';
+import { createExtensionRegistry } from './packages/extensions/src/registry.ts';
+import { createExtensionLifecycle } from './packages/extensions/src/lifecycle.ts';
+import { initializeL5 } from './packages/extensions/src/index.ts';
 
-import { Map2D } from '../packages/preset-2d/src/map-2d.ts';
-import { NavigationControl, ScaleControl, AttributionControl } from '../packages/preset-2d/src/controls.ts';
-import { Map25D } from '../packages/preset-25d/src/map-25d.ts';
-import { Globe3D } from '../packages/preset-3d/src/globe-3d.ts';
-import { MapFull } from '../packages/preset-full/src/map-full.ts';
+import { Map2D } from './packages/preset-2d/src/map-2d.ts';
+import { NavigationControl, ScaleControl, AttributionControl } from './packages/preset-2d/src/controls.ts';
+import { Map25D } from './packages/preset-25d/src/map-25d.ts';
+import { Globe3D } from './packages/preset-3d/src/globe-3d.ts';
+import { MapFull } from './packages/preset-full/src/map-full.ts';
 
-import { createInternalBus } from '../packages/core/src/infra/internal-bus.ts';
-import { GeoForgeError, GeoForgeErrorCode, formatErrorWithHint } from '../packages/core/src/infra/errors.ts';
-import { createObjectPool } from '../packages/core/src/infra/object-pool.ts';
-import { createPerformanceManager } from '../packages/runtime/src/performance-manager.ts';
-import { createDevTools } from '../packages/gpu/src/l2/devtools.ts';
-import { createPluginRegistry } from '../packages/scene/src/layer-plugin.ts';
+import { createInternalBus } from './packages/core/src/infra/internal-bus.ts';
+import { GeoForgeError, GeoForgeErrorCode, formatErrorWithHint } from './packages/core/src/infra/errors.ts';
+import { createObjectPool } from './packages/core/src/infra/object-pool.ts';
+import { createPerformanceManager } from './packages/runtime/src/performance-manager.ts';
+import { createDevTools } from './packages/gpu/src/l2/devtools.ts';
+import { createPluginRegistry } from './packages/scene/src/layer-plugin.ts';
 
 /**
  * 运行 L1 层的集成测试。

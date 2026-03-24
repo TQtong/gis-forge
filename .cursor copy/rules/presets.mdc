@@ -1,0 +1,51 @@
+---
+description: L6 预设层规范——Map2D/Map25D/Globe3D/MapFull 的 API 设计约束。编辑预设包代码时应用。
+globs:
+  - "src/packages/preset-*/**"
+alwaysApply: false
+---
+
+> **提醒**：所有代码必须完整实现 + 逐行注释 + 完整类型注释 + 完整错误处理。禁止省略、骨架、TODO。详见 core.mdc。
+# 预设层规范
+
+## 设计原则
+1. **零新逻辑**——只组装 L0~L5，不含新功能代码
+2. **可拆解**——用户可从 preset 起步，逐步替换为底层模块
+3. **逃生舱口**——暴露 `renderer`/`scene`/`scheduler`/`extensions`/`camera`/`config` getter
+4. **默认值合理**——开箱即用
+
+## Map2D 关键 API
+- 视图：getCenter/setCenter/getZoom/setZoom/flyTo/easeTo/jumpTo/fitBounds/stop
+- 图层：addSource/addLayer/removeLayer/moveLayer/setLayoutProperty/setPaintProperty/setFilter
+- 查询：**queryRenderedFeatures → `Promise<Feature[]>`**（异步！）/ querySourceFeatures（同步）
+- 状态：setFeatureState/getFeatureState
+- 事件：on(type, callback) / on(type, layerId, callback) / once / off
+- Controls：addControl(control, position) — NavigationControl/ScaleControl/AttributionControl/GeolocateControl/FullscreenControl
+- 坐标：project(lngLat) / unproject(point)
+- 逃生：`get camera(): CameraController` / `get renderer()` / `get scene()` / `get scheduler()` / `get extensions()`
+
+## Map25D（extends Map2D）
+- +getPitch/setPitch/getBearing/setBearing/rotateTo/resetNorth
+- +setLight(light: LightSpec)
+
+## Globe3D
+- getCameraPosition() → `{ lon, lat, alt, bearing, pitch, roll }`（**用 bearing 不是 heading**）
+- flyTo({ destination, orientation: { bearing, pitch, roll }, duration })
+- addImageryLayer / add3DTileset / addGeoJSON / addEntity
+- setTerrainExaggeration / getTerrainHeight
+- setAtmosphereEnabled / setShadowsEnabled / setSkyboxEnabled
+- setDateTime / setClockMultiplier
+- cartographicToScreen / screenToCartographic
+- morphTo2D / morphTo25D / morphTo3D
+
+## MapFull（extends Map25D）
+- setMode('2d'|'25d'|'3d', { duration? })
+- 合并所有功能
+
+## 内部初始化顺序
+```
+constructor:
+  createCanvas → L0(config) → L1(Device→...) → L2(...) → L3(ErrorRecovery→...→Camera→FrameScheduler)
+  → L4(...→LayerManager→SceneGraph) → L5(Registry→内置投影/交互)
+  → 加载样式 → 初始视图 → 默认 Controls → FrameScheduler.start() → emit('load')
+```
