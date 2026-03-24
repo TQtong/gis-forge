@@ -13,6 +13,56 @@ const Z_ORDER_BITS = 15;
 /** z-order 坐标最大值（2^15 = 32768），用于将浮点坐标归一化到整数网格 */
 const Z_ORDER_MAX = 1 << Z_ORDER_BITS;
 
+/**
+ * 触发分块剖分的顶点数阈值（不含孔洞时外环顶点数）。
+ * 超过该值时启用四象限裁剪 + 分块 earcut，以降低单次 earcut 的 CPU 峰值。
+ */
+export const CHUNK_THRESHOLD = 10000;
+
+/**
+ * 轴对齐包围盒（用于分块裁剪与 `flattenChunk`）。
+ * 坐标单位与输入 `data` 的 x/y 一致（通常为投影或经纬度）。
+ */
+export interface EarcutChunkBBox {
+    /** 最小 x */
+    readonly minX: number;
+    /** 最小 y */
+    readonly minY: number;
+    /** 最大 x */
+    readonly maxX: number;
+    /** 最大 y */
+    readonly maxY: number;
+}
+
+/**
+ * `earcutChunked` 最近一次调用的统计信息（每次调用开始时会重置）。
+ * 当未走分块路径时，`mergedVertices` 为 `null`，三角形索引语义与 `earcut` 相同（指向输入 `data`）。
+ * 当走分块路径时，返回的三角形索引指向 `mergedVertices` 平铺数组（步长 `dim`）。
+ */
+export interface EarcutChunkedStats {
+    /** 实际执行 earcut 的分块数量（空分块不计入） */
+    chunkCount: number;
+    /** 合并后顶点数（= mergedVertices.length / dim，分块路径）或输入顶点数（直通路径） */
+    totalVertices: number;
+    /** 三角剖分耗时（毫秒，`performance.now` 差值；不可用则为 0） */
+    triangulationTimeMs: number;
+    /**
+     * 分块路径下合并后的平铺顶点坐标；与 `earcutChunked` 返回的三角形索引一致。
+     * 直通路径或未启用分块时为 `null`。
+     */
+    mergedVertices: number[] | null;
+}
+
+/**
+ * 最近一次 `earcutChunked` 调用的统计（模块级单例，便于调用方读取而无需闭包）。
+ */
+export const earcutChunkedStats: EarcutChunkedStats = {
+    chunkCount: 0,
+    totalVertices: 0,
+    triangulationTimeMs: 0,
+    mergedVertices: null,
+};
+
 // ======================== 双向链表节点 ========================
 
 /**
@@ -153,6 +203,546 @@ export function earcut(
     earcutLinked(outerNode, triangles, dim, minX, minY, invSize, 0);
 
     return triangles;
+}
+
+/**
+ * 将单环平铺坐标裁剪到轴对齐矩形内（Sutherland–Hodgman），输出仍为 2D 点序列。
+ *
+ * @param ring - 外环顶点 [x,y] 列表（不必重复首尾闭合点）
+ * @param minX - 裁剪矩形西界
+ * @param minY - 裁剪矩形南界
+ * @param maxX - 裁剪矩形东界
+ * @param maxY - 裁剪矩形北界
+ * @returns 裁剪后的顶点序列（可能为空）
+ */
+function clipPolygonToRect(
+    ring: Array<[number, number]>,
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number,
+): Array<[number, number]> {
+    if (ring.length === 0) {
+        return [];
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(maxX) || minX > maxX) {
+        return [];
+    }
+    if (!Number.isFinite(minY) || !Number.isFinite(maxY) || minY > maxY) {
+        return [];
+    }
+
+    const intersectSegVertical = (
+        ax: number, ay: number,
+        bx: number, by: number,
+        xLine: number,
+    ): [number, number] => {
+        const dx = bx - ax;
+        if (Math.abs(dx) < 1e-30) {
+            return [xLine, ay];
+        }
+        const t = (xLine - ax) / dx;
+        return [xLine, ay + t * (by - ay)];
+    };
+
+    const intersectSegHorizontal = (
+        ax: number, ay: number,
+        bx: number, by: number,
+        yLine: number,
+    ): [number, number] => {
+        const dy = by - ay;
+        if (Math.abs(dy) < 1e-30) {
+            return [ax, yLine];
+        }
+        const t = (yLine - ay) / dy;
+        return [ax + t * (bx - ax), yLine];
+    };
+
+    const clipLeft = (poly: Array<[number, number]>): Array<[number, number]> => {
+        const out: Array<[number, number]> = [];
+        if (poly.length === 0) {
+            return out;
+        }
+        let prev = poly[poly.length - 1];
+        let prevIn = prev[0] >= minX;
+        for (let i = 0; i < poly.length; i++) {
+            const cur = poly[i];
+            const curIn = cur[0] >= minX;
+            if (curIn) {
+                if (!prevIn) {
+                    out.push(intersectSegVertical(prev[0], prev[1], cur[0], cur[1], minX));
+                }
+                out.push(cur);
+            } else if (prevIn) {
+                out.push(intersectSegVertical(prev[0], prev[1], cur[0], cur[1], minX));
+            }
+            prev = cur;
+            prevIn = curIn;
+        }
+        return out;
+    };
+
+    const clipRight = (poly: Array<[number, number]>): Array<[number, number]> => {
+        const out: Array<[number, number]> = [];
+        if (poly.length === 0) {
+            return out;
+        }
+        let prev = poly[poly.length - 1];
+        let prevIn = prev[0] <= maxX;
+        for (let i = 0; i < poly.length; i++) {
+            const cur = poly[i];
+            const curIn = cur[0] <= maxX;
+            if (curIn) {
+                if (!prevIn) {
+                    out.push(intersectSegVertical(prev[0], prev[1], cur[0], cur[1], maxX));
+                }
+                out.push(cur);
+            } else if (prevIn) {
+                out.push(intersectSegVertical(prev[0], prev[1], cur[0], cur[1], maxX));
+            }
+            prev = cur;
+            prevIn = curIn;
+        }
+        return out;
+    };
+
+    const clipBottom = (poly: Array<[number, number]>): Array<[number, number]> => {
+        const out: Array<[number, number]> = [];
+        if (poly.length === 0) {
+            return out;
+        }
+        let prev = poly[poly.length - 1];
+        let prevIn = prev[1] >= minY;
+        for (let i = 0; i < poly.length; i++) {
+            const cur = poly[i];
+            const curIn = cur[1] >= minY;
+            if (curIn) {
+                if (!prevIn) {
+                    out.push(intersectSegHorizontal(prev[0], prev[1], cur[0], cur[1], minY));
+                }
+                out.push(cur);
+            } else if (prevIn) {
+                out.push(intersectSegHorizontal(prev[0], prev[1], cur[0], cur[1], minY));
+            }
+            prev = cur;
+            prevIn = curIn;
+        }
+        return out;
+    };
+
+    const clipTop = (poly: Array<[number, number]>): Array<[number, number]> => {
+        const out: Array<[number, number]> = [];
+        if (poly.length === 0) {
+            return out;
+        }
+        let prev = poly[poly.length - 1];
+        let prevIn = prev[1] <= maxY;
+        for (let i = 0; i < poly.length; i++) {
+            const cur = poly[i];
+            const curIn = cur[1] <= maxY;
+            if (curIn) {
+                if (!prevIn) {
+                    out.push(intersectSegHorizontal(prev[0], prev[1], cur[0], cur[1], maxY));
+                }
+                out.push(cur);
+            } else if (prevIn) {
+                out.push(intersectSegHorizontal(prev[0], prev[1], cur[0], cur[1], maxY));
+            }
+            prev = cur;
+            prevIn = curIn;
+        }
+        return out;
+    };
+
+    let p = ring;
+    p = clipLeft(p);
+    p = clipRight(p);
+    p = clipBottom(p);
+    p = clipTop(p);
+    return p;
+}
+
+/**
+ * 将平铺外环转为 [x,y] 顶点列表。
+ *
+ * @param data - 平铺坐标
+ * @param start - 起始坐标下标（含）
+ * @param vertexCount - 顶点个数
+ * @param dim - 步长
+ * @returns [x,y] 数组
+ */
+function ringXYToPoints(
+    data: ArrayLike<number>,
+    start: number,
+    vertexCount: number,
+    dim: number,
+): Array<[number, number]> {
+    const pts: Array<[number, number]> = [];
+    for (let k = 0; k < vertexCount; k++) {
+        const o = start + k * dim;
+        const x = data[o];
+        const y = data[o + 1];
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            return [];
+        }
+        pts.push([x, y]);
+    }
+    return pts;
+}
+
+/**
+ * 计算外环轴对齐包围盒。
+ *
+ * @param data - 平铺数据
+ * @param outerLen - 外环字节长度（坐标下标）
+ * @param dim - 维度
+ * @returns 包围盒；无效时返回 null
+ */
+function computeRingBBox2D(
+    data: ArrayLike<number>,
+    outerLen: number,
+    dim: number,
+): EarcutChunkBBox | null {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < outerLen; i += dim) {
+        const x = data[i];
+        const y = data[i + 1];
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            continue;
+        }
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(maxX) || minX >= maxX) {
+        return null;
+    }
+    if (!Number.isFinite(minY) || !Number.isFinite(maxY) || minY >= maxY) {
+        return null;
+    }
+    return { minX, minY, maxX, maxY };
+}
+
+/**
+ * 将裁剪后的 2D 环还原为平铺 `dim` 维顶点：对非角点沿原环边线性插值额外维度。
+ *
+ * @param data - 原始外环平铺数据
+ * @param clipped - 裁剪后的 [x,y] 顶点
+ * @param outerLen - 外环字节长度
+ * @param dim - 维度
+ * @returns 平铺顶点数组
+ */
+function clippedXYToFlatWithDim(
+    data: ArrayLike<number>,
+    clipped: Array<[number, number]>,
+    outerLen: number,
+    dim: number,
+): number[] {
+    const n = Math.floor(outerLen / dim);
+    if (n < 3) {
+        return [];
+    }
+    const ringPts = ringXYToPoints(data, 0, n, dim);
+    const out: number[] = [];
+    const eps = 1e-9;
+
+    const findEdgeInterpolation = (x: number, y: number): number[] | null => {
+        for (let k = 0; k < n; k++) {
+            const k2 = (k + 1) % n;
+            const ax = ringPts[k][0];
+            const ay = ringPts[k][1];
+            const bx = ringPts[k2][0];
+            const by = ringPts[k2][1];
+            const o0 = k * dim;
+            const o1 = k2 * dim;
+            if (Math.abs(ax - bx) < eps && Math.abs(ay - by) < eps) {
+                continue;
+            }
+            const dx = bx - ax;
+            const dy = by - ay;
+            const len2 = dx * dx + dy * dy;
+            if (len2 < eps * eps) {
+                continue;
+            }
+            const wx = x - ax;
+            const wy = y - ay;
+            const t = (wx * dx + wy * dy) / len2;
+            if (t < -1e-6 || t > 1 + 1e-6) {
+                continue;
+            }
+            const px = ax + t * dx;
+            const py = ay + t * dy;
+            if ((px - x) * (px - x) + (py - y) * (py - y) > 1e-6 * 1e-6) {
+                continue;
+            }
+            const row: number[] = [];
+            for (let d = 0; d < dim; d++) {
+                row.push(data[o0 + d] * (1 - t) + data[o1 + d] * t);
+            }
+            return row;
+        }
+        return null;
+    };
+
+    for (let i = 0; i < clipped.length; i++) {
+        const x = clipped[i][0];
+        const y = clipped[i][1];
+        let matched = false;
+        for (let k = 0; k < n; k++) {
+            const o = k * dim;
+            if (
+                Math.abs(data[o] - x) < eps &&
+                Math.abs(data[o + 1] - y) < eps
+            ) {
+                for (let d = 0; d < dim; d++) {
+                    out.push(data[o + d]);
+                }
+                matched = true;
+                break;
+            }
+        }
+        if (matched) {
+            continue;
+        }
+        const interp = findEdgeInterpolation(x, y);
+        if (interp !== null) {
+            for (let d = 0; d < dim; d++) {
+                out.push(interp[d]!);
+            }
+        } else {
+            for (let d = 0; d < dim; d++) {
+                out.push(d < 2 ? (d === 0 ? x : y) : 0);
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * 从平铺外环中提取落在给定轴对齐盒内的子顶点序列（先按 XY 裁剪再恢复 `dim` 维）。
+ * 仅用于**无孔洞**外环；孔洞需完整 `earcut`，不在此函数处理。
+ *
+ * @param data - 平铺坐标（单外环）
+ * @param dim - 顶点维度（≥2）
+ * @param bbox - 目标包围盒
+ * @returns `vertices` 为裁剪后可送 `earcut` 的平铺数组；`holes` 恒为空
+ *
+ * @example
+ * const { vertices } = flattenChunk(flat, 2, { minX: 0, minY: 0, maxX: 5, maxY: 5 });
+ */
+export function flattenChunk(
+    data: ArrayLike<number>,
+    dim: number,
+    bbox: EarcutChunkBBox,
+): { vertices: number[]; holes: number[] } {
+    if (dim < 2) {
+        return { vertices: [], holes: [] };
+    }
+    const total = Math.floor(data.length / dim);
+    if (total < 3 || total * dim !== data.length) {
+        return { vertices: [], holes: [] };
+    }
+    if (
+        !Number.isFinite(bbox.minX) || !Number.isFinite(bbox.maxX) || bbox.minX >= bbox.maxX ||
+        !Number.isFinite(bbox.minY) || !Number.isFinite(bbox.maxY) || bbox.minY >= bbox.maxY
+    ) {
+        return { vertices: [], holes: [] };
+    }
+    const outerLen = data.length;
+    const ring2 = ringXYToPoints(data, 0, total, dim);
+    if (ring2.length < 3) {
+        return { vertices: [], holes: [] };
+    }
+    const clipped = clipPolygonToRect(ring2, bbox.minX, bbox.minY, bbox.maxX, bbox.maxY);
+    if (clipped.length < 3) {
+        return { vertices: [], holes: [] };
+    }
+    const flat = clippedXYToFlatWithDim(data, clipped, outerLen, dim);
+    if (flat.length < dim * 3) {
+        return { vertices: [], holes: [] };
+    }
+    return { vertices: flat, holes: [] };
+}
+
+/**
+ * 对超大**无孔洞**多边形自动分四象限裁剪后分别三角剖分并合并索引。
+ * 若顶点数不超过 {@link CHUNK_THRESHOLD}、存在孔洞、或 `dim`<2，则行为与 {@link earcut} 一致。
+ *
+ * @param data - 平铺坐标
+ * @param holeIndices - 孔洞起始顶点序号；存在孔洞时直接调用 `earcut`（保证拓扑正确）
+ * @param dim - 顶点维度，默认 2
+ * @returns 三角形索引；直通路径下为输入顶点序号。分块路径下序号指向 {@link earcutChunkedStats}.mergedVertices
+ *
+ * @example
+ * const tri = earcutChunked(flat, undefined, 2);
+ * const verts = earcutChunkedStats.mergedVertices ?? flat;
+ */
+export function earcutChunked(
+    data: ArrayLike<number>,
+    holeIndices?: number[],
+    dim: number = 2,
+): number[] {
+    const hasHoles = holeIndices !== undefined && holeIndices !== null && holeIndices.length > 0;
+    const outerLen = hasHoles ? holeIndices![0] * dim : data.length;
+
+    const t0 =
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? performance.now()
+            : typeof Date !== 'undefined'
+                ? Date.now()
+                : 0;
+
+    const resetStats = (): void => {
+        earcutChunkedStats.chunkCount = 0;
+        earcutChunkedStats.totalVertices = 0;
+        earcutChunkedStats.triangulationTimeMs = 0;
+        earcutChunkedStats.mergedVertices = null;
+    };
+
+    resetStats();
+
+    if (dim < 2) {
+        const tri = earcut(data, holeIndices, dim);
+        const t1 =
+            typeof performance !== 'undefined' && typeof performance.now === 'function'
+                ? performance.now()
+                : typeof Date !== 'undefined'
+                    ? Date.now()
+                    : 0;
+        earcutChunkedStats.triangulationTimeMs = Math.max(0, t1 - t0);
+        earcutChunkedStats.totalVertices = Math.floor(data.length / dim);
+        earcutChunkedStats.chunkCount = 1;
+        return tri;
+    }
+
+    const vertexCount = Math.floor(outerLen / dim);
+    if (vertexCount * dim !== outerLen || vertexCount < 3) {
+        const tri = earcut(data, holeIndices, dim);
+        const t1 =
+            typeof performance !== 'undefined' && typeof performance.now === 'function'
+                ? performance.now()
+                : typeof Date !== 'undefined'
+                    ? Date.now()
+                    : 0;
+        earcutChunkedStats.triangulationTimeMs = Math.max(0, t1 - t0);
+        earcutChunkedStats.totalVertices = Math.max(0, vertexCount);
+        earcutChunkedStats.chunkCount = 1;
+        return tri;
+    }
+
+    if (hasHoles || vertexCount <= CHUNK_THRESHOLD) {
+        const tri = earcut(data, holeIndices, dim);
+        const t1 =
+            typeof performance !== 'undefined' && typeof performance.now === 'function'
+                ? performance.now()
+                : typeof Date !== 'undefined'
+                    ? Date.now()
+                    : 0;
+        earcutChunkedStats.triangulationTimeMs = Math.max(0, t1 - t0);
+        earcutChunkedStats.totalVertices = vertexCount;
+        earcutChunkedStats.chunkCount = 1;
+        earcutChunkedStats.mergedVertices = null;
+        return tri;
+    }
+
+    const globalBox = computeRingBBox2D(data, outerLen, dim);
+    if (globalBox === null) {
+        const tri = earcut(data, holeIndices, dim);
+        const t1 =
+            typeof performance !== 'undefined' && typeof performance.now === 'function'
+                ? performance.now()
+                : typeof Date !== 'undefined'
+                    ? Date.now()
+                    : 0;
+        earcutChunkedStats.triangulationTimeMs = Math.max(0, t1 - t0);
+        earcutChunkedStats.totalVertices = vertexCount;
+        earcutChunkedStats.chunkCount = 1;
+        return tri;
+    }
+
+    const spanX = globalBox.maxX - globalBox.minX;
+    const spanY = globalBox.maxY - globalBox.minY;
+    const midX = globalBox.minX + spanX * 0.5;
+    const midY = globalBox.minY + spanY * 0.5;
+    /** 分割线处微小间隙，避免相邻象限裁剪结果在公共边上重复三角化 */
+    const splitEps = Math.max(1e-12 * Math.max(spanX, spanY, 1e-15), Number.EPSILON * 8);
+    const q0maxX = midX - splitEps;
+    const q0maxY = midY - splitEps;
+    const q1minX = midX + splitEps;
+    const q2minY = midY + splitEps;
+    if (q0maxX <= globalBox.minX || q0maxY <= globalBox.minY || q1minX >= globalBox.maxX || q2minY >= globalBox.maxY) {
+        const tri = earcut(data, holeIndices, dim);
+        const t1 =
+            typeof performance !== 'undefined' && typeof performance.now === 'function'
+                ? performance.now()
+                : typeof Date !== 'undefined'
+                    ? Date.now()
+                    : 0;
+        earcutChunkedStats.triangulationTimeMs = Math.max(0, t1 - t0);
+        earcutChunkedStats.totalVertices = vertexCount;
+        earcutChunkedStats.chunkCount = 1;
+        earcutChunkedStats.mergedVertices = null;
+        return tri;
+    }
+
+    const quads: EarcutChunkBBox[] = [
+        { minX: globalBox.minX, minY: globalBox.minY, maxX: q0maxX, maxY: q0maxY },
+        { minX: q1minX, minY: globalBox.minY, maxX: globalBox.maxX, maxY: q0maxY },
+        { minX: globalBox.minX, minY: q2minY, maxX: q0maxX, maxY: globalBox.maxY },
+        { minX: q1minX, minY: q2minY, maxX: globalBox.maxX, maxY: globalBox.maxY },
+    ];
+
+    const mergedVertices: number[] = [];
+    const mergedTriangles: number[] = [];
+    let chunkUsed = 0;
+    let vertexOffset = 0;
+
+    for (let qi = 0; qi < quads.length; qi++) {
+        const qb = quads[qi]!;
+        const { vertices: chunkVerts } = flattenChunk(data, dim, qb);
+        if (chunkVerts.length < dim * 3) {
+            continue;
+        }
+        const localTri = earcut(chunkVerts, undefined, dim);
+        if (localTri.length === 0) {
+            continue;
+        }
+        chunkUsed += 1;
+        const localVertexCount = Math.floor(chunkVerts.length / dim);
+        for (let t = 0; t < localTri.length; t++) {
+            mergedTriangles.push(localTri[t]! + vertexOffset);
+        }
+        for (let v = 0; v < chunkVerts.length; v++) {
+            mergedVertices.push(chunkVerts[v]!);
+        }
+        vertexOffset += localVertexCount;
+    }
+
+    const t1 =
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? performance.now()
+            : typeof Date !== 'undefined'
+                ? Date.now()
+                : 0;
+
+    earcutChunkedStats.triangulationTimeMs = Math.max(0, t1 - t0);
+    earcutChunkedStats.chunkCount = chunkUsed;
+    earcutChunkedStats.totalVertices = Math.floor(mergedVertices.length / dim);
+    earcutChunkedStats.mergedVertices = mergedVertices;
+
+    if (mergedTriangles.length === 0 || chunkUsed === 0) {
+        const tri = earcut(data, holeIndices, dim);
+        earcutChunkedStats.mergedVertices = null;
+        earcutChunkedStats.chunkCount = 1;
+        earcutChunkedStats.totalVertices = vertexCount;
+        return tri;
+    }
+
+    return mergedTriangles;
 }
 
 /**

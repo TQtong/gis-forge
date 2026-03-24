@@ -74,7 +74,16 @@ export {
 export type { VincentyDirectResult, NearestPointResult } from './geo/geodesic.ts';
 
 // --- 算法模块 ---
-export { earcut, flatten, deviation } from './algorithm/earcut.ts';
+export {
+    CHUNK_THRESHOLD,
+    earcut,
+    earcutChunked,
+    earcutChunkedStats,
+    flatten,
+    flattenChunk,
+    deviation,
+} from './algorithm/earcut.ts';
+export type { EarcutChunkBBox, EarcutChunkedStats } from './algorithm/earcut.ts';
 export { douglasPeucker, visvalingam } from './algorithm/simplify.ts';
 export { pointInPolygon, pointInTriangle, pointInBBox, pointOnLine } from './algorithm/contain.ts';
 export { segmentSegment, rayAABB, bboxOverlap } from './algorithm/intersect.ts';
