@@ -4,6 +4,24 @@
 // 零 npm 依赖；仅导出类型与工厂函数。
 // ============================================================
 
+import depthSortTemplateWgsl from '../wgsl/templates/depth-sort-template.wgsl?raw';
+import fillGradientWgsl from '../wgsl/templates/fill-gradient.wgsl?raw';
+import fillSolidWgsl from '../wgsl/templates/fill-solid.wgsl?raw';
+import fragmentTemplateWgsl from '../wgsl/templates/fragment-template.wgsl?raw';
+import frustumCullTemplateWgsl from '../wgsl/templates/frustum-cull-template.wgsl?raw';
+import globeWgsl from '../wgsl/templates/globe.wgsl?raw';
+import lineWgsl from '../wgsl/templates/line.wgsl?raw';
+import logDepthRaw from '../wgsl/templates/log-depth.wgsl?raw';
+import mercatorWgsl from '../wgsl/templates/mercator.wgsl?raw';
+import msdfTextRaw from '../wgsl/templates/msdf-text.wgsl?raw';
+import orthoWgsl from '../wgsl/templates/ortho.wgsl?raw';
+import pointWgsl from '../wgsl/templates/point.wgsl?raw';
+import polygonWgsl from '../wgsl/templates/polygon.wgsl?raw';
+import sdfLineWgsl from '../wgsl/templates/sdf-line.wgsl?raw';
+import splitDoubleWgsl from '../wgsl/templates/split-double.wgsl?raw';
+import strokeWgsl from '../wgsl/templates/stroke.wgsl?raw';
+import vertexTemplateWgsl from '../wgsl/templates/vertex-template.wgsl?raw';
+
 /**
  * 内置 WGSL 模板与模块化片段集合。
  * ShaderAssembler 读取本对象中的字符串，替换 {{PLACEHOLDER}} 后生成最终源码。
@@ -81,73 +99,7 @@ const WGSL_MSDF_MEDIAN = 0.5;
  * assembler.replace(t, '{{PROJECTION_MODULE}}', projCode);
  */
 function buildVertexTemplate(): string {
-  // 使用单个模板字面量，便于整体拷贝到 ShaderAssembler 调试输出
-  return `// GeoForge — vertex template (assembled by ShaderAssembler)
-struct PerFrameUniforms {
-  viewMatrix: mat4x4<f32>,
-  projectionMatrix: mat4x4<f32>,
-  vpMatrix: mat4x4<f32>,
-  cameraPosition: vec3<f32>,
-  _pad0: f32,
-  viewport: vec2<f32>,
-  time: f32,
-  zoom: f32,
-}
-@group(0) @binding(0) var<uniform> uFrame: PerFrameUniforms;
-
-struct PerObjectUniforms {
-  modelMatrix: mat4x4<f32>,
-  rtcCenter: vec3<f32>,
-  _padObj: f32,
-}
-@group(2) @binding(0) var<uniform> uObject: PerObjectUniforms;
-
-struct VertexInput {
-  @location(0) position: vec3<f32>,
-  @location(1) normal: vec3<f32>,
-  @location(2) uv: vec2<f32>,
-  @location(3) color: vec4<f32>,
-}
-
-struct VertexOutput {
-  @builtin(position) clipPosition: vec4<f32>,
-  @location(0) worldPosition: vec3<f32>,
-  @location(1) worldNormal: vec3<f32>,
-  @location(2) uv: vec2<f32>,
-  @location(3) color: vec4<f32>,
-  {{EXTRA_VARYINGS}}
-}
-
-// ===== 投影模块注入点 =====
-// 必须实现: fn projectPosition(worldPos: vec3<f32>) -> vec4<f32>;
-{{PROJECTION_MODULE}}
-
-// ===== 几何模块注入点 =====
-// 必须实现: fn processVertex(input: VertexInput) -> VertexOutput;
-{{GEOMETRY_MODULE}}
-
-// ===== 特性模块注入点（可包含辅助函数；主流程在下方调用 gf_vertex_features_post）=====
-{{FEATURE_MODULES}}
-
-fn gf_vertex_features_post(output: ptr<function, VertexOutput>) {
-  // HOOK: feature_vertex_begin
-  // 默认无操作；通过读取再写回 clip，保证 ptr 参数被使用且行为不变
-  let clip = (*output).clipPosition;
-  (*output).clipPosition = clip;
-}
-
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
-  var output: VertexOutput;
-  // HOOK: vertex_position_before_projection
-  output = processVertex(input);
-  // HOOK: vertex_position_after_geometry
-  output.clipPosition = projectPosition(output.worldPosition);
-  gf_vertex_features_post(&output);
-  // HOOK: vertex_output_custom
-  return output;
-}
-`;
+  return vertexTemplateWgsl;
 }
 
 /**
@@ -162,47 +114,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
  * shader.replace('{{STYLE_MODULE}}', styleCode);
  */
 function buildFragmentTemplate(): string {
-  return `// GeoForge — fragment template (assembled by ShaderAssembler)
-struct PerFrameUniforms {
-  viewMatrix: mat4x4<f32>,
-  projectionMatrix: mat4x4<f32>,
-  vpMatrix: mat4x4<f32>,
-  cameraPosition: vec3<f32>,
-  _pad0: f32,
-  viewport: vec2<f32>,
-  time: f32,
-  zoom: f32,
-}
-@group(0) @binding(0) var<uniform> uFrame: PerFrameUniforms;
-
-// ===== 图层 Uniform 注入点（样式扩展可替换整段 struct + var）=====
-{{PER_LAYER_UNIFORMS}}
-
-struct FragmentInput {
-  @location(0) worldPosition: vec3<f32>,
-  @location(1) worldNormal: vec3<f32>,
-  @location(2) uv: vec2<f32>,
-  @location(3) color: vec4<f32>,
-  {{EXTRA_VARYINGS}}
-}
-
-@group(3) @binding(0) var uGlyphTexture: texture_2d<f32>;
-@group(3) @binding(1) var uGlyphSampler: sampler;
-
-// ===== 样式模块注入点 =====
-// 必须实现: fn computeColor(input: FragmentInput) -> vec4<f32>;
-{{STYLE_MODULE}}
-
-@fragment
-fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
-  // HOOK: fragment_color_before_style
-  var color = computeColor(input);
-  // HOOK: fragment_color_after_style
-  // HOOK: fragment_alpha
-  // HOOK: fragment_discard
-  return color;
-}
-`;
+  return fragmentTemplateWgsl;
 }
 
 /**
@@ -236,62 +148,7 @@ export function getDefaultPerLayerUniformsWGSL(): string {
  * pipeline = device.createComputePipeline({ compute: { module, entryPoint: 'cs_frustum_cull_main' } });
  */
 function buildFrustumCullCompute(): string {
-  return `// GeoForge — frustum cull compute
-struct FrustumCullParams {
-  plane0: vec4<f32>,
-  plane1: vec4<f32>,
-  plane2: vec4<f32>,
-  plane3: vec4<f32>,
-  plane4: vec4<f32>,
-  plane5: vec4<f32>,
-  objectCount: u32,
-  _pad: vec3<u32>,
-}
-@group(0) @binding(0) var<uniform> uCull: FrustumCullParams;
-@group(0) @binding(1) var<storage, read> aabbMin: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> aabbMax: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> visible: array<u32>;
-
-fn distanceToPlane(p: vec3<f32>, plane: vec4<f32>) -> f32 {
-  return dot(vec4<f32>(p, 1.0), plane);
-}
-
-fn aabbOutsidePlane(minP: vec3<f32>, maxP: vec3<f32>, plane: vec4<f32>) -> bool {
-  let n = plane.xyz;
-  let c = vec3<f32>(
-    select(minP.x, maxP.x, n.x >= 0.0),
-    select(minP.y, maxP.y, n.y >= 0.0),
-    select(minP.z, maxP.z, n.z >= 0.0),
-  );
-  return distanceToPlane(c, plane) < 0.0;
-}
-
-fn isAabbVisible(minP: vec3<f32>, maxP: vec3<f32>) -> bool {
-  let p0 = uCull.plane0;
-  let p1 = uCull.plane1;
-  let p2 = uCull.plane2;
-  let p3 = uCull.plane3;
-  let p4 = uCull.plane4;
-  let p5 = uCull.plane5;
-  if (aabbOutsidePlane(minP, maxP, p0)) { return false; }
-  if (aabbOutsidePlane(minP, maxP, p1)) { return false; }
-  if (aabbOutsidePlane(minP, maxP, p2)) { return false; }
-  if (aabbOutsidePlane(minP, maxP, p3)) { return false; }
-  if (aabbOutsidePlane(minP, maxP, p4)) { return false; }
-  if (aabbOutsidePlane(minP, maxP, p5)) { return false; }
-  return true;
-}
-
-@compute @workgroup_size(64)
-fn cs_frustum_cull_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i >= uCull.objectCount) { return; }
-  let mn = aabbMin[i].xyz;
-  let mx = aabbMax[i].xyz;
-  let vis = select(0u, 1u, isAabbVisible(mn, mx));
-  visible[i] = vis;
-}
-`;
+  return frustumCullTemplateWgsl;
 }
 
 /**
@@ -304,26 +161,7 @@ fn cs_frustum_cull_main(@builtin(global_invocation_id) gid: vec3<u32>) {
  * // 后续将 entryPoint 保持为 cs_depth_sort_main 以兼容 FrameGraph
  */
 function buildDepthSortCompute(): string {
-  return `// GeoForge — depth sort placeholder (identity permutation)
-struct DepthSortParams {
-  elementCount: u32,
-  _pad: vec3<u32>,
-}
-@group(0) @binding(0) var<uniform> uSort: DepthSortParams;
-@group(0) @binding(1) var<storage, read> depthKeys: array<f32>;
-@group(0) @binding(2) var<storage, read> inputIndices: array<u32>;
-@group(0) @binding(3) var<storage, read_write> outputIndices: array<u32>;
-
-@compute @workgroup_size(256)
-fn cs_depth_sort_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i >= uSort.elementCount) { return; }
-  let idx = inputIndices[i];
-  // 占位：读取 depth key，避免 storage 绑定在占位 pass 中被优化器判为未使用；radix 实现后改为真实排序键
-  let key = depthKeys[i];
-  outputIndices[i] = select(idx, idx, key == key);
-}
-`;
+  return depthSortTemplateWgsl;
 }
 
 /**
@@ -336,32 +174,10 @@ fn cs_depth_sort_main(@builtin(global_invocation_id) gid: vec3<u32>) {
  * const code = projectionModules['mercator'];
  */
 function buildProjectionModules(): Record<string, string> {
-  const mercator = `// projection: mercator — 世界坐标经 CPU vp 矩阵变换到裁剪空间
-fn projectPosition(worldPos: vec3<f32>) -> vec4<f32> {
-  let projected = uFrame.vpMatrix * vec4<f32>(worldPos, 1.0);
-  return projected;
-}
-`;
-
-  const globe = `// projection: globe — ECEF 相对 RTC 中心后再乘 VP（大场景精度）
-fn projectPosition(worldPos: vec3<f32>) -> vec4<f32> {
-  let relative = worldPos - uObject.rtcCenter;
-  let projected = uFrame.vpMatrix * vec4<f32>(relative, 1.0);
-  return projected;
-}
-`;
-
-  const ortho = `// projection: ortho — 正交视图由 CPU 预乘入 vpMatrix，此处与墨卡托同型变换
-fn projectPosition(worldPos: vec3<f32>) -> vec4<f32> {
-  let projected = uFrame.vpMatrix * vec4<f32>(worldPos, 1.0);
-  return projected;
-}
-`;
-
   const out: Record<string, string> = {};
-  out[PROJ_MERCATOR] = mercator;
-  out[PROJ_GLOBE] = globe;
-  out[PROJ_ORTHO] = ortho;
+  out[PROJ_MERCATOR] = mercatorWgsl;
+  out[PROJ_GLOBE] = globeWgsl;
+  out[PROJ_ORTHO] = orthoWgsl;
   return out;
 }
 
@@ -375,52 +191,10 @@ fn projectPosition(worldPos: vec3<f32>) -> vec4<f32> {
  * const g = geometryModules['polygon'];
  */
 function buildGeometryModules(): Record<string, string> {
-  const point = `// geometry: point — 模型矩阵变到世界，保留属性
-fn processVertex(input: VertexInput) -> VertexOutput {
-  var o: VertexOutput;
-  let wp = (uObject.modelMatrix * vec4<f32>(input.position, 1.0)).xyz;
-  o.worldPosition = wp;
-  let nrm = (uObject.modelMatrix * vec4<f32>(input.normal, 0.0)).xyz;
-  o.worldNormal = normalize(nrm);
-  o.uv = input.uv;
-  o.color = input.color;
-  o.clipPosition = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-  return o;
-}
-`;
-
-  const line = `// geometry: line — 与点类似；宽线 extrusion 由上层扩展 vertex attributes
-fn processVertex(input: VertexInput) -> VertexOutput {
-  var o: VertexOutput;
-  let wp = (uObject.modelMatrix * vec4<f32>(input.position, 1.0)).xyz;
-  o.worldPosition = wp;
-  let nrm = (uObject.modelMatrix * vec4<f32>(input.normal, 0.0)).xyz;
-  o.worldNormal = normalize(nrm);
-  o.uv = input.uv;
-  o.color = input.color;
-  o.clipPosition = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-  return o;
-}
-`;
-
-  const polygon = `// geometry: polygon — 带法线用于光照/描边；Z 由顶点高程提供
-fn processVertex(input: VertexInput) -> VertexOutput {
-  var o: VertexOutput;
-  let wp = (uObject.modelMatrix * vec4<f32>(input.position, 1.0)).xyz;
-  o.worldPosition = wp;
-  let nrm = (uObject.modelMatrix * vec4<f32>(input.normal, 0.0)).xyz;
-  o.worldNormal = normalize(nrm);
-  o.uv = input.uv;
-  o.color = input.color;
-  o.clipPosition = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-  return o;
-}
-`;
-
   const out: Record<string, string> = {};
-  out[GEOM_POINT] = point;
-  out[GEOM_LINE] = line;
-  out[GEOM_POLYGON] = polygon;
+  out[GEOM_POINT] = pointWgsl;
+  out[GEOM_LINE] = lineWgsl;
+  out[GEOM_POLYGON] = polygonWgsl;
   return out;
 }
 
@@ -434,38 +208,10 @@ fn processVertex(input: VertexInput) -> VertexOutput {
  * const s = styleModules['fill_gradient'];
  */
 function buildStyleModules(): Record<string, string> {
-  const fillSolid = `// style: fill_solid — 直接使用插值颜色
-fn computeColor(input: FragmentInput) -> vec4<f32> {
-  let c = input.color * uLayer.baseColor;
-  return vec4<f32>(c.rgb, c.a * uLayer.opacity);
-}
-`;
-
-  const fillGradient = `// style: fill_gradient — UV 沿 gradientAngle 方向插值
-fn computeColor(input: FragmentInput) -> vec4<f32> {
-  let ang = uLayer.gradientAngle;
-  let dir = vec2<f32>(cos(ang), sin(ang));
-  let t = dot(input.uv - vec2<f32>(0.5, 0.5), dir) + 0.5;
-  let tt = clamp(t, 0.0, 1.0);
-  let c = mix(uLayer.baseColor, input.color, tt);
-  return vec4<f32>(c.rgb, c.a * uLayer.opacity);
-}
-`;
-
-  const stroke = `// style: stroke — 基于 UV 横向距离模拟线宽衰减（配合 line 几何）
-fn computeColor(input: FragmentInput) -> vec4<f32> {
-  let w = max(uLayer.lineWidth, 1e-4);
-  let d = abs(input.uv.x - 0.5) * 2.0;
-  let edge = smoothstep(w + 1.0, w, d);
-  let a = input.color.a * uLayer.opacity * edge;
-  return vec4<f32>(input.color.rgb * uLayer.baseColor.rgb, a);
-}
-`;
-
   const out: Record<string, string> = {};
-  out[STYLE_FILL_SOLID] = fillSolid;
-  out[STYLE_FILL_GRADIENT] = fillGradient;
-  out[STYLE_STROKE] = stroke;
+  out[STYLE_FILL_SOLID] = fillSolidWgsl;
+  out[STYLE_FILL_GRADIENT] = fillGradientWgsl;
+  out[STYLE_STROKE] = strokeWgsl;
   return out;
 }
 
@@ -479,56 +225,13 @@ fn computeColor(input: FragmentInput) -> vec4<f32> {
  * const f = featureModules['msdf_text'];
  */
 function buildFeatureModules(): Record<string, string> {
-  const logDepth = `// feature: logarithmic depth buffer — 调整 clip.z（与 Reversed-Z 管线配合时由 DepthManager 选型）
-fn gf_log_depth_modify_clip_z(clip: vec4<f32>) -> vec4<f32> {
-  let C = ${WGSL_LOG_DEPTH_C};
-  let w = max(clip.w, 1e-6);
-  let ez = clip.z / w;
-  let lz = log(C * w + 1.0) / log(C + 1.0);
-  let nz = mix(ez, lz, 0.5);
-  return vec4<f32>(clip.x, clip.y, nz * w, clip.w);
-}
-`;
-
-  const splitDouble = `// feature: split double — 自 high/low 与 RTC 重建世界坐标（CPU 须对齐上传）
-fn gf_reconstruct_world_from_split(
-  posHigh: vec3<f32>,
-  posLow: vec3<f32>,
-  rtcHigh: vec3<f32>,
-  rtcLow: vec3<f32>,
-) -> vec3<f32> {
-  let rh = posHigh - rtcHigh;
-  let rl = posLow - rtcLow;
-  return rh + rl;
-}
-`;
-
-  const sdfLine = `// feature: sdf line — 有向距离抗锯齿（dist 为到中心线 signed 距离，像素单位）
-fn gf_sdf_line_alpha(dist: f32, halfWidth: f32) -> f32 {
-  let w = max(halfWidth, 1e-4);
-  let d = abs(dist);
-  return 1.0 - smoothstep(w - 1.0, w + 1.0, d);
-}
-`;
-
-  const msdfText = `// feature: msdf text — 三通道 median 反走样（需绑定 group(3) 纹理）
-fn gf_msdf_median(r: f32, g: f32, b: f32) -> f32 {
-  return max(min(r, g), min(max(r, g), b));
-}
-
-fn gf_msdf_sample_alpha(uv: vec2<f32>, pxRange: f32) -> f32 {
-  let msdf = textureSampleLevel(uGlyphTexture, uGlyphSampler, uv, 0.0);
-  let m = gf_msdf_median(msdf.r, msdf.g, msdf.b);
-  let w = max(pxRange, 1e-4);
-  let sig = smoothstep(${WGSL_MSDF_MEDIAN} - w, ${WGSL_MSDF_MEDIAN} + w, m);
-  return sig;
-}
-`;
+  const logDepth = logDepthRaw.replace('{{LOG_DEPTH_C}}', String(WGSL_LOG_DEPTH_C));
+  const msdfText = msdfTextRaw.replace(/\{\{MSDF_MEDIAN\}\}/g, String(WGSL_MSDF_MEDIAN));
 
   const out: Record<string, string> = {};
   out[FEAT_LOG_DEPTH] = logDepth;
-  out[FEAT_SPLIT_DOUBLE] = splitDouble;
-  out[FEAT_SDF_LINE] = sdfLine;
+  out[FEAT_SPLIT_DOUBLE] = splitDoubleWgsl;
+  out[FEAT_SDF_LINE] = sdfLineWgsl;
   out[FEAT_MSDF_TEXT] = msdfText;
   return out;
 }
