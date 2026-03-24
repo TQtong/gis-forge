@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GeoForge L0+L1+L2 — 最小可行原型</title>
+    <title>GeoForge L0+L1+L2+L3 — 最小可行原型</title>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body {
@@ -150,23 +150,25 @@
   <body>
     <header>
       <h1>GeoForge Engine</h1>
-      <span>L0+L1+L2 MVP Prototype</span>
+      <span>L0+L1+L2+L3 MVP Prototype</span>
     </header>
     <div class="main-container">
       <div class="sidebar">
-        <h2>L0+L1+L2 Module Tests</h2>
+        <h2>L0+L1+L2+L3 Module Tests</h2>
         <div id="test-results"></div>
       </div>
       <div class="canvas-area">
         <div id="gpu-status">Checking WebGPU support...</div>
         <canvas id="webgpu-canvas" width="720" height="480"></canvas>
         <div class="info-panel">
-          <h3>GeoForge L0+L1+L2 Foundation + GPU + Rendering Layer</h3>
+          <h3>GeoForge L0+L1+L2+L3 Foundation + GPU + Rendering + Runtime Layer</h3>
           <div class="stats-bar" id="stats-bar"></div>
           <p style="margin-top: 12px; color: #8b949e;">
             L0: 29 modules (math/geo/algorithm/index/precision/types/infra).
             L1: 8 modules (DeviceManager/SurfaceManager/BufferPool/TextureManager/GPUMemoryTracker/BindGroupCache/IndirectDrawManager/GPUUploader).
-            Total 37 modules. Zero npm dependencies.
+            L2: 11 modules (BlendPresets/UniformLayout/WGSLTemplates/DepthManager/StencilManager/RenderStats/ShaderAssembler/PipelineCache/ComputePassManager/RenderGraph/FrameGraphBuilder).
+            L3: 11 modules (ErrorRecovery/RequestScheduler/WorkerPool/ResourceManager/MemoryBudget/TileScheduler/FrameScheduler/Camera2D/Camera3D/ViewMorph/initializeL3).
+            Total 62 modules. Zero npm dependencies.
           </p>
         </div>
       </div>

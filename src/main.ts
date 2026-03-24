@@ -630,6 +630,22 @@ import { createRenderGraph } from '../packages/gpu/src/l2/render-graph.ts';
 import { createFrameGraphBuilder } from '../packages/gpu/src/l2/frame-graph-builder.ts';
 import { initializeL2 } from '../packages/gpu/src/l2/index.ts';
 
+// ============================================================
+// L3 调度层模块导入
+// ============================================================
+
+import { createErrorRecovery } from '../packages/runtime/src/error-recovery.ts';
+import { createRequestScheduler } from '../packages/runtime/src/request-scheduler.ts';
+import { createWorkerPool } from '../packages/runtime/src/worker-pool.ts';
+import { createResourceManager } from '../packages/runtime/src/resource-manager.ts';
+import { createMemoryBudget } from '../packages/runtime/src/memory-budget.ts';
+import { createTileScheduler } from '../packages/runtime/src/tile-scheduler.ts';
+import { createFrameScheduler } from '../packages/runtime/src/frame-scheduler.ts';
+import { createCamera2D } from '../packages/runtime/src/camera-controller.ts';
+import { createCamera3D } from '../packages/runtime/src/camera-3d.ts';
+import { createViewMorph } from '../packages/runtime/src/view-morph.ts';
+import { initializeL3 } from '../packages/runtime/src/index.ts';
+
 /**
  * 运行 L1 层的集成测试。
  * 这些测试需要 WebGPU 可用——在浏览器环境中执行。
@@ -1403,6 +1419,333 @@ async function runL2Tests(canvas: HTMLCanvasElement): Promise<void> {
 }
 
 // ============================================================
+// 9. L3 调度层模块测试（纯 CPU，无需 WebGPU）
+// ============================================================
+
+/**
+ * 运行 L3 调度层的集成测试。
+ * 覆盖 ErrorRecovery / RequestScheduler / WorkerPool / ResourceManager /
+ * MemoryBudget / TileScheduler / FrameScheduler / Camera2D / Camera3D /
+ * ViewMorph / initializeL3 共 11 个模块。
+ * L3 全部为 CPU 侧逻辑，无需 WebGPU。
+ */
+async function runL3Tests(): Promise<void> {
+  // ---- ErrorRecovery ----
+  group('L3/ErrorRecovery');
+
+  test('create and report', () => {
+    const recovery = createErrorRecovery();
+    assert(recovery !== null, 'should create');
+    assert(recovery.stats.totalErrors === 0, 'should start with 0 errors');
+    // 上报一个可重试错误
+    recovery.report({
+      category: 'network',
+      message: 'fetch timeout',
+      resourceId: 'tile-0-0-0',
+      retryable: true,
+      timestamp: Date.now(),
+    });
+    assert(recovery.stats.totalErrors === 1, `totalErrors should be 1, got ${recovery.stats.totalErrors}`);
+  });
+
+  test('shouldRetry with backoff', () => {
+    const recovery = createErrorRecovery({ jitter: false });
+    // 上报一次可重试失败
+    recovery.report({
+      category: 'network',
+      message: 'timeout',
+      resourceId: 'tile-1-2-3',
+      retryable: true,
+      timestamp: Date.now(),
+    });
+    const result = recovery.shouldRetry('tile-1-2-3');
+    assert(result.retry === true, 'should allow retry after first failure');
+    assert(result.delayMs >= 0, `delayMs should be non-negative, got ${result.delayMs}`);
+  });
+
+  test('markSuccess resets counter', () => {
+    const recovery = createErrorRecovery();
+    // 上报然后标记成功
+    recovery.report({
+      category: 'network',
+      message: 'fail',
+      resourceId: 'tile-ok',
+      retryable: true,
+      timestamp: Date.now(),
+    });
+    recovery.markSuccess('tile-ok');
+    assert(recovery.stats.retriedSuccess === 1, `retriedSuccess should be 1, got ${recovery.stats.retriedSuccess}`);
+    // markSuccess 后，未知资源不应触发重试
+    const result = recovery.shouldRetry('tile-unknown');
+    assert(result.retry === false, 'unknown resource should not retry');
+  });
+
+  // ---- RequestScheduler ----
+  group('L3/RequestScheduler');
+
+  test('create scheduler', () => {
+    const recovery = createErrorRecovery();
+    const scheduler = createRequestScheduler({}, recovery);
+    assert(scheduler !== null, 'should create');
+    assert(scheduler.stats.active === 0, `active should be 0, got ${scheduler.stats.active}`);
+    assert(scheduler.stats.queued === 0, `queued should be 0, got ${scheduler.stats.queued}`);
+    assert(scheduler.stats.completed === 0, `completed should be 0, got ${scheduler.stats.completed}`);
+  });
+
+  // ---- WorkerPool ----
+  group('L3/WorkerPool');
+
+  await testAsync('initialize and submit', async () => {
+    const pool = createWorkerPool();
+    assert(pool.isInitialized === false, 'should not be initialized yet');
+
+    await pool.initialize({ workerCount: 2, maxQueueSize: 64, taskTimeout: 5000 });
+    assert(pool.isInitialized === true, 'should be initialized');
+    assert(pool.workerCount === 2, `workerCount should be 2, got ${pool.workerCount}`);
+
+    // 提交一个模拟任务（MVP 模式透传 input 作为 output）
+    const result = await pool.submit({
+      id: 'test-task-1',
+      type: 'mvt-decode',
+      priority: 10,
+      input: { value: 42 },
+    });
+    assert(result.taskId === 'test-task-1', `taskId should match, got ${result.taskId}`);
+    assert((result.output as any).value === 42, 'output should mirror input in MVP mode');
+    assert(result.durationMs >= 0, `durationMs should be non-negative, got ${result.durationMs}`);
+    assert(pool.stats.completedTasks >= 1, 'completedTasks should be >= 1');
+
+    pool.terminate();
+    assert(pool.isInitialized === false, 'should not be initialized after terminate');
+  });
+
+  // ---- ResourceManager ----
+  group('L3/ResourceManager');
+
+  await testAsync('load resource', async () => {
+    const rm = createResourceManager();
+    assert(rm.stats.totalCount === 0, 'should start empty');
+
+    // 用简单 loader 加载一个资源
+    const resource = await rm.load('test-res-1', 'geojson', async () => {
+      return { type: 'FeatureCollection', features: [] };
+    });
+    assert(resource.state === 'ready', `state should be ready, got ${resource.state}`);
+    assert(resource.id === 'test-res-1', `id should match, got ${resource.id}`);
+    assert(resource.data !== undefined, 'data should be defined');
+    assert(rm.stats.totalCount === 1, `totalCount should be 1, got ${rm.stats.totalCount}`);
+  });
+
+  test('ref counting', () => {
+    const rm = createResourceManager();
+    // 同步预加载（使用 load 后查询）
+    rm.load('ref-test', 'sprite', async () => 'sprite-data');
+    // load 是异步的，同步路径下用 addRef 前需确认资源已在 store 中
+    // 由于 load 已将 record 插入 store（state=loading），addRef 可在此状态下操作
+    rm.addRef('ref-test');
+    const res1 = rm.get('ref-test');
+    assert(res1 !== undefined, 'resource should exist in store');
+    assert(res1!.refCount === 1, `refCount should be 1, got ${res1!.refCount}`);
+
+    rm.releaseRef('ref-test');
+    const res2 = rm.get('ref-test');
+    assert(res2!.refCount === 0, `refCount should be 0 after release, got ${res2!.refCount}`);
+  });
+
+  // ---- MemoryBudget ----
+  group('L3/MemoryBudget');
+
+  test('snapshot', () => {
+    const mb = createMemoryBudget({ gpuBudget: 64 * 1024 * 1024, cpuBudget: 32 * 1024 * 1024 });
+    // Mock tracker 与 resource manager（duck typing 接口）
+    const mockTracker = { totalBytes: 1024, entryCount: 1, enforceBudget: () => [] as string[] };
+    const mockResMgr = {
+      stats: { totalCount: 0, cpuBytes: 0, gpuBytes: 0 },
+      evict: () => {},
+      getByState: () => [] as any[],
+    };
+    const snap = mb.snapshot(mockTracker, mockResMgr);
+    assert(snap.gpuUsed === 1024, `gpuUsed should be 1024, got ${snap.gpuUsed}`);
+    assert(snap.gpuBudget === 64 * 1024 * 1024, `gpuBudget should be 64MiB, got ${snap.gpuBudget}`);
+    assert(snap.gpuUtilization >= 0, 'gpuUtilization should be non-negative');
+    assert(snap.cpuUsed === 0, `cpuUsed should be 0, got ${snap.cpuUsed}`);
+    assert(snap.cpuBudget === 32 * 1024 * 1024, `cpuBudget should be 32MiB, got ${snap.cpuBudget}`);
+  });
+
+  // ---- TileScheduler ----
+  group('L3/TileScheduler');
+
+  test('register source and update', () => {
+    const ts = createTileScheduler({ maxConcurrentLoads: 4 });
+    ts.registerSource('osm', {
+      minZoom: 0,
+      maxZoom: 19,
+      tileSize: 256,
+      overzoomEnabled: true,
+    });
+
+    // 构造最小 CameraState mock
+    const mockCamera = {
+      center: [116.39, 39.91] as [number, number],
+      zoom: 10,
+      bearing: 0,
+      pitch: 0,
+      viewMatrix: new Float32Array(16),
+      projectionMatrix: new Float32Array(16),
+      vpMatrix: new Float32Array(16),
+      inverseVPMatrix: new Float32Array(16),
+      position: new Float32Array(3),
+      altitude: 5000,
+      fov: Math.PI / 4,
+      roll: 0,
+    };
+    const mockViewport = {
+      width: 800,
+      height: 600,
+      physicalWidth: 1600,
+      physicalHeight: 1200,
+      pixelRatio: 2,
+    };
+
+    const result = ts.update(mockCamera, mockViewport);
+    assert(result !== null && result !== undefined, 'update should return result');
+    assert(Array.isArray(result.toLoad), 'toLoad should be array');
+    assert(Array.isArray(result.visible), 'visible should be array');
+    assert(Array.isArray(result.toUnload), 'toUnload should be array');
+    assert(result.visible.length > 0, `visible should have tiles, got ${result.visible.length}`);
+    assert(ts.stats.visibleCount > 0, `visibleCount should be > 0, got ${ts.stats.visibleCount}`);
+
+    ts.unregisterSource('osm');
+  });
+
+  // ---- FrameScheduler ----
+  group('L3/FrameScheduler');
+
+  test('create and register callback', () => {
+    const fs = createFrameScheduler({ targetFrameRate: 60 });
+    assert(fs !== null, 'should create');
+    assert(fs.isRunning === false, 'should not be running initially');
+    assert(fs.frameIndex === 0, `frameIndex should be 0, got ${fs.frameIndex}`);
+
+    let callCount = 0;
+    const unsub = fs.register({
+      id: 'test-update',
+      phase: 'update',
+      priority: 0,
+      execute: () => { callCount += 1; },
+    });
+    assert(typeof unsub === 'function', 'register should return unsubscribe function');
+    unsub();
+  });
+
+  test('stepOneFrame executes callbacks', () => {
+    const fs = createFrameScheduler({ targetFrameRate: 60 });
+    let called = false;
+    fs.register({
+      id: 'step-test',
+      phase: 'update',
+      priority: 0,
+      execute: () => { called = true; },
+    });
+    // stepOneFrame 手动推进一帧，不需要 start()
+    fs.stepOneFrame();
+    assert(called, 'update callback should have been called');
+    assert(fs.frameIndex === 1, `frameIndex should be 1 after stepOneFrame, got ${fs.frameIndex}`);
+  });
+
+  // ---- CameraController (2D) ----
+  group('L3/Camera2D');
+
+  test('create and state', () => {
+    const cam = createCamera2D();
+    assert(cam.type === '2d', `type should be 2d, got ${cam.type}`);
+    const state = cam.state;
+    assert(state !== null && state !== undefined, 'state should exist');
+    assert(state.viewMatrix instanceof Float32Array, 'viewMatrix should be Float32Array');
+    assert(state.projectionMatrix instanceof Float32Array, 'projectionMatrix should be Float32Array');
+    assert(state.vpMatrix instanceof Float32Array, 'vpMatrix should be Float32Array');
+    assert(Array.isArray(state.center), 'center should be array');
+    assert(typeof state.zoom === 'number', 'zoom should be number');
+  });
+
+  test('jumpTo and update', () => {
+    const cam = createCamera2D();
+    cam.jumpTo({ center: [120.0, 30.0], zoom: 12 });
+    const viewport = { width: 800, height: 600, physicalWidth: 1600, physicalHeight: 1200, pixelRatio: 2 };
+    const state = cam.update(0.016, viewport);
+    assertApprox(state.center[0], 120.0, 0.01, 'center lon after jumpTo');
+    assertApprox(state.center[1], 30.0, 0.01, 'center lat after jumpTo');
+    assertApprox(state.zoom, 12, 0.01, 'zoom after jumpTo');
+  });
+
+  test('flyTo animation', () => {
+    const cam = createCamera2D();
+    const anim = cam.flyTo({ center: [121.47, 31.23], zoom: 14, duration: 500 });
+    assert(anim !== null && anim !== undefined, 'flyTo should return animation');
+    assert(typeof anim.id === 'string', 'animation should have id');
+    assert(cam.isAnimating === true, 'should be animating after flyTo');
+    anim.cancel();
+    assert(cam.isAnimating === false, 'should not be animating after cancel');
+  });
+
+  // ---- Camera3D ----
+  group('L3/Camera3D');
+
+  test('create and position', () => {
+    const cam3d = createCamera3D();
+    assert(cam3d.type === '3d', `type should be 3d, got ${cam3d.type}`);
+    const pos = cam3d.getPosition();
+    assert(typeof pos.lon === 'number', 'lon should be number');
+    assert(typeof pos.lat === 'number', 'lat should be number');
+    assert(typeof pos.alt === 'number', 'alt should be number');
+    assert(pos.alt > 0, `alt should be positive, got ${pos.alt}`);
+  });
+
+  // ---- ViewMorph ----
+  group('L3/ViewMorph');
+
+  test('create and state', () => {
+    const vm = createViewMorph('2d');
+    assert(vm.isMorphing === false, 'should not be morphing initially');
+    assert(vm.currentMode === '2d', `currentMode should be 2d, got ${vm.currentMode}`);
+    assertApprox(vm.progress, 0, 0.01, 'progress should be 0');
+  });
+
+  // ---- initializeL3 集成 ----
+  group('L3/initializeL3');
+
+  await testAsync('full L3 initialization', async () => {
+    const l3 = await initializeL3();
+    // 验证所有子模块存在
+    assert(l3.errorRecovery !== null && l3.errorRecovery !== undefined, 'errorRecovery should exist');
+    assert(l3.requestScheduler !== null && l3.requestScheduler !== undefined, 'requestScheduler should exist');
+    assert(l3.workerPool !== null && l3.workerPool !== undefined, 'workerPool should exist');
+    assert(l3.resourceManager !== null && l3.resourceManager !== undefined, 'resourceManager should exist');
+    assert(l3.memoryBudget !== null && l3.memoryBudget !== undefined, 'memoryBudget should exist');
+    assert(l3.tileScheduler !== null && l3.tileScheduler !== undefined, 'tileScheduler should exist');
+    assert(l3.frameScheduler !== null && l3.frameScheduler !== undefined, 'frameScheduler should exist');
+    assert(l3.camera !== null && l3.camera !== undefined, 'camera should exist');
+    assert(l3.viewMorph !== null && l3.viewMorph !== undefined, 'viewMorph should exist');
+
+    // 验证 WorkerPool 已初始化
+    assert(l3.workerPool.isInitialized === true, 'workerPool should be initialized');
+
+    // 验证 Camera 类型
+    assert(l3.camera.type === '2d', `default camera type should be 2d, got ${l3.camera.type}`);
+
+    // 验证 ErrorRecovery 初始统计
+    assert(l3.errorRecovery.stats.totalErrors === 0, 'errorRecovery should start with 0 errors');
+
+    // 验证 FrameScheduler 初始状态
+    assert(l3.frameScheduler.isRunning === false, 'frameScheduler should not be running by default');
+
+    // 清理：终止 WorkerPool、停止 FrameScheduler
+    l3.workerPool.terminate();
+    l3.frameScheduler.stop();
+  });
+}
+
+// ============================================================
 // 渲染测试结果到 DOM
 // ============================================================
 
@@ -1434,7 +1777,7 @@ function renderResults(): void {
     <div class="stat"><div class="value" style="color:#3fb950">${totalPass}</div><div class="label">Passed</div></div>
     <div class="stat"><div class="value" style="color:${totalFail > 0 ? '#f85149' : '#3fb950'}">${totalFail}</div><div class="label">Failed</div></div>
     <div class="stat"><div class="value">${allTests.length}</div><div class="label">Modules</div></div>
-    <div class="stat"><div class="value">51</div><div class="label">Total Files</div></div>
+    <div class="stat"><div class="value">62</div><div class="label">Total Files</div></div>
     <div class="stat"><div class="value">0</div><div class="label">Dependencies</div></div>
   `;
 }
@@ -1721,6 +2064,12 @@ async function main(): Promise<void> {
   await runL2Tests(canvas);
 
   // 重新渲染结果（包含 L2 测试）
+  renderResults();
+
+  // L3 测试为纯 CPU 侧逻辑，无需 WebGPU
+  await runL3Tests();
+
+  // 重新渲染结果（包含 L3 测试）
   renderResults();
 
   // 启动 WebGPU 渲染演示
