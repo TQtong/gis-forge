@@ -8,6 +8,9 @@
 
 import type { ShaderAssembler, ShaderVariantKey } from './shader-assembler.ts';
 
+/** 开发构建时由打包器注入；未定义时按 false 处理，避免 `if (__DEV__)` 引用未声明全局量。 */
+declare const __DEV__: boolean | undefined;
+
 // ===================== 常量 =====================
 
 /** 顶点输入步长（字节）：vec3+vec3+vec2+vec4，与 wgsl-templates VertexInput 一致。 */
@@ -24,6 +27,25 @@ const COMPUTE_ENTRY_POINT = 'cs_main';
 
 /** 单维 dispatch 最大 workgroup 数（WebGPU 规范）。 */
 const MAX_WORKGROUP_COUNT_PER_DIMENSION = 65535;
+
+/** localStorage 中保存「上次会话最常用的管线描述键」的键名（与 DevPlayground / 回顾文档 O2 一致）。 */
+const LOCAL_STORAGE_PIPELINE_WARMUP_STATS_KEY = 'geoforge:pipeline-warmup-stats';
+
+/** `saveSessionStats` 持久化的条数上限（取使用次数最多的前 N 条描述键）。 */
+const SESSION_STATS_PERSIST_TOP_N = 20;
+
+/**
+ * 默认预热用的场景颜色附件格式（与多数 Surface / Canvas 配置一致；与具体描述键绑定后写入 sessionStats）。
+ */
+const DEFAULT_WARMUP_COLOR_FORMAT: GPUTextureFormat = 'bgra8unorm';
+
+/**
+ * 默认预热用的深度附件格式（GeoForge Reversed-Z 约定）。
+ */
+const DEFAULT_WARMUP_DEPTH_FORMAT: GPUTextureFormat = 'depth32float';
+
+/** 默认预热管线：MSAA 采样数（无 MSAA）。 */
+const DEFAULT_WARMUP_SAMPLE_COUNT = 1;
 
 /**
  * 若运行环境与类型定义支持 `destroy()`，则销毁管线对象（兼容旧版 @webgpu/types）。
@@ -101,6 +123,56 @@ export interface PipelineCacheStats {
 
   /** 累计管线创建耗时（毫秒），含同步与异步路径完成后的增量。 */
   readonly compilationTimeMs: number;
+
+  /**
+   * 当前正在进行中的 `createRenderPipeline` / `createComputePipeline` 调用数（O8）。
+   * 用于 UI 显示并发编译数。
+   */
+  readonly compilationQueue: number;
+}
+
+/**
+ * `autoWarmup()` 可选参数：非阻塞编译完成后的进度回调（用于 UI 进度条）。
+ */
+export interface AutoWarmupOptions {
+  /**
+   * 每完成一条预热任务（成功或失败均计为一次完成）调用一次；`done` 从 1 递增到 `total`。
+   *
+   * @param done - 已完成条数（含失败跳过项）
+   * @param total - 本次预热队列总条数
+   */
+  readonly onWarmupProgress?: (done: number, total: number) => void;
+}
+
+/**
+ * 管线 GPU 编译（`createRenderPipeline` / `createComputePipeline`）进度事件（O8）。
+ */
+export interface CompileProgressEvent {
+  /** 事件阶段：开始、结束或错误。 */
+  readonly type: 'start' | 'done' | 'error';
+
+  /** 缓存键或描述键（渲染为 `serializePipelineDescriptor` 输出，计算为 `djb2_…` 哈希键）。 */
+  readonly key: string;
+
+  /** 单次编译耗时（毫秒），在 `done` / `error` 时提供。 */
+  readonly elapsed?: number;
+
+  /** 批量预热总条数（如 `autoWarmup`）。 */
+  readonly total?: number;
+
+  /** 批量预热已完成条数（含缓存命中与失败跳过）。 */
+  readonly completed?: number;
+}
+
+/**
+ * `createPipelineCache` 可选配置（O8 编译进度回调）。
+ */
+export interface PipelineCacheCreateOptions {
+  /**
+   * 在每次调用 `device.createRenderPipeline` / `device.createComputePipeline` 前后触发，
+   * 供 DevTools / 加载条使用。
+   */
+  readonly onCompileProgress?: (event: CompileProgressEvent) => void;
 }
 
 /**
@@ -143,6 +215,39 @@ export interface PipelineCache {
 
   /** 只读统计快照。 */
   readonly stats: PipelineCacheStats;
+
+  /**
+   * 当前飞行中的 GPU 管线编译数（与 `stats.compilationQueue` 相同）。
+   */
+  readonly compilationQueue: number;
+
+  /**
+   * 本会话内各「管线描述序列化键」被请求的次数（`getOrCreate` / `getOrCreateAsync` 每次命中或未命中均 +1）。
+   * 键与内部 `serializePipelineDescriptor` 输出一致，可供 `saveSessionStats` 持久化。
+   */
+  readonly sessionStats: Readonly<Record<string, number>>;
+
+  /**
+   * 将当前 `sessionStats` 中使用次数最多的前 20 条描述键序列化写入 `localStorage`。
+   * 写入失败（隐私模式、配额、非浏览器环境）时静默忽略并在 `__DEV__` 下输出原因。
+   */
+  saveSessionStats(): void;
+
+  /**
+   * 从 `localStorage` 读取上次 `saveSessionStats` 保存的描述键列表；无数据或解析失败时返回空数组。
+   *
+   * @returns 描述键字符串数组（每项为完整 JSON 管线描述，与 `serializePipelineDescriptor` 格式一致）
+   */
+  loadSessionStats(): string[];
+
+  /**
+   * 自动预热：优先根据 `loadSessionStats()` 恢复上次常用变体；若无则使用内置四类墨卡托组合（fill / line / circle / raster 语义映射至内置 geometry+style）。
+   * 全部通过 `getOrCreateAsync` 异步编译，不阻塞调用线程；单条失败不影响其它条目。
+   *
+   * @param options - 可选进度回调
+   * @returns 全部预热尝试结束时 resolve（不因单条编译失败而 reject）
+   */
+  autoWarmup(options?: AutoWarmupOptions): Promise<void>;
 
   /**
    * 清空缓存并销毁已创建的 GPU 管线对象。
@@ -248,6 +353,252 @@ function validatePipelineDescriptor(descriptor: PipelineDescriptor): void {
 }
 
 /**
+ * 构造默认固定功能状态 + 给定着色变体的 `PipelineDescriptor`，供自动预热与默认四类墨卡托组合使用。
+ *
+ * @param shaderVariant - 投影 / 几何 / 样式 / 特性四元组
+ * @returns 与 GeoForge 默认场景 Pass 一致的渲染管线描述
+ */
+function createBaseWarmupPipelineDescriptor(shaderVariant: ShaderVariantKey): PipelineDescriptor {
+  return {
+    shaderVariant,
+    topology: 'triangle-list',
+    cullMode: 'back',
+    depthCompare: 'greater',
+    depthWriteEnabled: true,
+    blendState: undefined,
+    sampleCount: DEFAULT_WARMUP_SAMPLE_COUNT,
+    colorFormat: DEFAULT_WARMUP_COLOR_FORMAT,
+    depthFormat: DEFAULT_WARMUP_DEPTH_FORMAT,
+  };
+}
+
+/**
+ * 内置 WGSL 模板下「fill / line / circle / raster + mercator」对应的四类变体（回顾文档 O2 默认回退）。
+ * - fill：面填充 → `polygon` + `fill_solid`
+ * - line：线符号 → `line` + `stroke`（与模板注释中宽线/描边配合）
+ * - circle：圆点 → `point` + `fill_solid`
+ * - raster：栅格瓦片在专用 style 注册前，用 `polygon` + `fill_gradient` 作为可编译的独立变体以预热不同样式模块
+ *
+ * @returns 长度固定为 4 的描述数组
+ */
+function buildDefaultMercatorWarmupDescriptors(): PipelineDescriptor[] {
+  const fill: ShaderVariantKey = {
+    projection: 'mercator',
+    geometry: 'polygon',
+    style: 'fill_solid',
+    features: [],
+  };
+  const line: ShaderVariantKey = {
+    projection: 'mercator',
+    geometry: 'line',
+    style: 'stroke',
+    features: [],
+  };
+  const circle: ShaderVariantKey = {
+    projection: 'mercator',
+    geometry: 'point',
+    style: 'fill_solid',
+    features: [],
+  };
+  const raster: ShaderVariantKey = {
+    projection: 'mercator',
+    geometry: 'polygon',
+    style: 'fill_gradient',
+    features: [],
+  };
+  return [
+    createBaseWarmupPipelineDescriptor(fill),
+    createBaseWarmupPipelineDescriptor(line),
+    createBaseWarmupPipelineDescriptor(circle),
+    createBaseWarmupPipelineDescriptor(raster),
+  ];
+}
+
+/**
+ * 将 `serializePipelineDescriptor` 产出的 JSON 字符串还原为 `PipelineDescriptor`；用于从 `localStorage` 恢复的键。
+ *
+ * @param serialized - 与缓存键相同的 JSON 字符串
+ * @returns 合法描述；解析或校验失败时返回 `null`（不抛错，便于跳过损坏条目）
+ */
+function parsePipelineDescriptorFromSerializedKey(serialized: string): PipelineDescriptor | null {
+  if (!serialized || typeof serialized !== 'string') {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const svRaw = root['shaderVariant'];
+  if (!svRaw || typeof svRaw !== 'object') {
+    return null;
+  }
+  const sv = svRaw as Record<string, unknown>;
+  const projection = sv['projection'];
+  const geometry = sv['geometry'];
+  const style = sv['style'];
+  const features = sv['features'];
+  if (typeof projection !== 'string' || projection.length === 0) {
+    return null;
+  }
+  if (typeof geometry !== 'string' || geometry.length === 0) {
+    return null;
+  }
+  if (typeof style !== 'string' || style.length === 0) {
+    return null;
+  }
+  if (!Array.isArray(features)) {
+    return null;
+  }
+  const featureList: string[] = [];
+  for (let i = 0; i < features.length; i++) {
+    const f = features[i];
+    if (typeof f !== 'string') {
+      return null;
+    }
+    featureList.push(f);
+  }
+  const topology = root['topology'];
+  const cullMode = root['cullMode'];
+  const depthCompare = root['depthCompare'];
+  const depthWriteEnabled = root['depthWriteEnabled'];
+  const sampleCount = root['sampleCount'];
+  const colorFormat = root['colorFormat'];
+  const depthFormat = root['depthFormat'];
+  if (typeof topology !== 'string' || topology.length === 0) {
+    return null;
+  }
+  if (typeof cullMode !== 'string' || cullMode.length === 0) {
+    return null;
+  }
+  if (typeof depthCompare !== 'string' || depthCompare.length === 0) {
+    return null;
+  }
+  if (typeof depthWriteEnabled !== 'boolean') {
+    return null;
+  }
+  if (typeof sampleCount !== 'number' || !Number.isFinite(sampleCount)) {
+    return null;
+  }
+  if (typeof colorFormat !== 'string' || colorFormat.length === 0) {
+    return null;
+  }
+  if (typeof depthFormat !== 'string' || depthFormat.length === 0) {
+    return null;
+  }
+  const blendStateRaw = root['blendState'];
+  let blendState: GPUBlendState | undefined;
+  if (blendStateRaw !== undefined && blendStateRaw !== null) {
+    if (typeof blendStateRaw !== 'object') {
+      return null;
+    }
+    blendState = blendStateRaw as GPUBlendState;
+  }
+  const shaderVariant: ShaderVariantKey = {
+    projection,
+    geometry,
+    style,
+    features: featureList,
+  };
+  const descriptor: PipelineDescriptor = {
+    shaderVariant,
+    topology: topology as GPUPrimitiveTopology,
+    cullMode: cullMode as GPUCullMode,
+    depthCompare: depthCompare as GPUCompareFunction,
+    depthWriteEnabled,
+    blendState,
+    sampleCount,
+    colorFormat: colorFormat as GPUTextureFormat,
+    depthFormat: depthFormat as GPUTextureFormat,
+  };
+  try {
+    validatePipelineDescriptor(descriptor);
+  } catch {
+    return null;
+  }
+  return descriptor;
+}
+
+/**
+ * 由 `localStorage` 读取原始 JSON 数组字符串并解析为描述键列表（模块级，供 `PipelineCache.loadSessionStats` 复用）。
+ *
+ * @returns 合法非空字符串键数组；失败时返回空数组
+ */
+function readPipelineWarmupStatsFromStorage(): string[] {
+  if (typeof localStorage === 'undefined' || localStorage === null) {
+    return [];
+  }
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(LOCAL_STORAGE_PIPELINE_WARMUP_STATS_KEY);
+  } catch (err) {
+    if (__DEV__) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[PipelineCache] loadSessionStats: localStorage.getItem failed: ${msg}`);
+    }
+    return [];
+  }
+  if (raw === null || raw.length === 0) {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (err) {
+    if (__DEV__) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[PipelineCache] loadSessionStats: JSON.parse failed: ${msg}`);
+    }
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  const out: string[] = [];
+  for (let i = 0; i < parsed.length; i++) {
+    const item = parsed[i];
+    if (typeof item === 'string' && item.length > 0) {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+/**
+ * 由 `localStorage` 写入描述键 JSON 数组（模块级，供 `PipelineCache.saveSessionStats` 复用）。
+ *
+ * @param keys - 至多 20 条描述键（调用方已截断）
+ */
+function writePipelineWarmupStatsToStorage(keys: readonly string[]): void {
+  if (typeof localStorage === 'undefined' || localStorage === null) {
+    return;
+  }
+  let payload: string;
+  try {
+    payload = JSON.stringify(keys);
+  } catch (err) {
+    if (__DEV__) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[PipelineCache] saveSessionStats: JSON.stringify failed: ${msg}`);
+    }
+    return;
+  }
+  try {
+    localStorage.setItem(LOCAL_STORAGE_PIPELINE_WARMUP_STATS_KEY, payload);
+  } catch (err) {
+    if (__DEV__) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[PipelineCache] saveSessionStats: localStorage.setItem failed: ${msg}`);
+    }
+  }
+}
+
+/**
  * 由 `AssembledShader.bindGroupLayouts` 创建 `GPUPipelineLayout`；空数组时返回 `'auto'`。
  *
  * @param device - GPU 设备
@@ -284,7 +635,11 @@ function createRenderPipelineLayout(
  * const cache = createPipelineCache(device, shaderAssembler);
  * const pl = cache.getOrCreate(descriptor);
  */
-export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAssembler): PipelineCache {
+export function createPipelineCache(
+  device: GPUDevice,
+  shaderAssembler: ShaderAssembler,
+  options?: PipelineCacheCreateOptions
+): PipelineCache {
   if (!device || typeof device.createShaderModule !== 'function') {
     throw new TypeError('createPipelineCache: device must be a valid GPUDevice.');
   }
@@ -292,12 +647,49 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
     throw new TypeError('createPipelineCache: shaderAssembler must provide assemble().');
   }
 
+  const onCompileProgress = options?.onCompileProgress;
+
   const renderCache = new Map<string, GPURenderPipeline>();
   const computeCache = new Map<string, GPUComputePipeline>();
 
   let cacheHits = 0;
   let cacheMisses = 0;
   let compilationTimeMs = 0;
+
+  /** 飞行中的 `create*Pipeline` 调用数（O8） */
+  let compilationQueue = 0;
+
+  /**
+   * 向调用方通知编译进度；回调异常时隔离，不中断编译。
+   *
+   * @param event - 进度事件
+   */
+  const emitCompileProgress = (event: CompileProgressEvent): void => {
+    if (!onCompileProgress) {
+      return;
+    }
+    try {
+      onCompileProgress(event);
+    } catch (err) {
+      if (__DEV__) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[PipelineCache] onCompileProgress callback threw: ${msg}`);
+      }
+    }
+  };
+
+  /** 本会话内各管线描述键（`serializePipelineDescriptor` 输出）的请求次数，供 `saveSessionStats` / 自动预热。 */
+  const sessionUsageByKey = new Map<string, number>();
+
+  /**
+   * 累加 `sessionStats` 中对应描述键的计数（每次 `getOrCreate` / `getOrCreateAsync` 渲染路径调用一次）。
+   *
+   * @param key - `serializePipelineDescriptor` 的稳定字符串键
+   */
+  const recordSessionUsage = (key: string): void => {
+    const prev = sessionUsageByKey.get(key) ?? 0;
+    sessionUsageByKey.set(key, prev + 1);
+  };
 
   /**
    * 记录一次编译耗时并累加到统计。
@@ -363,7 +755,17 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
       blend: descriptor.blendState,
     };
 
+    let descriptorKey = '';
+    try {
+      descriptorKey = serializePipelineDescriptor(descriptor);
+    } catch {
+      descriptorKey = 'render:serialize-error';
+    }
+
     let pipeline: GPURenderPipeline;
+    compilationQueue += 1;
+    emitCompileProgress({ type: 'start', key: descriptorKey });
+    const pipelineCompileStart = performance.now();
     try {
       pipeline = device.createRenderPipeline({
         label: `render-${assembled.key}`,
@@ -391,9 +793,21 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
           count: descriptor.sampleCount,
         },
       });
+      emitCompileProgress({
+        type: 'done',
+        key: descriptorKey,
+        elapsed: performance.now() - pipelineCompileStart,
+      });
     } catch (err) {
+      emitCompileProgress({
+        type: 'error',
+        key: descriptorKey,
+        elapsed: performance.now() - pipelineCompileStart,
+      });
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`createRenderPipeline failed: ${msg}`);
+    } finally {
+      compilationQueue -= 1;
     }
 
     addCompilationTime(t0);
@@ -419,7 +833,12 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`createShaderModule (compute) failed: ${msg}`);
     }
+    const computeKey = hashStringDjb2(shaderCode);
+
     let pipeline: GPUComputePipeline;
+    compilationQueue += 1;
+    emitCompileProgress({ type: 'start', key: computeKey });
+    const computeCompileStart = performance.now();
     try {
       pipeline = device.createComputePipeline({
         label: label ?? 'compute-pipeline',
@@ -429,9 +848,21 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
           entryPoint: COMPUTE_ENTRY_POINT,
         },
       });
+      emitCompileProgress({
+        type: 'done',
+        key: computeKey,
+        elapsed: performance.now() - computeCompileStart,
+      });
     } catch (err) {
+      emitCompileProgress({
+        type: 'error',
+        key: computeKey,
+        elapsed: performance.now() - computeCompileStart,
+      });
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`createComputePipeline failed: ${msg}`);
+    } finally {
+      compilationQueue -= 1;
     }
     addCompilationTime(t0);
     return pipeline;
@@ -510,7 +941,17 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
       },
     };
 
+    let descriptorKeyAsync = '';
+    try {
+      descriptorKeyAsync = serializePipelineDescriptor(descriptor);
+    } catch {
+      descriptorKeyAsync = 'render:serialize-error';
+    }
+
     let pipeline: GPURenderPipeline;
+    compilationQueue += 1;
+    emitCompileProgress({ type: 'start', key: descriptorKeyAsync });
+    const pipelineCompileStartAsync = performance.now();
     try {
       const asyncFn = device.createRenderPipelineAsync?.bind(device);
       if (typeof asyncFn === 'function') {
@@ -518,9 +959,21 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
       } else {
         pipeline = device.createRenderPipeline(desc);
       }
+      emitCompileProgress({
+        type: 'done',
+        key: descriptorKeyAsync,
+        elapsed: performance.now() - pipelineCompileStartAsync,
+      });
     } catch (err) {
+      emitCompileProgress({
+        type: 'error',
+        key: descriptorKeyAsync,
+        elapsed: performance.now() - pipelineCompileStartAsync,
+      });
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`createRenderPipelineAsync failed: ${msg}`);
+    } finally {
+      compilationQueue -= 1;
     }
 
     addCompilationTime(t0);
@@ -556,7 +1009,12 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
         entryPoint: COMPUTE_ENTRY_POINT,
       },
     };
+    const computeKeyAsync = hashStringDjb2(shaderCode);
+
     let pipeline: GPUComputePipeline;
+    compilationQueue += 1;
+    emitCompileProgress({ type: 'start', key: computeKeyAsync });
+    const computeCompileStartAsync = performance.now();
     try {
       const asyncFn = device.createComputePipelineAsync?.bind(device);
       if (typeof asyncFn === 'function') {
@@ -564,9 +1022,21 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
       } else {
         pipeline = device.createComputePipeline(desc);
       }
+      emitCompileProgress({
+        type: 'done',
+        key: computeKeyAsync,
+        elapsed: performance.now() - computeCompileStartAsync,
+      });
     } catch (err) {
+      emitCompileProgress({
+        type: 'error',
+        key: computeKeyAsync,
+        elapsed: performance.now() - computeCompileStartAsync,
+      });
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`createComputePipelineAsync failed: ${msg}`);
+    } finally {
+      compilationQueue -= 1;
     }
     addCompilationTime(t0);
     return pipeline;
@@ -585,6 +1055,9 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
     get compilationTimeMs(): number {
       return compilationTimeMs;
     },
+    get compilationQueue(): number {
+      return compilationQueue;
+    },
   };
 
   const api: PipelineCache = {
@@ -597,6 +1070,7 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`getOrCreate: ${msg}`);
       }
+      recordSessionUsage(key);
       const hit = renderCache.get(key);
       if (hit) {
         cacheHits++;
@@ -623,6 +1097,7 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`getOrCreateAsync: ${msg}`);
       }
+      recordSessionUsage(key);
       const hit = renderCache.get(key);
       if (hit) {
         cacheHits++;
@@ -672,6 +1147,98 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
       return statsGetter;
     },
 
+    get compilationQueue(): number {
+      return compilationQueue;
+    },
+
+    get sessionStats(): Readonly<Record<string, number>> {
+      return Object.fromEntries(sessionUsageByKey);
+    },
+
+    saveSessionStats(): void {
+      const entries = Array.from(sessionUsageByKey.entries());
+      entries.sort((a, b) => b[1] - a[1]);
+      const topKeys: string[] = [];
+      const limit = Math.min(SESSION_STATS_PERSIST_TOP_N, entries.length);
+      for (let i = 0; i < limit; i++) {
+        const pair = entries[i];
+        if (pair) {
+          topKeys.push(pair[0]);
+        }
+      }
+      writePipelineWarmupStatsToStorage(topKeys);
+    },
+
+    loadSessionStats(): string[] {
+      return readPipelineWarmupStatsFromStorage().slice();
+    },
+
+    async autoWarmup(options?: AutoWarmupOptions): Promise<void> {
+      const onWarmupProgress = options?.onWarmupProgress;
+      let queue: PipelineDescriptor[] = [];
+      const storedKeys = readPipelineWarmupStatsFromStorage();
+      if (storedKeys.length > 0) {
+        for (let i = 0; i < storedKeys.length; i++) {
+          const keyStr = storedKeys[i];
+          if (!keyStr) {
+            continue;
+          }
+          const parsed = parsePipelineDescriptorFromSerializedKey(keyStr);
+          if (parsed) {
+            queue.push(parsed);
+          } else if (__DEV__) {
+            console.warn(`[PipelineCache] autoWarmup: skipped invalid stored descriptor key at index ${i}`);
+          }
+        }
+      }
+      if (queue.length === 0) {
+        queue = buildDefaultMercatorWarmupDescriptors();
+      }
+      const total = queue.length;
+      if (total === 0) {
+        return;
+      }
+      let done = 0;
+      for (let i = 0; i < queue.length; i++) {
+        const desc = queue[i]!;
+        let warmupKey = '';
+        try {
+          warmupKey = serializePipelineDescriptor(desc);
+        } catch (err) {
+          if (__DEV__) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[PipelineCache] autoWarmup: serializePipelineDescriptor failed at index ${i}: ${msg}`);
+          }
+          warmupKey = `autoWarmup:index:${i}`;
+        }
+        try {
+          await api.getOrCreateAsync(desc);
+        } catch (err) {
+          if (__DEV__) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[PipelineCache] autoWarmup: getOrCreateAsync failed at index ${i}: ${msg}`);
+          }
+        } finally {
+          done++;
+          try {
+            onWarmupProgress?.(done, total);
+          } catch (cbErr) {
+            if (__DEV__) {
+              const msg = cbErr instanceof Error ? cbErr.message : String(cbErr);
+              console.warn(`[PipelineCache] autoWarmup: onWarmupProgress callback error: ${msg}`);
+            }
+          }
+          emitCompileProgress({
+            type: 'done',
+            key: warmupKey,
+            completed: done,
+            total,
+            elapsed: undefined,
+          });
+        }
+      }
+    },
+
     clear(): void {
       for (const pl of renderCache.values()) {
         destroyPipelineIfSupported(pl);
@@ -684,6 +1251,8 @@ export function createPipelineCache(device: GPUDevice, shaderAssembler: ShaderAs
       cacheHits = 0;
       cacheMisses = 0;
       compilationTimeMs = 0;
+      compilationQueue = 0;
+      sessionUsageByKey.clear();
     },
 
     getOrCreateCompute(shaderCode: string, label?: string): GPUComputePipeline {

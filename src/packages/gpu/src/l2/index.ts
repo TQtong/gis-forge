@@ -62,7 +62,13 @@ export type {
 export { createShaderAssembler } from './shader-assembler.ts';
 
 // --- Module 8: PipelineCache ---
-export type { PipelineDescriptor, PipelineCache } from './pipeline-cache.ts';
+export type {
+  AutoWarmupOptions,
+  CompileProgressEvent,
+  PipelineCacheCreateOptions,
+  PipelineDescriptor,
+  PipelineCache,
+} from './pipeline-cache.ts';
 export { createPipelineCache } from './pipeline-cache.ts';
 
 // --- Module 9: ComputePassManager ---
@@ -97,7 +103,7 @@ export type {
   PostProcessPassFactory,
   FrameGraphBuilder,
 } from './frame-graph-builder.ts';
-export { createFrameGraphBuilder } from './frame-graph-builder.ts';
+export { createFrameGraphBuilder, computeCameraHash } from './frame-graph-builder.ts';
 
 // ============================================================
 // L2 全局初始化便捷函数
