@@ -3,6 +3,9 @@
 // 依赖通过 forward-reference 接口注入，避免与 L1/L3 其它模块循环引用。
 // ============================================================
 
+/** 构建期/开发期调试开关（Vite define 注入；未定义时按 false 处理） */
+declare const __DEV__: boolean | undefined;
+
 /**
  * GPU 内存追踪器的最小可替换接口（duck typing）。
  * 由 L1 GPUMemoryTracker 实现；此处仅声明调度所需方法，保持 L3 独立。
@@ -56,6 +59,14 @@ export interface ResourceManagerLike {
     /** 引用计数（>0 的资源应尽量避免淘汰） */
     readonly refCount: number;
   }>;
+  /**
+   * 可选：将资源 id 标记为预测淘汰（供自定义 LRU 使用）。
+   * 未实现时由 MemoryBudget 在内部 Set 中维护优先级。
+   *
+   * @param ids - 瓦片或资源 id
+   * @param predicted - 是否打上预测淘汰标记
+   */
+  markPredictedEviction?(ids: readonly string[], predicted: boolean): void;
 }
 
 /** 已知用于缓存分桶计数的状态标签（ResourceManager 约定字符串）。 */
@@ -77,6 +88,13 @@ const DEFAULT_EVICTION_THRESHOLD = 0.95;
 const DEFAULT_EVICTION_BATCH_SIZE = 32;
 /** 默认检查间隔：每帧检查（1）；提高该值可降低 check() 开销。 */
 const DEFAULT_CHECK_INTERVAL_FRAMES = 1;
+/** 默认：启用基于相机运动方向的预测性瓦片优先级标记。 */
+const DEFAULT_PREDICTIVE_EVICTION_ENABLED = true;
+/** 默认：GPU/CPU 最大利用率超过该比例时触发预测性标记（0.7 = 70%）。 */
+const DEFAULT_PREDICTIVE_EVICTION_THRESHOLD = 0.7;
+
+/** 相机采样历史最大条数（用于估计速度）。 */
+const CAMERA_HISTORY_MAX = 10;
 
 /** 最小合法预算字节（1 KiB），避免除零与无意义配置。 */
 const MIN_BUDGET_BYTES = 1024;
@@ -100,6 +118,13 @@ export interface MemoryBudgetConfig {
   readonly evictionBatchSize: number;
   /** 至少每隔多少帧执行一次完整检查（1 表示每帧） */
   readonly checkIntervalFrames: number;
+  /** 是否启用预测性淘汰（相机方向） */
+  readonly predictiveEvictionEnabled: boolean;
+  /**
+   * 预测性淘汰触发阈值：max(gpuUtil, cpuUtil) 超过该比例时标记“将离开视口”的瓦片。
+   * 范围建议 (0,1]，默认 0.7。
+   */
+  readonly predictiveEvictionThreshold: number;
 }
 
 /**
@@ -141,6 +166,53 @@ export interface EvictionResult {
 }
 
 /**
+ * `check()` 可选参数：传入当前可见瓦片 id 以启用预测性淘汰。
+ */
+export interface MemoryBudgetCheckOptions {
+  /**
+   * 当前视口内可见瓦片 id 列表（与 ResourceManager 中 tile 条目 id 一致，如 `z/x/y`）。
+   */
+  readonly visibleTileIds?: readonly string[];
+}
+
+/**
+ * 单次相机采样（内部与 {@link MemoryBudget.recordCameraSample} 对齐）。
+ */
+export interface CameraHistoryEntry {
+  /** 相机中心 [lng, lat]，度 */
+  readonly center: [number, number];
+  /** 缩放级别 */
+  readonly zoom: number;
+  /** 单调时间戳（毫秒，`performance.now` 优先） */
+  readonly timestamp: number;
+}
+
+/**
+ * 相机速度估计（度/秒、zoom/秒）。
+ */
+export interface CameraDirectionEstimate {
+  /** 经度方向速度（度/秒） */
+  readonly dLng: number;
+  /** 纬度方向速度（度/秒） */
+  readonly dLat: number;
+  /** 缩放级别变化速度（1/秒） */
+  readonly dZoom: number;
+}
+
+/**
+ * 预测性淘汰统计（会话内累计）。
+ */
+export interface PredictiveEvictionStats {
+  /** 累计标记为预测淘汰的瓦片次数（ id 条数累加） */
+  readonly predictiveEvictionCount: number;
+  /**
+   * 命中率：累计命中数 / 累计预测数（上一检查周期预测、本周期实际淘汰的交集）。
+   * 无预测时为 0。
+   */
+  readonly predictionAccuracy: number;
+}
+
+/**
  * MemoryBudget 实例接口：配置、检查、快照与事件订阅。
  */
 export interface MemoryBudget {
@@ -158,11 +230,13 @@ export interface MemoryBudget {
    * @param gpuTracker - GPU 追踪器（可替换实现）
    * @param resourceManager - 资源管理器（可替换实现）
    * @param currentFrame - 当前帧序号（必须为非负有限数）
+   * @param options - 可选；传入 `visibleTileIds` 以在高压内存下启用预测性瓦片标记
    */
   check(
     gpuTracker: GPUMemoryTrackerLike,
     resourceManager: ResourceManagerLike,
     currentFrame: number,
+    options?: MemoryBudgetCheckOptions,
   ): EvictionResult;
   /**
    * 生成当前内存快照（不做淘汰）。
@@ -195,6 +269,32 @@ export interface MemoryBudget {
    * @returns 取消订阅函数
    */
   onBudgetExceeded(callback: (snapshot: MemorySnapshot) => void): () => void;
+  /**
+   * 记录一帧相机状态，用于预测性淘汰（建议每帧调用）。
+   *
+   * @param center - [lng, lat] 度
+   * @param zoom - 缩放级别
+   */
+  recordCameraSample(center: [number, number], zoom: number): void;
+  /**
+   * 根据最近相机历史估计平均速度。
+   *
+   * @returns 速度向量；历史不足时返回全 0
+   */
+  predictCameraDirection(): CameraDirectionEstimate;
+  /**
+   * 估计在相机运动反方向一侧、最可能先离开视口的瓦片 id。
+   *
+   * @param direction - {@link predictCameraDirection} 的返回值
+   * @param currentVisibleTiles - 当前可见瓦片 id
+   * @returns 排序后的候选 id 子集
+   */
+  predictTilesLeavingViewport(
+    direction: CameraDirectionEstimate,
+    currentVisibleTiles: readonly string[],
+  ): string[];
+  /** 预测性淘汰累计统计（只读） */
+  readonly predictiveStats: PredictiveEvictionStats;
 }
 
 /**
@@ -267,7 +367,22 @@ function mergeMemoryBudgetConfig(partial?: Partial<MemoryBudgetConfig>): MemoryB
       1,
       Math.floor(finiteOr(p.checkIntervalFrames ?? DEFAULT_CHECK_INTERVAL_FRAMES, DEFAULT_CHECK_INTERVAL_FRAMES)),
     ),
+    predictiveEvictionEnabled: p.predictiveEvictionEnabled ?? DEFAULT_PREDICTIVE_EVICTION_ENABLED,
+    predictiveEvictionThreshold: clampPredictiveEvictionThreshold(
+      p.predictiveEvictionThreshold ?? DEFAULT_PREDICTIVE_EVICTION_THRESHOLD,
+    ),
   };
+}
+
+/**
+ * 将预测性淘汰触发阈值限制在 (0,1] 内。
+ *
+ * @param t - 原始阈值
+ * @returns 夹紧后的阈值
+ */
+function clampPredictiveEvictionThreshold(t: number): number {
+  const v = finiteOr(t, DEFAULT_PREDICTIVE_EVICTION_THRESHOLD);
+  return Math.min(1, Math.max(EPSILON_RATIO, v));
 }
 
 /**
@@ -427,6 +542,7 @@ function mergeIdLists(a: string[], b: string[]): string[] {
  */
 function collectCpuEvictionCandidates(
   resourceManager: ResourceManagerLike,
+  priorityEvictFirst?: ReadonlySet<string>,
 ): Array<{ id: string; byteSize: number; lastAccessFrame: number; refCount: number }> {
   const states = [KNOWN_CACHE_STATE_TILE, KNOWN_CACHE_STATE_TEXTURE, KNOWN_CACHE_STATE_BUFFER, 'other'];
   const byId = new Map<string, { id: string; byteSize: number; lastAccessFrame: number; refCount: number }>();
@@ -468,14 +584,183 @@ function collectCpuEvictionCandidates(
     return [];
   }
   const merged = Array.from(byId.values());
-  // 先按 refCount（升序）再按 lastAccessFrame（升序）：优先淘汰无引用且最旧的资源
+  const pri = priorityEvictFirst ?? null;
+  // 预测命中 id 优先；再按 refCount（升序）再按 lastAccessFrame（升序）
   merged.sort((x, y) => {
+    if (pri !== null) {
+      const px = pri.has(x.id) ? 0 : 1;
+      const py = pri.has(y.id) ? 0 : 1;
+      if (px !== py) {
+        return px - py;
+      }
+    }
     if (x.refCount !== y.refCount) {
       return x.refCount - y.refCount;
     }
     return x.lastAccessFrame - y.lastAccessFrame;
   });
   return merged;
+}
+
+/**
+ * 将 `z/x/y` 瓦片 id 解析为 Web 墨卡托瓦片中心经纬度（度）。
+ * 解析失败时返回 null。
+ *
+ * @param id - 瓦片 id
+ * @returns [lon, lat] 或 null
+ */
+function parseTileKeyToCenterLonLat(id: string): [number, number] | null {
+  const parts = id.split('/');
+  if (parts.length !== 3) {
+    return null;
+  }
+  const z = parseInt(parts[0]!, 10);
+  const x = parseInt(parts[1]!, 10);
+  const y = parseInt(parts[2]!, 10);
+  if (!Number.isFinite(z) || !Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+  if (z < 0 || z > 32) {
+    return null;
+  }
+  const n = 2 ** z;
+  if (x < 0 || y < 0 || x >= n || y >= n) {
+    return null;
+  }
+  const lon = ((x + 0.5) / n) * 360 - 180;
+  const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 0.5)) / n)));
+  const lat = latRad * (180 / Math.PI);
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+    return null;
+  }
+  return [lon, lat];
+}
+
+/**
+ * 根据相机运动方向，从可见瓦片中选取“拖尾侧”（与运动方向点积最负）的一批 id。
+ *
+ * @param direction - 速度估计（度/秒）
+ * @param cameraCenter - 当前相机中心 [lng,lat]
+ * @param visibleTileIds - 可见瓦片 id
+ * @param maxCount - 最多返回数量
+ * @returns 预测将先离开视口的瓦片 id
+ */
+function selectTrailingTileIds(
+  direction: CameraDirectionEstimate,
+  cameraCenter: [number, number],
+  visibleTileIds: readonly string[],
+  maxCount: number,
+): string[] {
+  if (visibleTileIds.length === 0 || maxCount <= 0) {
+    return [];
+  }
+  const vx = finiteOr(direction.dLng, 0);
+  const vy = finiteOr(direction.dLat, 0);
+  const speed = Math.hypot(vx, vy);
+  const camLng = finiteOr(cameraCenter[0], 0);
+  const camLat = finiteOr(cameraCenter[1], 0);
+
+  const scored: Array<{ id: string; score: number }> = [];
+  for (let i = 0; i < visibleTileIds.length; i++) {
+    const id = visibleTileIds[i]!;
+    if (typeof id !== 'string' || id.length === 0) {
+      continue;
+    }
+    const ll = parseTileKeyToCenterLonLat(id);
+    if (ll === null) {
+      continue;
+    }
+    let dot: number;
+    if (speed < 1e-12) {
+      // 无明显平移时：用 zoom 变化粗筛低 z 瓦片（缩放时父级瓦片更易闲置）
+      const parts = id.split('/');
+      const z = parts.length >= 1 ? parseInt(parts[0]!, 10) : NaN;
+      if (direction.dZoom < 0 && Number.isFinite(z)) {
+        dot = -z;
+      } else {
+        dot = 0;
+      }
+    } else {
+      const nx = vx / speed;
+      const ny = vy / speed;
+      const dlx = ll[0] - camLng;
+      const dly = ll[1] - camLat;
+      dot = dlx * nx + dly * ny;
+    }
+    scored.push({ id, score: dot });
+  }
+  if (scored.length === 0) {
+    return [];
+  }
+  scored.sort((a, b) => a.score - b.score);
+  // 未来约 2 秒内平移量（度）：拖尾瓦片 score 应明显低于 -speed*2 的某一比例
+  const horizonSec = 2;
+  let take = Math.min(maxCount, scored.length);
+  if (speed >= 1e-6) {
+    const estDeg = speed * horizonSec;
+    let cut = 0;
+    for (let i = 0; i < scored.length; i++) {
+      if (scored[i]!.score < -estDeg * 0.02) {
+        cut += 1;
+      }
+    }
+    take = Math.min(maxCount, Math.max(cut, 1));
+  }
+  const out: string[] = [];
+  for (let i = 0; i < scored.length && out.length < take; i++) {
+    out.push(scored[i]!.id);
+  }
+  return out;
+}
+
+/**
+ * 将上一轮预测与本轮实际淘汰对比，更新累计命中率分子分母。
+ *
+ * @param state - 可写统计
+ * @param prevPredictedIds - 上一轮标记的预测淘汰 id
+ * @param evictedIds - 本轮实际淘汰 id
+ */
+function applyPredictionAccuracy(
+  state: { hits: number; total: number },
+  prevPredictedIds: ReadonlySet<string>,
+  evictedIds: readonly string[],
+): void {
+  if (prevPredictedIds.size === 0) {
+    return;
+  }
+  let hits = 0;
+  for (let i = 0; i < evictedIds.length; i++) {
+    const id = evictedIds[i]!;
+    if (prevPredictedIds.has(id)) {
+      hits += 1;
+    }
+  }
+  state.hits += hits;
+  state.total += prevPredictedIds.size;
+}
+
+/**
+ * 由相机历史估计平均速度（度/秒、zoom/秒）。
+ *
+ * @param history - 采样序列（时间递增）
+ * @returns 速度向量；样本不足时为 0
+ */
+function predictCameraDirectionFromHistory(history: readonly CameraHistoryEntry[]): CameraDirectionEstimate {
+  if (history.length < 2) {
+    return { dLng: 0, dLat: 0, dZoom: 0 };
+  }
+  const oldest = history[0]!;
+  const newest = history[history.length - 1]!;
+  const dtMs = newest.timestamp - oldest.timestamp;
+  if (dtMs <= 1e-3) {
+    return { dLng: 0, dLat: 0, dZoom: 0 };
+  }
+  const dtSec = dtMs / 1000;
+  return {
+    dLng: (newest.center[0] - oldest.center[0]) / dtSec,
+    dLat: (newest.center[1] - oldest.center[1]) / dtSec,
+    dZoom: (newest.zoom - oldest.zoom) / dtSec,
+  };
 }
 
 /**
@@ -495,6 +780,17 @@ export function createMemoryBudget(config?: Partial<MemoryBudgetConfig>): Memory
   const warningHandlers = new Set<(snapshot: MemorySnapshot) => void>();
   const evictionHandlers = new Set<(ids: string[]) => void>();
   const exceededHandlers = new Set<(snapshot: MemorySnapshot) => void>();
+
+  /** 最近相机采样（最多 {@link CAMERA_HISTORY_MAX} 条），用于速度估计与拖尾瓦片预测 */
+  const _cameraHistory: CameraHistoryEntry[] = [];
+  /** 预测应优先淘汰的瓦片 id（跨帧保留，直至淘汰或失效） */
+  const predictedEvictionPriorityIds = new Set<string>();
+  /** 上一轮 check 结束时标记的预测 id，用于下一帧与 evicted 对比命中率 */
+  let pendingPredictionIds = new Set<string>();
+  /** 累计：预测标记次数（id 条数） */
+  let predictiveEvictionCount = 0;
+  /** 命中率累计分子分母 */
+  const predictionAccuracyState = { hits: 0, total: 0 };
 
   const safeCall = <T>(fn: () => T, fallback: T): T => {
     try {
@@ -572,12 +868,82 @@ export function createMemoryBudget(config?: Partial<MemoryBudgetConfig>): Memory
       }
     },
 
+    get predictiveStats(): PredictiveEvictionStats {
+      return {
+        predictiveEvictionCount,
+        predictionAccuracy:
+          predictionAccuracyState.total > 0 ? predictionAccuracyState.hits / predictionAccuracyState.total : 0,
+      };
+    },
+
+    recordCameraSample(center: [number, number], zoom: number): void {
+      try {
+        const ts =
+          typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? performance.now()
+            : typeof Date !== 'undefined'
+              ? Date.now()
+              : 0;
+        const lng = finiteOr(center[0], 0);
+        const lat = finiteOr(center[1], 0);
+        const z = finiteOr(zoom, 0);
+        _cameraHistory.push({ center: [lng, lat], zoom: z, timestamp: ts });
+        while (_cameraHistory.length > CAMERA_HISTORY_MAX) {
+          _cameraHistory.shift();
+        }
+      } catch {
+        // 采样失败不应影响主循环
+      }
+    },
+
+    predictCameraDirection(): CameraDirectionEstimate {
+      try {
+        return predictCameraDirectionFromHistory(_cameraHistory);
+      } catch {
+        return { dLng: 0, dLat: 0, dZoom: 0 };
+      }
+    },
+
+    predictTilesLeavingViewport(
+      direction: CameraDirectionEstimate,
+      currentVisibleTiles: readonly string[],
+    ): string[] {
+      try {
+        const maxCount = Math.max(8, cfg.evictionBatchSize * 2);
+        let cam: [number, number] = [0, 0];
+        if (_cameraHistory.length > 0) {
+          const last = _cameraHistory[_cameraHistory.length - 1]!;
+          cam = [last.center[0], last.center[1]];
+        } else {
+          let sx = 0;
+          let sy = 0;
+          let n = 0;
+          for (let i = 0; i < currentVisibleTiles.length; i++) {
+            const ll = parseTileKeyToCenterLonLat(currentVisibleTiles[i]!);
+            if (ll !== null) {
+              sx += ll[0];
+              sy += ll[1];
+              n += 1;
+            }
+          }
+          if (n > 0) {
+            cam = [sx / n, sy / n];
+          }
+        }
+        return selectTrailingTileIds(direction, cam, currentVisibleTiles, maxCount);
+      } catch {
+        return [];
+      }
+    },
+
     check(
       gpuTracker: GPUMemoryTrackerLike,
       resourceManager: ResourceManagerLike,
       currentFrame: number,
+      options?: MemoryBudgetCheckOptions,
     ): EvictionResult {
       const frame = Math.max(0, Math.floor(finiteOr(currentFrame, 0)));
+      const prevPredForAccuracy = new Set(pendingPredictionIds);
 
       const snap0 = budget.snapshot(gpuTracker, resourceManager);
       const gpuOver = snap0.gpuUsed > cfg.gpuBudget;
@@ -598,6 +964,7 @@ export function createMemoryBudget(config?: Partial<MemoryBudgetConfig>): Memory
 
       const forceRun = wasOverBudget || needEvictionPressure;
       if (!shouldRunCheck(frame, lastCheckFrame, cfg.checkIntervalFrames, forceRun)) {
+        applyPredictionAccuracy(predictionAccuracyState, prevPredForAccuracy, []);
         return {
           evicted: [],
           freedGpuBytes: 0,
@@ -633,6 +1000,9 @@ export function createMemoryBudget(config?: Partial<MemoryBudgetConfig>): Memory
           } catch {
             // evict 失败不抛：避免预算线程中断；后续帧会再次尝试
           }
+          for (const id of gpuIds) {
+            predictedEvictionPriorityIds.delete(id);
+          }
         }
         let gpuBytesAfter = gpuBytesBefore;
         try {
@@ -652,7 +1022,7 @@ export function createMemoryBudget(config?: Partial<MemoryBudgetConfig>): Memory
       }
 
       if (cpuUsedNow > cfg.cpuBudget || snap0.cpuUtilization >= cfg.evictionThreshold) {
-        const candidates = collectCpuEvictionCandidates(resourceManager);
+        const candidates = collectCpuEvictionCandidates(resourceManager, predictedEvictionPriorityIds);
         let safety = 0;
         // safety 上限防止异常循环（候选无限增长或 stats 不更新）
         while (cpuUsedNow > cfg.cpuBudget && safety < 10_000) {
@@ -682,6 +1052,7 @@ export function createMemoryBudget(config?: Partial<MemoryBudgetConfig>): Memory
           evicted = mergeIdLists(evicted, batch);
           // 从候选中移除已淘汰 id（避免重复 evict）
           for (const id of batch) {
+            predictedEvictionPriorityIds.delete(id);
             const idx = candidates.findIndex((x) => x.id === id);
             if (idx >= 0) {
               candidates.splice(idx, 1);
@@ -700,6 +1071,63 @@ export function createMemoryBudget(config?: Partial<MemoryBudgetConfig>): Memory
 
       if (evicted.length > 0) {
         emitEviction(evicted);
+      }
+
+      applyPredictionAccuracy(predictionAccuracyState, prevPredForAccuracy, evicted);
+
+      // ---------- 预测性标记：高内存占用时降低“拖尾侧”瓦片优先级 ----------
+      const snapAfter = budget.snapshot(gpuTracker, resourceManager);
+      const maxUtil = Math.max(snapAfter.gpuUtilization, snapAfter.cpuUtilization);
+      const vis = options?.visibleTileIds;
+      if (
+        cfg.predictiveEvictionEnabled &&
+        maxUtil >= cfg.predictiveEvictionThreshold &&
+        vis !== undefined &&
+        vis.length > 0
+      ) {
+        try {
+          const dir = predictCameraDirectionFromHistory(_cameraHistory);
+          let camCenter: [number, number] = [0, 0];
+          if (_cameraHistory.length > 0) {
+            camCenter = _cameraHistory[_cameraHistory.length - 1]!.center;
+          } else {
+            let sx = 0;
+            let sy = 0;
+            let n = 0;
+            for (let i = 0; i < vis.length; i++) {
+              const ll = parseTileKeyToCenterLonLat(vis[i]!);
+              if (ll !== null) {
+                sx += ll[0];
+                sy += ll[1];
+                n += 1;
+              }
+            }
+            if (n > 0) {
+              camCenter = [sx / n, sy / n];
+            }
+          }
+          const predicted = selectTrailingTileIds(
+            dir,
+            camCenter,
+            vis,
+            Math.max(8, cfg.evictionBatchSize * 2),
+          );
+          for (let i = 0; i < predicted.length; i++) {
+            predictedEvictionPriorityIds.add(predicted[i]!);
+          }
+          predictiveEvictionCount += predicted.length;
+          pendingPredictionIds = new Set(predicted);
+          try {
+            resourceManager.markPredictedEviction?.(predicted, true);
+          } catch {
+            // 可选接口未实现或抛错时忽略
+          }
+          if (typeof __DEV__ !== 'undefined' && __DEV__) {
+            console.debug('[MemoryBudget] predictive eviction mark', predicted.length, 'tiles');
+          }
+        } catch {
+          // 预测失败仅跳过本帧
+        }
       }
 
       return {
