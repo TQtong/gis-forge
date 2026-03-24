@@ -1,7 +1,7 @@
 ---
 description: L1 GPU 资源管理 + L2 渲染管线规范。编辑 gpu 包代码时应用。
 globs:
-  - "packages/gpu/**"
+  - "src/packages/gpu/**"
 alwaysApply: false
 ---
 

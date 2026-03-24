@@ -1,9 +1,9 @@
 ---
 description: L3 调度层规范——CameraController、TileScheduler、WorkerPool、FrameScheduler。编辑 runtime 或 camera 包代码时应用。
 globs:
-  - "packages/runtime/**"
-  - "packages/camera-*/**"
-  - "packages/view-morph/**"
+  - "src/packages/runtime/**"
+  - "src/packages/camera-*/**"
+  - "src/packages/view-morph/**"
 alwaysApply: false
 ---
 

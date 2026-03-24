@@ -1,11 +1,11 @@
 ---
 description: 数学库、GIS 算法、空间索引编码规范。编辑 math/geo/algorithm/index/precision 目录文件时应用。
 globs:
-  - "packages/core/src/math/**"
-  - "packages/core/src/geo/**"
-  - "packages/core/src/algorithm/**"
-  - "packages/core/src/index/**"
-  - "packages/core/src/precision/**"
+  - "src/packages/core/src/math/**"
+  - "src/packages/core/src/geo/**"
+  - "src/packages/core/src/algorithm/**"
+  - "src/packages/core/src/index/**"
+  - "src/packages/core/src/precision/**"
 alwaysApply: false
 ---
 

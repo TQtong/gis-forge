@@ -1,7 +1,7 @@
 ---
 description: L6 预设层规范——Map2D/Map25D/Globe3D/MapFull 的 API 设计约束。编辑预设包代码时应用。
 globs:
-  - "packages/preset-*/**"
+  - "src/packages/preset-*/**"
 alwaysApply: false
 ---
 

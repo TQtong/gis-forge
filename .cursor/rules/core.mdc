@@ -82,7 +82,7 @@ L0 基础层  math/ geo/ algorithm/ index/ precision/ types/ infra/
 
 ## 目录结构
 ```
-packages/
+src/packages/
 ├── core/src/              L0 — math/ geo/ algorithm/ index/ precision/ types/ infra/
 ├── gpu/src/               L1+L2 — l1/(device/surface/buffer-pool/texture-manager/memory-tracker/bind-group-cache/indirect-draw/uploader) + l2/(shader-assembler/pipeline-cache/depth-manager/render-graph/frame-graph-builder/compositor/picking-engine/stencil-manager/render-stats/compute-pass-manager/blend-presets/uniform-layout-builder/wgsl-templates) + wgsl/(templates/projection/geometry/style/feature/compute)
 ├── runtime/src/           L3 — frame-scheduler/tile-scheduler/worker-pool/worker-entry/resource-manager/memory-budget/request-scheduler/error-recovery/camera-controller

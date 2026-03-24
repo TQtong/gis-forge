@@ -1,7 +1,7 @@
 ---
 description: 共享类型定义规范（Feature/CameraState/PickResult/Viewport/Tile/StyleSpec）。编辑 types 目录或引用这些类型时应用。
 globs:
-  - "packages/core/src/types/**"
+  - "src/packages/core/src/types/**"
 alwaysApply: false
 ---
 

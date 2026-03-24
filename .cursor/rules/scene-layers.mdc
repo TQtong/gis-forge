@@ -1,9 +1,9 @@
 ---
 description: L4 场景层 + 图层包规范——Layer 接口、StyleEngine、LabelManager、核心图层包。编辑 scene 或 layer 包代码时应用。
 globs:
-  - "packages/scene/**"
-  - "packages/layer-*/**"
-  - "packages/globe/**"
+  - "src/packages/scene/**"
+  - "src/packages/layer-*/**"
+  - "src/packages/globe/**"
 alwaysApply: false
 ---
 

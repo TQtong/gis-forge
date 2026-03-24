@@ -1,10 +1,10 @@
 ---
 description: L5 扩展层规范——EP1~EP6 接口、Context 注入、错误隔离。编辑 extensions 包或扩展实现代码时应用。
 globs:
-  - "packages/extensions/**"
-  - "packages/interaction-*/**"
-  - "packages/postprocess-*/**"
-  - "packages/source-*/**"
+  - "src/packages/extensions/**"
+  - "src/packages/interaction-*/**"
+  - "src/packages/postprocess-*/**"
+  - "src/packages/source-*/**"
 alwaysApply: false
 ---
 
