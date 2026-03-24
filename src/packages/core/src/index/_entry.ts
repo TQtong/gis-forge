@@ -14,3 +14,21 @@ export {
     createSpatialHash,
     type SpatialHash,
 } from './spatial-hash.ts';
+
+export {
+    createQuadTree,
+    type QuadTree,
+    type QuadTreeItem,
+} from './quadtree.ts';
+
+export {
+    createKDTree,
+    type KDTree,
+    type KDTreeItem,
+} from './kd-tree.ts';
+
+export {
+    createGridIndex,
+    type GridIndex,
+    type GridItem,
+} from './grid-index.ts';

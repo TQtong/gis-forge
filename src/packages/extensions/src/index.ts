@@ -9,12 +9,13 @@
 
 import type { CustomLayerFactory } from './custom-layer.ts';
 import type { DataSourceFactory } from './custom-source.ts';
-import type { InteractionManager, InteractionToolFactory } from './custom-interaction.ts';
+import type { InteractionToolFactory } from './custom-interaction.ts';
+import type { InteractionManager } from './interaction-manager.ts';
 import type { PostProcessPassFactory } from './custom-postprocess.ts';
 import type { ProjectionModule } from './custom-projection.ts';
 import type { ShaderHookDefinition, ShaderHookPoint } from './shader-hook.ts';
 
-import { createInteractionManager } from './custom-interaction.ts';
+import { createInteractionManager } from './interaction-manager.ts';
 
 /**
  * 可注册扩展类别（与 EP1~EP6 一一对应）。
@@ -700,7 +701,7 @@ export function createExtensionLifecycle(registry: ExtensionRegistry): Extension
 export function initializeL5(): L5Context {
   const registry = createExtensionRegistry();
   const lifecycle = createExtensionLifecycle(registry);
-  const interactionManager = createInteractionManager(registry);
+  const interactionManager = createInteractionManager({ registry });
   return { registry, lifecycle, interactionManager };
 }
 
@@ -710,3 +711,4 @@ export * from './custom-source.ts';
 export * from './shader-hook.ts';
 export * from './custom-postprocess.ts';
 export * from './custom-interaction.ts';
+export * from './interaction-manager.ts';

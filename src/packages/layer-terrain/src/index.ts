@@ -5,3 +5,7 @@
 
 export { createTerrainLayer } from './TerrainLayer.ts';
 export type { TerrainLayer, TerrainLayerOptions } from './TerrainLayer.ts';
+
+// --- DEM → 三角网格构建器 ---
+export { buildTerrainMesh } from './terrain-mesh-builder.ts';
+export type { TerrainMesh, TerrainMeshOptions, DEMData } from './terrain-mesh-builder.ts';

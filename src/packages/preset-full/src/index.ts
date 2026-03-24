@@ -38,3 +38,16 @@ export {
   GeolocateControl,
   FullscreenControl,
 } from '../../preset-2d/src/controls.ts';
+
+// --- 工厂风格控件 ---
+export {
+  createNavigationControl,
+  createScaleControl,
+  createAttributionControl,
+  createGeolocateControl,
+  createFullscreenControl,
+} from '../../preset-2d/src/controls/index.ts';
+
+// --- 引擎初始化编排 ---
+export { initializeEngine } from '../../preset-2d/src/init.ts';
+export type { EngineConfig, EngineContext } from '../../preset-2d/src/init.ts';

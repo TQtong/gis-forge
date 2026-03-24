@@ -8,3 +8,15 @@ export { createGlobeRenderer } from './GlobeRenderer.ts';
 export type { GlobeRenderer, GlobeOptions } from './GlobeRenderer.ts';
 export type { AtmosphereConstants, StarfieldData, EllipsoidMeshData } from './GlobeRenderer.ts';
 export { generateEllipsoidMesh, generateStarfield, computeSunPositionECEF, computeTransmittanceLUT, computeCascadeSplits, buildAtmosphereConstants } from './GlobeRenderer.ts';
+
+// --- 大气散射渲染器 ---
+export { createAtmosphereRenderer } from './atmosphere.ts';
+export type { AtmosphereRenderer, AtmosphereRendererOptions, AtmosphereRenderContext, AtmosphereLUTData } from './atmosphere.ts';
+
+// --- 星空天穹渲染器 ---
+export { createSkyboxRenderer } from './skybox.ts';
+export type { SkyboxRenderer, SkyboxRendererOptions, SkyboxRenderContext } from './skybox.ts';
+
+// --- 太阳位置计算 ---
+export { computeSunPosition } from './sun.ts';
+export type { SunPosition } from './sun.ts';

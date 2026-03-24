@@ -57,3 +57,30 @@ export {
 } from './geodesic.ts';
 
 export type { VincentyDirectResult, NearestPointResult } from './geodesic.ts';
+
+// ============================================================
+// measure — 几何测量（面积/长度/质心/视觉中心/最小包围圆/距离/周长）
+// ============================================================
+export {
+    area,
+    geodesicArea,
+    length,
+    geodesicLength,
+    centroid,
+    polylabel,
+    minBoundingCircle,
+    pointToLineDistance,
+    perimeter,
+} from './measure.ts';
+
+// ============================================================
+// projection-math — 投影数学工具（UTM/GCJ-02/BD-09）
+// ============================================================
+export {
+    utmForward,
+    utmInverse,
+    gcj02ToWgs84,
+    wgs84ToGcj02,
+    bd09ToGcj02,
+    gcj02ToBd09,
+} from './projection-math.ts';

@@ -5,3 +5,7 @@
 
 export { createVectorTileLayer } from './VectorTileLayer.ts';
 export type { VectorTileLayer, VectorTileLayerOptions } from './VectorTileLayer.ts';
+
+// --- MVT Protobuf 解码器 ---
+export { decodeMVT } from './mvt-decoder.ts';
+export type { MVTTile, MVTLayer, MVTFeature, MVTGeometryType } from './mvt-decoder.ts';

@@ -167,49 +167,33 @@ geoforge/
 │   │   │   │   ├── compute-pass-manager.ts    # ComputePassManager（createFrustumCullTask/createDepthSortTask/createLabelCollisionTask/createPointClusterTask/encodeAll）
 │   │   │   │   ├── blend-presets.ts           # BlendPresets（opaque/alphaBlend/premultipliedAlpha/additive/multiply/screen/stencilOnly/custom）
 │   │   │   │   ├── uniform-layout-builder.ts  # UniformLayoutBuilder（WGSL 对齐规则/generateWGSL/UniformWriter）
-│   │   │   │   └── wgsl-templates.ts          # WGSLTemplates（vertexTemplate/fragmentTemplate/computeTemplates + projection/geometry/style/feature 模块路径见下）
+│   │   │   │   └── wgsl-templates.ts          # WGSLTemplates（vertexTemplate/fragmentTemplate/computeTemplates + 内置模块：mercator.wgsl/globe.wgsl/split_double.wgsl/log_depth.wgsl/sdf_line.wgsl/msdf_text.wgsl）
 │   │   │   │
-│   │   │   └── wgsl/                          # ── WGSL 着色器源码（文件名统一 kebab-case）──
-│   │   │       ├── sky.wgsl                   # 天空着色片段（sky-renderer）
-│   │   │       ├── fog.wgsl                   # 雾效片段（fog-config 注入）
-│   │   │       ├── mipmap-gen.wgsl            # Mipmap 生成（uploader.generateMipmaps）
-│   │   │       ├── templates/                 # 顶点/片元/Compute 占位模板（非具体 projection/geometry 实现）
-│   │   │       │   ├── vertex-template.wgsl   # 顶点主模板（PerFrameUniforms + Hook 占位符）
-│   │   │       │   ├── fragment-template.wgsl # 片元主模板（fs_main + Hook 占位符）
-│   │   │       │   ├── frustum-cull-template.wgsl # 视锥剔除 Compute 模板（与 compute/frustum-cull 成品可切换）
-│   │   │       │   └── depth-sort-template.wgsl   # 深度排序 Compute 占位模板
-│   │   │       ├── projection/                # ShaderAssembler 投影模块（projectPosition）
-│   │   │       │   ├── mercator.wgsl
-│   │   │       │   ├── globe.wgsl
-│   │   │       │   └── ortho.wgsl
-│   │   │       ├── geometry/                  # 几何阶段模块（processVertex）
-│   │   │       │   ├── point.wgsl
-│   │   │       │   ├── line.wgsl
-│   │   │       │   └── polygon.wgsl
-│   │   │       ├── style/                     # 片元样式模块（computeColor）
-│   │   │       │   ├── fill-solid.wgsl
-│   │   │       │   ├── fill-gradient.wgsl
-│   │   │       │   └── stroke.wgsl
-│   │   │       ├── feature/                   # 特性片段（对数深度/双精度/SDF/MSDF）
-│   │   │       │   ├── log-depth.wgsl
-│   │   │       │   ├── split-double.wgsl
-│   │   │       │   ├── sdf-line.wgsl
-│   │   │       │   └── msdf-text.wgsl
-│   │   │       ├── compositor/                # Compositor 全屏/深度统一/OIT
-│   │   │       │   ├── depth-unification.wgsl
-│   │   │       │   ├── compose-header.wgsl
-│   │   │       │   ├── oit-header.wgsl
-│   │   │       │   └── fullscreen-vertex.wgsl
-│   │   │       ├── depth/                     # DepthManager：对数深度与线性化
-│   │   │       │   ├── log-depth-vertex.wgsl
-│   │   │       │   ├── log-depth-fragment.wgsl
-│   │   │       │   └── linearize-depth.wgsl
-│   │   │       └── compute/                   # ComputePassManager 内置任务 WGSL
-│   │   │           ├── frustum-cull.wgsl      # 视锥剔除
-│   │   │           ├── depth-sort.wgsl        # Parallel Radix Sort
-│   │   │           ├── label-collision.wgsl   # 标注碰撞精筛
-│   │   │           ├── spatial-hash.wgsl      # 空间哈希 / 点聚合
-│   │   │           └── terrain-tessellation.wgsl # 地形细分
+│   │   │   └── wgsl/                          # ── WGSL 着色器源码 ──
+│   │   │       ├── templates/
+│   │   │       │   ├── vertex_template.wgsl   # 顶点着色器模板（PerFrameUniforms + VertexInput/Output + vs_main + Hook 占位符）
+│   │   │       │   └── fragment_template.wgsl # 片元着色器模板（fs_main + Hook 占位符）
+│   │   │       ├── projection/
+│   │   │       │   ├── mercator.wgsl          # fn projectPosition → vpMatrix * vec4(worldPos, 1.0)
+│   │   │       │   ├── globe.wgsl             # fn projectPosition（ECEF + Split-Double + RTC）
+│   │   │       │   └── ortho.wgsl             # fn projectPosition（正交投影）
+│   │   │       ├── geometry/
+│   │   │       │   ├── point.wgsl             # fn processVertex（点精灵）
+│   │   │       │   ├── line.wgsl              # fn processVertex（线段条带）
+│   │   │       │   └── polygon.wgsl           # fn processVertex（三角网面片）
+│   │   │       ├── style/
+│   │   │       │   ├── fill_solid.wgsl        # fn computeColor（纯色填充）
+│   │   │       │   ├── fill_gradient.wgsl     # fn computeColor（渐变填充）
+│   │   │       │   └── stroke.wgsl            # fn computeColor（描边）
+│   │   │       ├── feature/
+│   │   │       │   ├── split_double.wgsl      # reconstructDoublePrecision()
+│   │   │       │   ├── log_depth.wgsl         # applyLogDepthVertex() + applyLogDepthFragment()
+│   │   │       │   ├── sdf_line.wgsl          # sdfLineAlpha()
+│   │   │       │   └── msdf_text.wgsl         # MSDF 采样 + 抗锯齿
+│   │   │       └── compute/
+│   │   │           ├── frustum_cull.wgsl      # 视锥剔除 Compute Shader
+│   │   │           ├── depth_sort.wgsl        # Parallel Radix Sort
+│   │   │           └── label_collision.wgsl   # 标注碰撞精筛
 │   │   │
 │   │   └── __tests__/
 │   │       ├── l1/
@@ -389,11 +373,6 @@ geoforge/
 │   │       ├── index.ts
 │   │       ├── GeoJSONLayer.ts                # implements Layer（setData/getCluster*/geojson-vt 集成）
 │   │       └── geojson-vt.ts                  # 自研 GeoJSON 瓦片切片
-│   │
-│   ├── layer-flatgeobuf/                      # @geoforge/layer-flatgeobuf（可选；当前仓库仅含源码，无独立 package.json 时以路径引用）
-│   │   └── src/
-│   │       ├── index.ts                       # 包入口（re-export）
-│   │       └── FlatGeobufLayer.ts             # HTTP Range + Hilbert 索引 FlatGeobuf 要素查询
 │   │
 │   ├── layer-terrain/                         # @geoforge/layer-terrain
 │   │   ├── package.json

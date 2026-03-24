@@ -22,6 +22,14 @@ export { createRequestScheduler } from './request-scheduler.ts';
 export type { WorkerTaskType, WorkerTask, WorkerTaskResult, WorkerPoolConfig, WorkerPool } from './worker-pool.ts';
 export { createWorkerPool } from './worker-pool.ts';
 
+export type {
+  WorkerInboundMessage,
+  WorkerOutboundSuccess,
+  WorkerOutboundFailure,
+  WorkerOutboundMessage,
+} from './worker-entry.ts';
+export { handleWorkerMessage, installWorkerOnMessageHandler } from './worker-entry.ts';
+
 export type { ResourceType, ResourceState, Resource, ResourceManager } from './resource-manager.ts';
 export { createResourceManager } from './resource-manager.ts';
 

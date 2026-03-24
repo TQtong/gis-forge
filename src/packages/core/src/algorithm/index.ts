@@ -21,3 +21,15 @@ export {
     bboxOverlap,
     type SegmentIntersection,
 } from './intersect.ts';
+export { delaunay, voronoi } from './delaunay.ts';
+export { convexHull } from './convex-hull.ts';
+export { sutherlandHodgman, cohenSutherland, liangBarsky } from './clip.ts';
+export {
+    supercluster,
+    dbscan,
+    kMeans,
+    type SuperclusterOptions,
+    type Supercluster,
+    type ClusterFeature,
+    type KMeansResult,
+} from './cluster.ts';
