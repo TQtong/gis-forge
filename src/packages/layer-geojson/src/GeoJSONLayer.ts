@@ -30,6 +30,8 @@ const GEOJSON_ERROR_CODES = {
   INVALID_OPACITY: 'GEOJSON_INVALID_OPACITY',
   /** setData 接收到非法数据格式 */
   INVALID_DATA: 'GEOJSON_INVALID_DATA',
+  /** setDataIncremental 接收到非法或非 FeatureCollection 数据 */
+  INCREMENTAL_INVALID: 'GEOJSON_INCREMENTAL_INVALID',
   /** 聚合参数非法 */
   INVALID_CLUSTER_PARAM: 'GEOJSON_INVALID_CLUSTER_PARAM',
   /** 聚合 ID 不存在 */
@@ -244,6 +246,25 @@ interface ClusterNode {
 }
 
 // ---------------------------------------------------------------------------
+// 增量更新统计
+// ---------------------------------------------------------------------------
+
+/**
+ * `setDataIncremental` 最近一次执行的要素差异统计。
+ * 用于调试与性能观测（避免全量重建时的重复工作）。
+ */
+export interface GeoJSONIncrementalDiffStats {
+  /** 相对上一快照新出现的要素 id 数量 */
+  readonly added: number;
+  /** 上一快照存在但本次数据中缺失的要素 id 数量 */
+  readonly removed: number;
+  /** id 仍存在但 geometry 或 properties 发生变化的要素数量 */
+  readonly modified: number;
+  /** 内容完全相同的要素数量 */
+  readonly unchanged: number;
+}
+
+// ---------------------------------------------------------------------------
 // GeoJSONLayer 扩展接口
 // ---------------------------------------------------------------------------
 
@@ -285,6 +306,23 @@ export interface GeoJSONLayer extends Layer {
    * });
    */
   setData(data: string | object): void;
+
+  /**
+   * 基于要素 id（或 `properties.id` 或数组下标）对现有数据做差分更新，
+   * 仅对新增 / 删除 / 修改的要素触发重新索引与（在必要时）重新聚合。
+   *
+   * @param newData - GeoJSON FeatureCollection
+   * @returns 本次差分统计
+   * @throws 若 `newData` 不是合法的 FeatureCollection
+   *
+   * @stability experimental
+   */
+  setDataIncremental(newData: FeatureCollection): GeoJSONIncrementalDiffStats;
+
+  /**
+   * 最近一次 `setDataIncremental` 的差分统计；若尚未调用过增量更新则为 `null`。
+   */
+  readonly lastIncrementalDiffStats: GeoJSONIncrementalDiffStats | null;
 
   /**
    * 读取当前数据（FeatureCollection 格式）。
@@ -593,6 +631,100 @@ function normalizeFeature(raw: unknown, index: number): Feature {
   };
 
   return feature;
+}
+
+/**
+ * 为要素生成稳定键：优先 `feature.id`，其次 `properties.id`，否则使用数组下标占位。
+ * 下标占位仅在无显式 id 时有效，重排无 id 要素会被视为删除+新增。
+ *
+ * @param feature - 要素
+ * @param index - 在当前数组中的下标
+ * @returns 稳定字符串键
+ */
+function stableFeatureId(feature: Feature, index: number): string {
+  if (feature.id !== undefined && feature.id !== null) {
+    return String(feature.id);
+  }
+  const props = feature.properties as Record<string, unknown> | undefined;
+  if (props !== undefined && props !== null && props['id'] !== undefined && props['id'] !== null) {
+    return String(props['id']);
+  }
+  return `__index_${index}`;
+}
+
+/**
+ * 比较两要素的 geometry 与 properties 是否一致（JSON 序列化比较）。
+ *
+ * @param a - 要素 a
+ * @param b - 要素 b
+ * @returns 内容是否相同
+ */
+function featureContentEquals(a: Feature, b: Feature): boolean {
+  try {
+    return (
+      JSON.stringify(a.geometry) === JSON.stringify(b.geometry) &&
+      JSON.stringify(a.properties) === JSON.stringify(b.properties)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 判断几何是否为点（参与网格聚合）。
+ *
+ * @param geometry - 几何对象
+ * @returns 是否为 Point
+ */
+function isPointGeometry(geometry: Geometry | null | undefined): boolean {
+  return geometry !== null && geometry !== undefined && geometry.type === 'Point';
+}
+
+/**
+ * 在启用聚合时，判断是否需要重新执行 `buildClusters`。
+ * 任意增删或点几何变化时需要重建；仅非点几何或点属性变化时可能跳过。
+ *
+ * @param clusterEnabled - 是否开启聚合
+ * @param added - 新增数量
+ * @param removed - 删除数量
+ * @param modified - 修改数量
+ * @param oldById - 旧 id → 要素
+ * @param newFeatures - 规范化后的新要素列表（顺序与 newData 一致）
+ * @returns 是否应全量重建聚合索引
+ */
+function shouldRebuildPointClusters(
+  clusterEnabled: boolean,
+  added: number,
+  removed: number,
+  modified: number,
+  oldById: Map<string, Feature>,
+  newFeatures: Feature[],
+): boolean {
+  if (!clusterEnabled) {
+    return false;
+  }
+  if (added > 0 || removed > 0) {
+    return true;
+  }
+  if (modified === 0) {
+    return false;
+  }
+  // 任意「点要素」内容变化（坐标或属性）都可能改变聚合 reduce 结果或网格归属
+  for (let i = 0; i < newFeatures.length; i++) {
+    const nf = newFeatures[i];
+    const id = stableFeatureId(nf, i);
+    const oldF = oldById.get(id);
+    if (oldF === undefined) {
+      continue;
+    }
+    if (featureContentEquals(oldF, nf)) {
+      continue;
+    }
+    if (isPointGeometry(oldF.geometry) || isPointGeometry(nf.geometry)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +1068,9 @@ export function createGeoJSONLayer(opts: GeoJSONLayerOptions): GeoJSONLayer {
   // 当前帧可见要素计数
   let currentVisibleCount = 0;
 
+  /** 最近一次 `setDataIncremental` 的统计；未执行过时为 `null`。 */
+  let lastIncrementalDiffStats: GeoJSONIncrementalDiffStats | null = null;
+
   // ── 3. 数据处理入口 ──
 
   /**
@@ -972,6 +1107,114 @@ export function createGeoJSONLayer(opts: GeoJSONLayerOptions): GeoJSONLayer {
 
     // 标记数据就绪
     dataReady = rawFeatures.length > 0;
+  }
+
+  /**
+   * 差分更新 FeatureCollection：按稳定 id 比较，仅必要时重建聚合索引。
+   *
+   * @param newData - 新的 GeoJSON FeatureCollection
+   * @returns 差分统计
+   */
+  function applySetDataIncremental(newData: FeatureCollection): GeoJSONIncrementalDiffStats {
+    if (newData === null || newData === undefined || typeof newData !== 'object') {
+      throw new Error(
+        `[${GEOJSON_ERROR_CODES.INCREMENTAL_INVALID}] setDataIncremental: newData must be a FeatureCollection object`,
+      );
+    }
+    if (newData.type !== 'FeatureCollection') {
+      throw new Error(
+        `[${GEOJSON_ERROR_CODES.INCREMENTAL_INVALID}] setDataIncremental: type must be FeatureCollection`,
+      );
+    }
+    const incomingFeatures = newData.features;
+    if (!Array.isArray(incomingFeatures)) {
+      throw new Error(
+        `[${GEOJSON_ERROR_CODES.INCREMENTAL_INVALID}] setDataIncremental: features must be an array`,
+      );
+    }
+
+    const newNormalized: Feature[] = [];
+    for (let i = 0; i < incomingFeatures.length; i++) {
+      newNormalized.push(normalizeFeature(incomingFeatures[i], i));
+    }
+
+    const oldById = new Map<string, Feature>();
+    for (let i = 0; i < rawFeatures.length; i++) {
+      const f = rawFeatures[i];
+      const id = stableFeatureId(f, i);
+      oldById.set(id, f);
+    }
+
+    const newIdSet = new Set<string>();
+    for (let i = 0; i < newNormalized.length; i++) {
+      newIdSet.add(stableFeatureId(newNormalized[i], i));
+    }
+
+    let added = 0;
+    let removed = 0;
+    let modified = 0;
+    let unchanged = 0;
+
+    for (let i = 0; i < newNormalized.length; i++) {
+      const nf = newNormalized[i];
+      const id = stableFeatureId(nf, i);
+      const oldF = oldById.get(id);
+      if (oldF === undefined) {
+        added += 1;
+      } else if (featureContentEquals(oldF, nf)) {
+        unchanged += 1;
+      } else {
+        modified += 1;
+      }
+    }
+
+    for (const id of oldById.keys()) {
+      if (!newIdSet.has(id)) {
+        removed += 1;
+      }
+    }
+
+    rawFeatures = newNormalized;
+    dataReady = rawFeatures.length > 0;
+
+    const rebuildClusters = shouldRebuildPointClusters(
+      cfg.cluster,
+      added,
+      removed,
+      modified,
+      oldById,
+      newNormalized,
+    );
+
+    if (cfg.cluster && rawFeatures.length > 0) {
+      if (rebuildClusters) {
+        clusterMap = buildClusters(
+          rawFeatures,
+          cfg.clusterRadius,
+          cfg.clusterMaxZoom,
+          cfg.clusterProperties,
+        );
+      }
+    } else {
+      clusterMap.clear();
+    }
+
+    const stats: GeoJSONIncrementalDiffStats = {
+      added,
+      removed,
+      modified,
+      unchanged,
+    };
+    lastIncrementalDiffStats = stats;
+
+    if (__DEV__) {
+      // eslint-disable-next-line no-console
+      console.debug(
+        `[GeoJSONLayer:${cfg.id}] incremental update: +${added} -${removed} ~${modified} =${unchanged}`,
+      );
+    }
+
+    return stats;
   }
 
   // ── 4. 处理初始数据 ──
@@ -1037,6 +1280,13 @@ export function createGeoJSONLayer(opts: GeoJSONLayerOptions): GeoJSONLayer {
       return rawFeatures.length;
     },
 
+    /**
+     * 最近一次增量更新的差分统计。
+     */
+    get lastIncrementalDiffStats(): GeoJSONIncrementalDiffStats | null {
+      return lastIncrementalDiffStats;
+    },
+
     // ==================== 生命周期方法 ====================
 
     /**
@@ -1060,6 +1310,7 @@ export function createGeoJSONLayer(opts: GeoJSONLayerOptions): GeoJSONLayer {
       layerContext = null;
       dataReady = false;
       currentVisibleCount = 0;
+      lastIncrementalDiffStats = null;
     },
 
     /**
@@ -1171,6 +1422,30 @@ export function createGeoJSONLayer(opts: GeoJSONLayerOptions): GeoJSONLayer {
         );
       }
 
+      // 常见优化路径：已是 FeatureCollection 且已有内存数据时走增量更新
+      if (
+        typeof data === 'object' &&
+        !Array.isArray(data) &&
+        rawFeatures.length > 0
+      ) {
+        const rec = data as Record<string, unknown>;
+        if (rec.type === 'FeatureCollection' && Array.isArray(rec.features)) {
+          try {
+            applySetDataIncremental(data as FeatureCollection);
+            currentDataRef = data;
+            return;
+          } catch (err) {
+            if (__DEV__) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[GeoJSONLayer:${cfg.id}] setData: incremental path failed, falling back to full rebuild`,
+                err,
+              );
+            }
+          }
+        }
+      }
+
       // 如果启用了 keepStaleOnUpdate，保留旧数据直到新数据就绪
       if (!cfg.keepStaleOnUpdate) {
         rawFeatures = [];
@@ -1183,6 +1458,13 @@ export function createGeoJSONLayer(opts: GeoJSONLayerOptions): GeoJSONLayer {
 
       // 处理数据
       processData(data);
+    },
+
+    /**
+     * @inheritdoc
+     */
+    setDataIncremental(newData: FeatureCollection): GeoJSONIncrementalDiffStats {
+      return applySetDataIncremental(newData);
     },
 
     /**

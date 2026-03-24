@@ -4,4 +4,4 @@
 // ============================================================
 
 export { createGeoJSONLayer } from './GeoJSONLayer.ts';
-export type { GeoJSONLayer, GeoJSONLayerOptions } from './GeoJSONLayer.ts';
+export type { GeoJSONIncrementalDiffStats, GeoJSONLayer, GeoJSONLayerOptions } from './GeoJSONLayer.ts';
