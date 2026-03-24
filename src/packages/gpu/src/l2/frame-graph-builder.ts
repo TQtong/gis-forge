@@ -44,6 +44,76 @@ const DEFAULT_SCREEN_CLEAR: GPUColor = { r: 0.08, g: 0.09, b: 0.11, a: 1 };
 /** 默认拾取视口像素坐标（未指定时使用视口中心）。 */
 const DEFAULT_PICK_CENTER = 0.5;
 
+/** 哈希串中使用的无效数值占位，避免 NaN/Infinity 产生碰撞。 */
+const INVALID_SCALAR_PLACEHOLDER = 'invalid';
+
+// ===================== 视口 / 表面哈希（FrameGraph 复用）=====================
+
+/**
+ * 由 SurfaceConfig 计算稳定哈希串，用于判断「表面 / 视口尺寸」相对上一帧是否变化。
+ * 含逻辑尺寸、物理尺寸、DPR、纹理格式、alpha 模式与 MSAA。
+ *
+ * @param surface - 当前表面快照
+ * @returns 稳定字符串；输入无效时返回可区分占位串
+ */
+function computeSurfaceHash(surface: SurfaceConfig): string {
+  if (!surface || !surface.canvas) {
+    return `${INVALID_SCALAR_PLACEHOLDER}:surface`;
+  }
+  const pr = surface.devicePixelRatio;
+  const safePr = Number.isFinite(pr) && pr > 0 ? pr : 1;
+  const w = Math.max(0, Math.floor(surface.width));
+  const h = Math.max(0, Math.floor(surface.height));
+  const pw = Math.max(0, Math.floor(surface.physicalWidth));
+  const ph = Math.max(0, Math.floor(surface.physicalHeight));
+  return [
+    w,
+    h,
+    pw,
+    ph,
+    safePr.toFixed(6),
+    String(surface.format),
+    String(surface.alphaMode),
+    surface.sampleCount,
+  ].join('|');
+}
+
+/**
+ * 由相机与逻辑视口尺寸计算稳定哈希串（center / zoom / bearing / pitch / width / height）。
+ * 用于判断相对上一帧是否可跳过 `build()` 并复用 {@link CompiledRenderGraph}。
+ *
+ * @param camera - 当前帧相机快照
+ * @param logicalWidth - 逻辑视口宽度（CSS 像素，与 {@link Viewport.width} 一致）
+ * @param logicalHeight - 逻辑视口高度（CSS 像素，与 {@link Viewport.height} 一致）
+ * @returns 稳定字符串
+ *
+ * @example
+ * const h = computeCameraHash(camera, 800, 600);
+ */
+export function computeCameraHash(
+  camera: CameraState,
+  logicalWidth: number,
+  logicalHeight: number,
+): string {
+  if (!camera) {
+    return `${INVALID_SCALAR_PLACEHOLDER}:camera`;
+  }
+  const lon = camera.center[0];
+  const lat = camera.center[1];
+  const z = camera.zoom;
+  const bearing = camera.bearing;
+  const pitch = camera.pitch;
+  const safeLon = Number.isFinite(lon) ? lon : NaN;
+  const safeLat = Number.isFinite(lat) ? lat : NaN;
+  const safeZ = Number.isFinite(z) ? z : NaN;
+  const safeB = Number.isFinite(bearing) ? bearing : NaN;
+  const safeP = Number.isFinite(pitch) ? pitch : NaN;
+  const lw = Number.isFinite(logicalWidth) && logicalWidth > 0 ? Math.floor(logicalWidth) : 0;
+  const lh = Number.isFinite(logicalHeight) && logicalHeight > 0 ? Math.floor(logicalHeight) : 0;
+  const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(9) : INVALID_SCALAR_PLACEHOLDER);
+  return [fmt(safeLon), fmt(safeLat), fmt(safeZ), fmt(safeB), fmt(safeP), lw, lh].join('|');
+}
+
 // ===================== Layer（L4 未就绪时的最小接口）=====================
 
 /**
@@ -199,6 +269,22 @@ export interface FrameGraphBuilder {
    * 编译为可执行对象（内部 bindFrame → compile）。
    */
   build(): CompiledRenderGraph;
+
+  /**
+   * 若本帧 `begin()` 判定与上一成功 `build()` 时相机与表面哈希一致，则返回缓存的
+   * {@link CompiledRenderGraph}，跳过图构建与 `compile()`。
+   * 调用后本帧不应再调用任何 `add*` 或 `build()`（除非再次 `begin()`）。
+   *
+   * @returns 上一帧编译结果；不可复用时返回 `null`
+   */
+  tryReuse(): CompiledRenderGraph | null;
+
+  /**
+   * 读取 FrameGraph 复用统计（调试 / 性能分析）。
+   *
+   * @returns `reuseCount` 为 `tryReuse` 成功次数，`rebuildCount` 为 `build()` 调用次数
+   */
+  getFrameGraphReuseStats(): { readonly reuseCount: number; readonly rebuildCount: number };
 }
 
 // ===================== 内部实现 =====================
@@ -281,6 +367,30 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
   /** 帧索引（每帧 begin 递增；首帧为 0）。 */
   private _frameIndex = -1;
 
+  /** 上一成功 `build()` 产出的编译图（供 `tryReuse` 返回）。 */
+  private _lastCompiledGraph: CompiledRenderGraph | null = null;
+
+  /** 上一成功 `build()` 时对应的相机哈希（见 {@link computeCameraHash}）。 */
+  private _lastCameraHash = '';
+
+  /** 上一成功 `build()` 时对应的表面哈希（见 {@link computeSurfaceHash}）。 */
+  private _lastSurfaceHash = '';
+
+  /** 本帧 `begin()` 计算的相机哈希，在 `build()` 成功时写入 `_lastCameraHash`。 */
+  private _pendingCameraHash = '';
+
+  /** 本帧 `begin()` 计算的表面哈希，在 `build()` 成功时写入 `_lastSurfaceHash`。 */
+  private _pendingSurfaceHash = '';
+
+  /** 本帧是否允许 `tryReuse` 命中（由 `begin()` 与 `add*` 共同维护）。 */
+  private _canReuse = false;
+
+  /** `tryReuse` 成功次数。 */
+  private _reuseCount = 0;
+
+  /** `build()` 调用次数。 */
+  private _rebuildCount = 0;
+
   /**
    * 构造 FrameGraphBuilder。
    *
@@ -303,11 +413,26 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
     if (!camera) {
       throw new Error('FrameGraphBuilder.begin: camera 不能为空');
     }
-    // 新帧：清空图与内部计数
+    const vpForHash = surfaceToViewport(surface);
+    const newCameraHash = computeCameraHash(camera, vpForHash.width, vpForHash.height);
+    const newSurfaceHash = computeSurfaceHash(surface);
+    this._pendingCameraHash = newCameraHash;
+    this._pendingSurfaceHash = newSurfaceHash;
+    // 与上一成功 compile 的哈希一致时可走 tryReuse（跳过 add* / build）
+    this._canReuse =
+      this._lastCompiledGraph !== null &&
+      newCameraHash === this._lastCameraHash &&
+      newSurfaceHash === this._lastSurfaceHash;
+    if (__DEV__ && this._canReuse) {
+      // 开发态提示：本帧可跳过图构建（由调度器调用 tryReuse）
+      // eslint-disable-next-line no-console
+      console.debug('[FrameGraphBuilder] frame graph reuse eligible (hashes match)');
+    }
+    // 新帧：清空图与内部计数（复用路径亦不保留旧 Pass 节点，避免与 tryReuse 混用出错）
     clearAllPasses(this._graph);
     this._surface = surface;
     this._camera = camera;
-    this._viewport = surfaceToViewport(surface);
+    this._viewport = vpForHash;
     // 新帧序号：第一次 begin 后为 0
     this._frameIndex += 1;
     // 重置序列号以保证 id 每帧从 0 起（更利于 diff）
@@ -323,6 +448,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
    */
   addFrustumCullPass(options: { inputBuffers: BufferHandle[]; frustum: Mat4f }): string {
     this.ensureBegin();
+    this._canReuse = false;
     const frustum = options.frustum;
     if (!frustum || frustum.length < 16) {
       throw new Error('FrameGraphBuilder.addFrustumCullPass: frustum 必须是至少 16 元素的矩阵');
@@ -357,6 +483,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
    */
   addDepthSortPass(options: { inputBuffer: BufferHandle; cameraPosition: Vec3f }): string {
     this.ensureBegin();
+    this._canReuse = false;
     const buf = options.inputBuffer;
     const pos = options.cameraPosition;
     if (!buf || !buf.buffer) {
@@ -391,6 +518,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
     viewport: Viewport;
   }): string {
     this.ensureBegin();
+    this._canReuse = false;
     const boxes = options.labelBoxes;
     const count = options.labelCount;
     const vp = options.viewport;
@@ -432,6 +560,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
     dependencies?: string[];
   }): string {
     this.ensureBegin();
+    this._canReuse = false;
     const pid = pass.id;
     if (!pid) {
       throw new Error('FrameGraphBuilder.addCustomComputePass: id 不能为空');
@@ -486,6 +615,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
     dependencies?: string[];
   }): string {
     this.ensureBegin();
+    this._canReuse = false;
     const sid = options.id;
     if (!sid) {
       throw new Error('FrameGraphBuilder.addSceneRenderPass: id 不能为空');
@@ -564,6 +694,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
    */
   addPostProcessPass(pass: { id: string; factory: PostProcessPassFactory; inputPassId: string }): string {
     this.ensureBegin();
+    this._canReuse = false;
     const pid = pass.id;
     if (!pid) {
       throw new Error('FrameGraphBuilder.addPostProcessPass: id 不能为空');
@@ -612,6 +743,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
    */
   addScreenPass(options: { layers: Layer[] }): string {
     this.ensureBegin();
+    this._canReuse = false;
     const id = `screen-${this._screenSeq++}`;
     const sorted = sortLayers(options.layers ?? []);
     const outRef: ResourceReference = {
@@ -661,6 +793,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
    */
   addPickingPass(options: { layers: Layer[]; pixelX?: number; pixelY?: number }): string {
     this.ensureBegin();
+    this._canReuse = false;
     const id = `picking-${this._pickingSeq++}`;
     const sorted = sortLayers(options.layers ?? []);
     const colorName = `picking-${id}-color`;
@@ -738,6 +871,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
    */
   build(): CompiledRenderGraph {
     this.ensureBegin();
+    this._canReuse = false;
     const graph = this._graph;
     if (!(graph instanceof RenderGraphImpl)) {
       throw new Error('FrameGraphBuilder.build: 需要 createRenderGraph(device) 返回的 RenderGraphImpl 实例');
@@ -746,7 +880,42 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
     const vp = this._viewport!;
     const surface = this._surface!;
     graph.bindFrame(cam, vp, this._frameIndex, surface);
-    return graph.compile();
+    const compiled = graph.compile();
+    this._lastCompiledGraph = compiled;
+    this._lastCameraHash = this._pendingCameraHash;
+    this._lastSurfaceHash = this._pendingSurfaceHash;
+    this._rebuildCount += 1;
+    return compiled;
+  }
+
+  /**
+   * @inheritdoc
+   *
+   * @remarks
+   * 返回的 {@link CompiledRenderGraph} 在 `compile()` 时绑定了当时的相机 / 视口快照；
+   * 仅当 {@link computeCameraHash} 与表面哈希与上一 `build()` 一致时复用才有语义保证。
+   */
+  tryReuse(): CompiledRenderGraph | null {
+    this.ensureBegin();
+    if (!this._canReuse || this._lastCompiledGraph === null) {
+      return null;
+    }
+    this._canReuse = false;
+    this._reuseCount += 1;
+    if (__DEV__) {
+      // eslint-disable-next-line no-console
+      console.debug(
+        `[FrameGraphBuilder] tryReuse: hit (reuseCount=${this._reuseCount}, rebuildCount=${this._rebuildCount})`,
+      );
+    }
+    return this._lastCompiledGraph;
+  }
+
+  /**
+   * @inheritdoc
+   */
+  getFrameGraphReuseStats(): { readonly reuseCount: number; readonly rebuildCount: number } {
+    return { reuseCount: this._reuseCount, rebuildCount: this._rebuildCount };
   }
 
   /**
@@ -780,3 +949,8 @@ export function createFrameGraphBuilder(renderGraph: RenderGraph, device: GPUDev
   }
   return new FrameGraphBuilderImpl(renderGraph, device);
 }
+
+/**
+ * 开发模式标记：生产构建应剔除调试日志。
+ */
+declare const __DEV__: boolean;
