@@ -673,6 +673,13 @@ import { Map25D } from '../packages/preset-25d/src/map-25d.ts';
 import { Globe3D } from '../packages/preset-3d/src/globe-3d.ts';
 import { MapFull } from '../packages/preset-full/src/map-full.ts';
 
+import { createInternalBus } from '../packages/core/src/infra/internal-bus.ts';
+import { GeoForgeError, GeoForgeErrorCode, formatErrorWithHint } from '../packages/core/src/infra/errors.ts';
+import { createObjectPool } from '../packages/core/src/infra/object-pool.ts';
+import { createPerformanceManager } from '../packages/runtime/src/performance-manager.ts';
+import { createDevTools } from '../packages/gpu/src/l2/devtools.ts';
+import { createPluginRegistry } from '../packages/scene/src/layer-plugin.ts';
+
 /**
  * 运行 L1 层的集成测试。
  * 这些测试需要 WebGPU 可用——在浏览器环境中执行。
@@ -2085,6 +2092,81 @@ async function runL6Tests(): Promise<void> {
   });
 }
 
+/**
+ * 非功能补充（NF）：InternalBus、GeoForgeError、ObjectPool、PerformanceManager、DevTools、LayerPlugin。
+ */
+function runNonFunctionalTests(): void {
+  group('NF/InternalBus');
+  test('emit and receive', () => {
+    const bus = createInternalBus();
+    // 使用显式 boolean，避免 TS 将闭包内赋值误判为不可达而收窄成 literal false
+    let received: boolean = false;
+    bus.on('tile:loaded', (data) => { received = true; });
+    bus.emit('tile:loaded', { sourceId: 'test', coord: { x: 0, y: 0, z: 0 }, data: null });
+    assert(received, 'should receive event');
+  });
+  test('once fires only once', () => {
+    const bus = createInternalBus();
+    let count = 0;
+    bus.once('frame:begin', () => { count++; });
+    bus.emit('frame:begin', { frameIndex: 1 });
+    bus.emit('frame:begin', { frameIndex: 2 });
+    assert(count === 1, 'once should fire once');
+  });
+
+  group('NF/GeoForgeError');
+  test('structured error', () => {
+    const err = new GeoForgeError(GeoForgeErrorCode.SHADER_COMPILE_FAILED, 'test error', { layerId: 'buildings' });
+    assert(err.code === 'GPU_SHADER_COMPILE', 'error code');
+    assert(err.context.layerId === 'buildings', 'context');
+    // GeoForgeError.message 为人类可读短句；稳定错误码出现在 formatErrorWithHint 输出中
+    assert(formatErrorWithHint(err).includes('GPU_SHADER_COMPILE'), 'formatted output includes code');
+  });
+  test('formatErrorWithHint', () => {
+    const err = new GeoForgeError(GeoForgeErrorCode.BUFFER_OOM, 'out of memory', {});
+    const formatted = formatErrorWithHint(err);
+    assert(formatted.length > 0, 'should produce formatted string');
+  });
+
+  group('NF/ObjectPool');
+  test('acquire and release', () => {
+    const pool = createObjectPool(() => ({ value: 0 }), (obj) => { obj.value = 0; }, 2);
+    assert(pool.available >= 2, 'pre-allocated');
+    const obj = pool.acquire();
+    obj.value = 42;
+    pool.release(obj);
+    const obj2 = pool.acquire();
+    assert(obj2.value === 0, 'should be reset');
+  });
+
+  group('NF/PerformanceManager');
+  test('create and evaluate', () => {
+    const pm = createPerformanceManager();
+    assert(pm.currentQuality !== undefined, 'has quality level');
+    assert(pm.isAdaptiveEnabled === true || pm.isAdaptiveEnabled === false, 'has adaptive flag');
+    const actions = pm.evaluate({ frameDurationMs: 10, drawCallCount: 50, triangleCount: 100000 });
+    assert(Array.isArray(actions), 'returns actions array');
+  });
+
+  group('NF/DevTools');
+  test('create and toggle', () => {
+    const dt = createDevTools();
+    assert(dt.enabled === false, 'disabled by default');
+    dt.enable();
+    assert(dt.enabled === true, 'enabled after enable()');
+    const mem = dt.getMemoryBreakdown();
+    assert(typeof mem.total === 'number', 'has memory breakdown');
+  });
+
+  group('NF/LayerPlugin');
+  test('register and query plugin', () => {
+    const reg = createPluginRegistry();
+    reg.registerPlugin({ type: 'test-layer', createLayer: () => ({}) });
+    assert(reg.getPlugin('test-layer') !== undefined, 'plugin registered');
+    assert(reg.listPlugins().length === 1, 'list has 1');
+  });
+}
+
 // ============================================================
 // 渲染测试结果到 DOM
 // ============================================================
@@ -2117,7 +2199,7 @@ function renderResults(): void {
     <div class="stat"><div class="value" style="color:#3fb950">${totalPass}</div><div class="label">Passed</div></div>
     <div class="stat"><div class="value" style="color:${totalFail > 0 ? '#f85149' : '#3fb950'}">${totalFail}</div><div class="label">Failed</div></div>
     <div class="stat"><div class="value">${allTests.length}</div><div class="label">Modules</div></div>
-    <div class="stat"><div class="value">89</div><div class="label">Total Files</div></div>
+    <div class="stat"><div class="value">95</div><div class="label">Total Files</div></div>
     <div class="stat"><div class="value">0</div><div class="label">Dependencies</div></div>
   `;
 }
@@ -2423,6 +2505,7 @@ async function main(): Promise<void> {
   renderResults();
 
   await runL6Tests();
+  runNonFunctionalTests();
   renderResults();
 
   // 启动 WebGPU 渲染演示
