@@ -9,6 +9,20 @@
 import type { BufferHandle } from '../l1/buffer-pool.ts';
 import type { PipelineCache } from './pipeline-cache.ts';
 import { uniqueId } from '../../../core/src/infra/id.ts';
+import BUILTIN_WGSL_FRUSTUM_CULL from '../wgsl/compute/frustum-cull.wgsl?raw';
+import BUILTIN_WGSL_RADIX_SORT from '../wgsl/compute/depth-sort.wgsl?raw';
+import BUILTIN_WGSL_LABEL_COLLISION from '../wgsl/compute/label-collision.wgsl?raw';
+import BUILTIN_WGSL_SPATIAL_HASH from '../wgsl/compute/spatial-hash.wgsl?raw';
+import BUILTIN_WGSL_TERRAIN_TESSELLATION from '../wgsl/compute/terrain-tessellation.wgsl?raw';
+
+// ===================== 内置 WGSL（入口统一为 cs_main） =====================
+// 各着色器源码位于 `wgsl/compute/*.wgsl`，经 `?raw` 导入为字符串（与原先内嵌模板字面量等价）。
+//
+// - frustum-cull：视锥剔除；`objectBounds` 每项 min(vec4)+max(vec4)，`frustumPlanes` 至少 6 个 vec4。
+// - depth-sort：深度键排序占位（identity on values；可换真实 radix）。
+// - label-collision：像素空间 AABB 碰撞；同索引较小者优先；`{{VIEWPORT_W}}` / `{{VIEWPORT_H}}` 由运行时替换。
+// - spatial-hash：3D 位置量化网格，输出哈希簇 id；`{{CELL_SIZE}}` 由运行时替换。
+// - terrain-tessellation：每 patch 细分因子占位 LOD。
 
 // ===================== 常量 =====================
 
@@ -32,164 +46,6 @@ const BYTES_PER_U32 = 4;
 
 /** 每个 f32 键 4 字节。 */
 const BYTES_PER_F32 = 4;
-
-// ===================== 内置 WGSL（入口统一为 cs_main） =====================
-
-/**
- * 视锥剔除：storage 绑定物体 AABB、视锥平面、输出可见性。
- * `objectBounds` 每项为 min(vec4)+max(vec4)；`frustumPlanes` 至少 6 个 vec4。
- */
-const BUILTIN_WGSL_FRUSTUM_CULL = `// GeoForge — builtin frustum cull (ComputePassManager)
-struct ObjectBounds {
-  min: vec4<f32>,
-  max: vec4<f32>,
-}
-@group(0) @binding(0) var<storage, read> objectBounds: array<ObjectBounds>;
-@group(0) @binding(1) var<storage, read> frustumPlanes: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> outputVisibility: array<u32>;
-
-fn distanceToPlane(p: vec3<f32>, plane: vec4<f32>) -> f32 {
-  return dot(vec4<f32>(p, 1.0), plane);
-}
-
-fn aabbOutsidePlane(minP: vec3<f32>, maxP: vec3<f32>, plane: vec4<f32>) -> bool {
-  let n = plane.xyz;
-  let c = vec3<f32>(
-    select(minP.x, maxP.x, n.x >= 0.0),
-    select(minP.y, maxP.y, n.y >= 0.0),
-    select(minP.z, maxP.z, n.z >= 0.0),
-  );
-  return distanceToPlane(c, plane) < 0.0;
-}
-
-fn isAabbVisible(minP: vec3<f32>, maxP: vec3<f32>) -> bool {
-  if (aabbOutsidePlane(minP, maxP, frustumPlanes[0])) { return false; }
-  if (aabbOutsidePlane(minP, maxP, frustumPlanes[1])) { return false; }
-  if (aabbOutsidePlane(minP, maxP, frustumPlanes[2])) { return false; }
-  if (aabbOutsidePlane(minP, maxP, frustumPlanes[3])) { return false; }
-  if (aabbOutsidePlane(minP, maxP, frustumPlanes[4])) { return false; }
-  if (aabbOutsidePlane(minP, maxP, frustumPlanes[5])) { return false; }
-  return true;
-}
-
-@compute @workgroup_size(64)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let n = arrayLength(&objectBounds);
-  let i = gid.x;
-  if (i >= n) { return; }
-  let mn = objectBounds[i].min.xyz;
-  let mx = objectBounds[i].max.xyz;
-  let vis = select(0u, 1u, isAabbVisible(mn, mx));
-  outputVisibility[i] = vis;
-}
-`;
-
-/**
- * Radix / 深度排序占位：读取 depth key，保持 values 索引（可替换为真实 radix）。
- */
-const BUILTIN_WGSL_RADIX_SORT = `// GeoForge — depth key sort placeholder (identity on values; entry cs_main)
-@group(0) @binding(0) var<storage, read> depthKeys: array<f32>;
-@group(0) @binding(1) var<storage, read_write> values: array<u32>;
-
-@compute @workgroup_size(256)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let n = arrayLength(&depthKeys);
-  let i = gid.x;
-  if (i >= n) { return; }
-  let k = depthKeys[i];
-  let v = values[i];
-  values[i] = select(v, v, k == k);
-}
-`;
-
-/**
- * 标注碰撞：同索引优先保留较小索引；与后续索引重叠则当前不可见。
- */
-const BUILTIN_WGSL_LABEL_COLLISION = `// GeoForge — label AABB collision (pixel space), tie-break: lower index wins
-const VIEWPORT_W: f32 = {{VIEWPORT_W}};
-const VIEWPORT_H: f32 = {{VIEWPORT_H}};
-
-@group(0) @binding(0) var<storage, read> labelBoxes: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read_write> outputVisibility: array<u32>;
-
-fn onScreen(box: vec4<f32>) -> bool {
-  let x2 = box.x + box.z;
-  let y2 = box.y + box.w;
-  return box.x < VIEWPORT_W && x2 > 0.0 && box.y < VIEWPORT_H && y2 > 0.0;
-}
-
-fn intersects(a: vec4<f32>, b: vec4<f32>) -> bool {
-  let ax2 = a.x + a.z;
-  let ay2 = a.y + a.w;
-  let bx2 = b.x + b.z;
-  let by2 = b.y + b.w;
-  return a.x < bx2 && ax2 > b.x && a.y < by2 && ay2 > b.y;
-}
-
-@compute @workgroup_size(64)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let n = arrayLength(&labelBoxes);
-  let i = gid.x;
-  if (i >= n) { return; }
-  let box = labelBoxes[i];
-  var vis = 1u;
-  if (!onScreen(box)) { vis = 0u; }
-  else {
-    for (var j = 0u; j < n; j = j + 1u) {
-      if (j == i) { continue; }
-      if (intersects(box, labelBoxes[j]) && j < i) { vis = 0u; }
-    }
-  }
-  outputVisibility[i] = vis;
-}
-`;
-
-/**
- * 空间哈希点聚类：将 3D 位置量化到网格 cell，输出哈希簇 id。
- */
-const BUILTIN_WGSL_SPATIAL_HASH = `// GeoForge — spatial hash cluster id per point
-const CELL_SIZE: f32 = {{CELL_SIZE}};
-
-@group(0) @binding(0) var<storage, read> positions: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read_write> clusterIds: array<u32>;
-
-@compute @workgroup_size(64)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let n = arrayLength(&positions);
-  let i = gid.x;
-  if (i >= n) { return; }
-  let p = positions[i].xyz;
-  let inv = 1.0 / max(CELL_SIZE, 1e-8);
-  let ix = i32(floor(p.x * inv));
-  let iy = i32(floor(p.y * inv));
-  let iz = i32(floor(p.z * inv));
-  let h = u32(ix * 73856093 + iy * 19349663 + iz * 83492791);
-  clusterIds[i] = h;
-}
-`;
-
-/**
- * 地形细分：按 patch 中心距原点估算细分因子（占位，可接真实 LOD）。
- */
-const BUILTIN_WGSL_TERRAIN_TESSELLATION = `// GeoForge — per-patch tessellation factor (placeholder LOD)
-struct Patch {
-  center: vec4<f32>,
-  extent: vec4<f32>,
-}
-@group(0) @binding(0) var<storage, read> patches: array<Patch>;
-@group(0) @binding(1) var<storage, read_write> tessFactors: array<vec4<f32>>;
-
-@compute @workgroup_size(64)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let n = arrayLength(&patches);
-  let i = gid.x;
-  if (i >= n) { return; }
-  let c = patches[i].center.xyz;
-  let dist = length(c);
-  let level = clamp(16.0 - log2(max(dist, 1.0)), 1.0, 16.0);
-  tessFactors[i] = vec4<f32>(level, level, level, level);
-}
-`;
 
 // ===================== 类型 =====================
 
