@@ -1,0 +1,132 @@
+/* ─── Tailwind v4 entry ─── */
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════════════
+   Color System — CSS Custom Properties
+   深色主题为默认，浅色通过 :root[data-theme="light"] 覆盖。
+   组件中使用 Tailwind 的 arbitrary value 语法引用：
+     bg-[var(--bg-panel)]  text-[var(--text-primary)]  border-[var(--border)]
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* 页面背景 */
+  --bg-primary: #1a1a2e;
+  /* 面板背景 */
+  --bg-panel: #16213e;
+  /* 面板项 hover 背景 */
+  --bg-panel-hover: #1a2744;
+  /* 输入框 / 代码区背景 */
+  --bg-input: #0f1a2e;
+  /* 面板边框（深色模式使用半透明白） */
+  --border: rgba(255, 255, 255, 0.08);
+  /* 激活态边框 */
+  --border-active: rgba(255, 255, 255, 0.16);
+  /* 主文字 */
+  --text-primary: #e0e0e0;
+  /* 次要文字（标签/描述） */
+  --text-secondary: #8899aa;
+  /* 禁用 / 低优先级文字 */
+  --text-muted: #556677;
+  /* 强调色（按钮/选中态/链接） */
+  --accent: #53a8b6;
+  /* 强调色 hover 态 */
+  --accent-hover: #6bc0ce;
+  /* 选中行 / 高亮背景 */
+  --highlight: #0f3460;
+  /* 成功（INFO 日志） */
+  --success: #4caf50;
+  /* 警告（WARN 日志） */
+  --warning: #ff9800;
+  /* 错误（ERROR 日志） */
+  --error: #f44336;
+  /* 性能（PERF 日志） */
+  --perf: #9c27b0;
+}
+
+:root[data-theme="light"] {
+  --bg-primary: #f5f5f5;
+  --bg-panel: #ffffff;
+  --bg-panel-hover: #f0f0f0;
+  --bg-input: #fafafa;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-active: rgba(0, 0, 0, 0.16);
+  --text-primary: #1a1a2e;
+  --text-secondary: #666666;
+  --text-muted: #999999;
+  --accent: #1976d2;
+  --accent-hover: #1565c0;
+  --highlight: #e3f2fd;
+  --success: #2e7d32;
+  --warning: #e65100;
+  --error: #c62828;
+  --perf: #6a1b9a;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Typography
+   UI 标签：Inter 14px / 1.5
+   代码 & 数据：JetBrains Mono 13px / 1.6
+   ═══════════════════════════════════════════════════════════════════ */
+
+body {
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  margin: 0;
+  overflow: hidden;
+}
+
+code,
+pre,
+.font-mono {
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Scrollbar — 窄滚动条，与深色 / 浅色主题适配
+   ═══════════════════════════════════════════════════════════════════ */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-active);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Resize Handle — react-resizable-panels 拖拽条样式
+   ═══════════════════════════════════════════════════════════════════ */
+
+[data-panel-resize-handle-id] {
+  background: var(--border);
+  transition: background-color 200ms ease;
+}
+
+[data-panel-resize-handle-id]:hover,
+[data-panel-resize-handle-id][data-resize-handle-active] {
+  background: var(--accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Selection — 选区颜色跟随主题
+   ═══════════════════════════════════════════════════════════════════ */
+
+::selection {
+  background: var(--accent);
+  color: #ffffff;
+}
