@@ -18,6 +18,9 @@
 import type { GPUMemoryTracker } from './memory-tracker.ts';
 import { uniqueId } from '../../../core/src/infra/id.ts';
 
+/** 开发构建时由打包器注入；未定义时按 false 处理。 */
+declare const __DEV__: boolean | undefined;
+
 // ===================== TextureHandle =====================
 
 /**
@@ -151,12 +154,49 @@ export interface TextureManager {
     readonly atlasCount: number;
     /** 各 Atlas 的利用率（0~1）。 */
     readonly atlasUtilization: Record<string, number>;
+
+    /** Atlas 整理（defrag）累计执行次数。 */
+    readonly defragCount: number;
+
+    /**
+     * 各 Atlas 的碎片率快照（0~1，越大越浪费；`getFragmentation()` 与各 atlas 一致）。
+     * 键为 atlasId。
+     */
+    readonly fragmentationByAtlas: Record<string, number>;
+
+    /**
+     * 所有 Atlas 中的最大碎片率（与 `getFragmentation()` 一致）。
+     */
+    readonly fragmentation: number;
+
+    /** 最近一次 defrag 估算回收的字节数（像素面积差 × RGBA8）。 */
+    readonly reclaimedBytes: number;
   };
 
   /**
    * 销毁所有纹理和 Atlas。
    */
   destroyAll(): void;
+
+  /**
+   * 在空闲时对指定 Atlas 做货架重排与 GPU 子区域拷贝，降低碎片率（O7）。
+   * 若未传 `atlasId`，则对所有已存在的 Atlas 依次整理。
+   *
+   * @param atlasId - 可选；缺省时处理全部 Atlas
+   * @throws Error 当 GPU 拷贝失败或重排无法容纳现有条目时
+   */
+  defragmentAtlas(atlasId?: string): void;
+
+  /**
+   * 返回当前 Atlas 集合中的最大碎片率（0 = 无浪费，1 = 整块未用内容意义下最糟）。
+   * 公式：`1 - (usedArea / allocatedArea)`，`allocatedArea = width × height`。
+   */
+  getFragmentation(): number;
+
+  /**
+   * 是否建议在空闲时执行 defrag：最大碎片率 > 0.3 且自上次 defrag 后 Atlas 有增删改。
+   */
+  shouldDefragment(): boolean;
 }
 
 // ===================== Shelf-First-Fit Atlas 内部数据结构 =====================
@@ -190,6 +230,11 @@ interface AtlasInstance {
   shelves: AtlasShelf[];
   /** 已使用的像素面积（用于利用率计算）。 */
   usedArea: number;
+
+  /**
+   * 自上次 `defragmentAtlas` 完成以来，该 Atlas 是否发生过 `addToAtlas` / `removeFromAtlas`。
+   */
+  modifiedSinceDefrag: boolean;
 }
 
 // ===================== 常量 =====================
@@ -202,6 +247,52 @@ const BYTES_PER_PIXEL_RGBA8 = 4;
 
 /** 默认 Atlas 填充（每侧 padding 像素） */
 const DEFAULT_ATLAS_PADDING = 1;
+
+/** 建议触发 defrag 的碎片率下限（O7） */
+const DEFRAG_FRAGMENTATION_THRESHOLD = 0.3;
+
+// ===================== Atlas 活条目（defrag 用） =====================
+
+/**
+ * Atlas 内一条可整理的活记录：保存货架格与对外 `AtlasRegion` 引用，便于原地更新 UV。
+ */
+interface AtlasLiveEntry {
+  /** 全局唯一条目 ID（调试用）。 */
+  readonly id: string;
+
+  /** 所属 Atlas ID。 */
+  readonly atlasId: string;
+
+  /** 与 `addToAtlas` 一致的每侧 padding。 */
+  readonly padding: number;
+
+  /** 图像像素宽（不含 padding）。 */
+  readonly imgW: number;
+
+  /** 图像像素高（不含 padding）。 */
+  readonly imgH: number;
+
+  /** 含 padding 的占位宽。 */
+  readonly paddedW: number;
+
+  /** 含 padding 的占位高。 */
+  readonly paddedH: number;
+
+  /**
+   * 当前在 Atlas 纹理中的货架格左上角（含 padding 外沿），用于 `copyTextureToTexture` 源矩形。
+   */
+  slotX: number;
+
+  /**
+   * 当前在 Atlas 纹理中的货架格左上角 Y。
+   */
+  slotY: number;
+
+  /**
+   * 对外暴露的区域描述（defrag 后原地更新 UV 与像素坐标）。
+   */
+  region: AtlasRegion;
+}
 
 // ===================== 辅助函数 =====================
 
@@ -314,12 +405,87 @@ export function createTextureManager(
   /** 是否已销毁 */
   let destroyed = false;
 
+  /** 各 Atlas 的活条目列表（用于 defrag 与 UV 原地更新） */
+  const atlasLiveEntries = new Map<string, AtlasLiveEntry[]>();
+
+  /** `defragmentAtlas` 累计调用次数（成功计数） */
+  let defragCount = 0;
+
+  /** 最近一次 defrag 估算回收字节数 */
+  let lastReclaimedBytes = 0;
+
   // ==================== 内部方法 ====================
 
   function assertNotDestroyed(): void {
     if (destroyed) {
       throw new Error('[TextureManager] Cannot use a destroyed TextureManager');
     }
+  }
+
+  /**
+   * 从内部纹理映射与 MemoryTracker 中移除并销毁 GPU 纹理（Atlas 交换时用）。
+   *
+   * @param handle - 待释放句柄
+   */
+  function releaseTextureHandleInternal(handle: TextureHandle): void {
+    textures.delete(handle.id);
+    try {
+      handle.texture.destroy();
+    } catch {
+      /* 忽略重复销毁 */
+    }
+    memTracker.untrack(handle.id);
+  }
+
+  /**
+   * 计算单张 Atlas 的碎片率：`1 - usedArea / (width*height)`。
+   *
+   * @param atlas - Atlas 实例
+   * @returns 0~1
+   */
+  function computeAtlasFragmentation(atlas: AtlasInstance): number {
+    const allocated = atlas.width * atlas.height;
+    if (allocated <= 0) {
+      return 0;
+    }
+    const used = Math.min(atlas.usedArea, allocated);
+    return 1 - used / allocated;
+  }
+
+  /**
+   * 原地更新活条目的 `AtlasRegion` 像素与 UV（defrag 重排后调用）。
+   *
+   * @param entry - 活条目
+   * @param atlasW - Atlas 宽
+   * @param atlasH - Atlas 高
+   * @param slotX - 新货架格左上角 X（含 padding 外沿）
+   * @param slotY - 新货架格左上角 Y
+   */
+  function updateEntryRegionFromSlot(
+    entry: AtlasLiveEntry,
+    atlasW: number,
+    atlasH: number,
+    slotX: number,
+    slotY: number
+  ): void {
+    entry.slotX = slotX;
+    entry.slotY = slotY;
+    const pixelX = slotX + entry.padding;
+    const pixelY = slotY + entry.padding;
+    const r = entry.region as {
+      u0: number;
+      v0: number;
+      u1: number;
+      v1: number;
+      pixelX: number;
+      pixelY: number;
+    };
+    r.u0 = pixelX / atlasW;
+    r.v0 = pixelY / atlasH;
+    r.u1 = (pixelX + entry.imgW) / atlasW;
+    r.v1 = (pixelY + entry.imgH) / atlasH;
+    r.pixelX = pixelX;
+    r.pixelY = pixelY;
   }
 
   /**
@@ -378,6 +544,7 @@ export function createTextureManager(
       height,
       shelves: [],
       usedArea: 0,
+      modifiedSinceDefrag: false,
     };
   }
 
@@ -571,6 +738,8 @@ export function createTextureManager(
     const pixelX = slotX + padding;
     const pixelY = slotY + padding;
 
+    atlas.modifiedSinceDefrag = true;
+
     // 将图像数据拷贝到 Atlas 纹理的指定位置
     if (imageData instanceof ImageData) {
       // ImageData 需要通过 queue.writeTexture 上传
@@ -607,7 +776,7 @@ export function createTextureManager(
     const u1 = (pixelX + imgW) / atlas.width;
     const v1 = (pixelY + imgH) / atlas.height;
 
-    return Object.freeze({
+    const region: AtlasRegion = {
       atlasId,
       u0,
       v0,
@@ -617,7 +786,28 @@ export function createTextureManager(
       pixelY,
       pixelWidth: imgW,
       pixelHeight: imgH,
-    });
+    };
+
+    const liveEntry: AtlasLiveEntry = {
+      id: uniqueId('atlas-entry'),
+      atlasId,
+      padding,
+      imgW,
+      imgH,
+      paddedW,
+      paddedH,
+      slotX,
+      slotY,
+      region,
+    };
+    let bucket = atlasLiveEntries.get(atlasId);
+    if (!bucket) {
+      bucket = [];
+      atlasLiveEntries.set(atlasId, bucket);
+    }
+    bucket.push(liveEntry);
+
+    return region;
   }
 
   /**
@@ -633,6 +823,159 @@ export function createTextureManager(
 
     // 只更新统计——Shelf-First-Fit 无法回收中间的碎片
     atlas.usedArea = Math.max(0, atlas.usedArea - region.pixelWidth * region.pixelHeight);
+
+    const bucket = atlasLiveEntries.get(atlasId);
+    if (bucket && bucket.length > 0) {
+      const next = bucket.filter(
+        (e) =>
+          !(
+            e.region.pixelX === region.pixelX &&
+            e.region.pixelY === region.pixelY &&
+            e.region.pixelWidth === region.pixelWidth &&
+            e.region.pixelHeight === region.pixelHeight
+          )
+      );
+      if (next.length === 0) {
+        atlasLiveEntries.delete(atlasId);
+      } else {
+        atlasLiveEntries.set(atlasId, next);
+      }
+    }
+    atlas.modifiedSinceDefrag = true;
+  }
+
+  /**
+   * 对单个 Atlas 做货架重排与 GPU 子块拷贝（O7）。
+   *
+   * @param atlasKey - Atlas ID
+   */
+  function defragmentOneAtlas(atlasKey: string): void {
+    const entries = atlasLiveEntries.get(atlasKey);
+    const atlas = atlases.get(atlasKey);
+    if (!atlas || !entries || entries.length === 0) {
+      return;
+    }
+
+    const fragBefore = computeAtlasFragmentation(atlas);
+    const allocatedBytesBefore = atlas.width * atlas.height * BYTES_PER_PIXEL_RGBA8;
+
+    const sorted = entries.slice().sort((a, b) => b.paddedH - a.paddedH);
+
+    const oldHandle = atlas.handle;
+    const w = atlas.width;
+    const h = atlas.height;
+
+    let fresh: AtlasInstance;
+    try {
+      fresh = createAtlasInstance(atlasKey, w, h);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`[TextureManager] defragmentAtlas: createAtlasInstance failed: ${msg}`);
+    }
+
+    fresh.usedArea = 0;
+    fresh.shelves = [];
+
+    try {
+      for (let j = 0; j < sorted.length; j += 1) {
+        const entry = sorted[j]!;
+        const placement = shelfFit(fresh, entry.paddedW, entry.paddedH);
+        if (!placement) {
+          throw new Error(
+            `[TextureManager] defragmentAtlas: shelfFit failed for entry "${entry.id}" in atlas "${atlasKey}"`
+          );
+        }
+        const [nx, ny] = placement;
+        try {
+          const encoder = gpuDevice.createCommandEncoder();
+          encoder.copyTextureToTexture(
+            { texture: oldHandle.texture, origin: { x: entry.slotX, y: entry.slotY, z: 0 } },
+            { texture: fresh.handle.texture, origin: { x: nx, y: ny, z: 0 } },
+            { width: entry.paddedW, height: entry.paddedH, depthOrArrayLayers: 1 },
+          );
+          gpuDevice.queue.submit([encoder.finish()]);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`[TextureManager] defragmentAtlas: copyTextureToTexture failed: ${msg}`);
+        }
+        updateEntryRegionFromSlot(entry, w, h, nx, ny);
+      }
+    } catch (err) {
+      releaseTextureHandleInternal(fresh.handle);
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+
+    let usedSum = 0;
+    for (let k = 0; k < sorted.length; k += 1) {
+      usedSum += sorted[k]!.imgW * sorted[k]!.imgH;
+    }
+    fresh.usedArea = usedSum;
+    fresh.modifiedSinceDefrag = false;
+
+    releaseTextureHandleInternal(oldHandle);
+    atlases.set(atlasKey, fresh);
+
+    const fragAfter = computeAtlasFragmentation(fresh);
+    lastReclaimedBytes = Math.max(
+      0,
+      Math.round(Math.max(0, fragBefore - fragAfter) * allocatedBytesBefore)
+    );
+    defragCount += 1;
+    if (__DEV__) {
+      console.info(
+        `[TextureManager] defragmentAtlas("${atlasKey}"): frag ${fragBefore.toFixed(3)} → ${fragAfter.toFixed(3)}, reclaimed ~${lastReclaimedBytes} B`
+      );
+    }
+  }
+
+  /**
+   * 整理全部或指定 Atlas（O7）。
+   *
+   * @param atlasId - 可选 atlas ID
+   */
+  function defragmentAtlas(atlasId?: string): void {
+    assertNotDestroyed();
+    if (atlasId !== undefined && atlasId.length > 0) {
+      if (!atlases.has(atlasId)) {
+        throw new Error(`[TextureManager] defragmentAtlas: unknown atlas id "${atlasId}"`);
+      }
+      defragmentOneAtlas(atlasId);
+      return;
+    }
+    const keys = Array.from(atlases.keys());
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      if (!key) {
+        continue;
+      }
+      defragmentOneAtlas(key);
+    }
+  }
+
+  /**
+   * 当前所有 Atlas 中的最大碎片率。
+   */
+  function getFragmentation(): number {
+    let maxFrag = 0;
+    for (const a of atlases.values()) {
+      maxFrag = Math.max(maxFrag, computeAtlasFragmentation(a));
+    }
+    return maxFrag;
+  }
+
+  /**
+   * 是否满足 defrag 启发式条件。
+   */
+  function shouldDefragment(): boolean {
+    if (getFragmentation() <= DEFRAG_FRAGMENTATION_THRESHOLD) {
+      return false;
+    }
+    for (const a of atlases.values()) {
+      if (a.modifiedSinceDefrag) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -668,6 +1011,9 @@ export function createTextureManager(
 
     // 清空 Atlas 记录（纹理已在上面的循环中被销毁）
     atlases.clear();
+    atlasLiveEntries.clear();
+    defragCount = 0;
+    lastReclaimedBytes = 0;
 
     destroyed = true;
   }
@@ -680,19 +1026,30 @@ export function createTextureManager(
     addToAtlas,
     removeFromAtlas,
     getAtlasTexture,
+    defragmentAtlas,
+    getFragmentation,
+    shouldDefragment,
 
     get stats() {
       const utilization: Record<string, number> = {};
+      const fragmentationByAtlas: Record<string, number> = {};
       for (const [id, atlas] of atlases) {
         const totalArea = atlas.width * atlas.height;
         utilization[id] = totalArea > 0 ? atlas.usedArea / totalArea : 0;
+        fragmentationByAtlas[id] = computeAtlasFragmentation(atlas);
       }
+
+      const fragMax = getFragmentation();
 
       return {
         textureCount: textures.size,
         totalBytes: memTracker.totalBytes,
         atlasCount: atlases.size,
         atlasUtilization: utilization,
+        defragCount,
+        fragmentationByAtlas,
+        fragmentation: fragMax,
+        reclaimedBytes: lastReclaimedBytes,
       };
     },
 
