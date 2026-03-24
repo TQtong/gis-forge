@@ -18,6 +18,9 @@
 import type { GPUMemoryTracker } from './memory-tracker.ts';
 import { uniqueId } from '../../../core/src/infra/id.ts';
 
+/** 开发构建标记；生产构建由打包器剔除调试分支。 */
+declare const __DEV__: boolean | undefined;
+
 // ===================== BufferHandle =====================
 
 /**
@@ -165,6 +168,12 @@ export interface BufferPool {
     readonly pooledFree: number;
     /** 当前帧已使用的 staging 字节数 */
     readonly stagingUsed: number;
+    /** 自适应 staging ring 因尺寸调整而重建的次数（累计） */
+    readonly adaptiveResizeCount: number;
+    /** 当前每个 staging slot 的字节容量（自适应结果） */
+    readonly currentStagingSize: number;
+    /** 最近上传历史的 P95（字节），用于自适应与调试 */
+    readonly p95UploadBytes: number;
   };
 
   /**
@@ -211,6 +220,18 @@ const DEFAULT_STAGING_RING_SIZE = 4 * 1024 * 1024;
 /** 默认 staging ring slot 数量（三重缓冲） */
 const DEFAULT_STAGING_RING_SLOTS = 3;
 
+/** 上传历史窗口长度（帧），用于 P95 与 resize 节流 */
+const UPLOAD_HISTORY_FRAMES = 60;
+
+/** 两次自适应 resize 检查之间的最小 advance 帧间隔 */
+const STAGING_RESIZE_CHECK_INTERVAL_FRAMES = 60;
+
+/** 自适应 staging 单 slot 最小容量（字节） */
+const MIN_ADAPTIVE_STAGING_BYTES = 1 * 1024 * 1024;
+
+/** 自适应 staging 单 slot 最大容量（字节） */
+const MAX_ADAPTIVE_STAGING_BYTES = 32 * 1024 * 1024;
+
 // ===================== 辅助函数 =====================
 
 /**
@@ -239,6 +260,62 @@ function alignTo4(size: number): number {
  */
 function poolKey(size: number, usage: GPUBufferUsageFlags): string {
   return `${size}:${usage}`;
+}
+
+/**
+ * 计算样本集的 95 分位数（线性插值，升序）。
+ * 用于自适应 staging 尺寸；空数组返回 0。
+ *
+ * @param values - 非负字节样本（可能被原地排序的副本）
+ * @returns P95 字节数，有限且 ≥ 0
+ */
+function computeP95Percentile(values: number[]): number {
+  if (!values || values.length === 0) {
+    return 0;
+  }
+  const copy = values.slice();
+  copy.sort((a, b) => a - b);
+  const n = copy.length;
+  if (n === 1) {
+    return Math.max(0, finiteNonNegative(copy[0]!));
+  }
+  const p = 0.95 * (n - 1);
+  const lo = Math.floor(p);
+  const hi = Math.ceil(p);
+  if (lo === hi) {
+    return Math.max(0, finiteNonNegative(copy[lo]!));
+  }
+  const t = p - lo;
+  const v0 = finiteNonNegative(copy[lo]!);
+  const v1 = finiteNonNegative(copy[hi]!);
+  return Math.max(0, v0 + t * (v1 - v0));
+}
+
+/**
+ * 将输入限制为非负有限数。
+ *
+ * @param v - 原始值
+ * @returns 非负有限数
+ */
+function finiteNonNegative(v: number): number {
+  if (!Number.isFinite(v) || v < 0) {
+    return 0;
+  }
+  return v;
+}
+
+/**
+ * 将正数向上取整到不小于它的最小 2 的幂（≥1）。
+ *
+ * @param n - 输入字节数（可非整数）
+ * @returns 2 的幂（字节）
+ */
+function nextPowerOfTwoCeil(n: number): number {
+  const x = finiteNonNegative(n);
+  if (x <= 1) {
+    return 1;
+  }
+  return 2 ** Math.ceil(Math.log2(x));
 }
 
 // ===================== 工厂函数 =====================
@@ -283,7 +360,8 @@ export function createBufferPool(
 
   // ==================== 配置 ====================
 
-  const stagingSlotSize = options?.stagingRingSize ?? DEFAULT_STAGING_RING_SIZE;
+  /** 当前每个 staging slot 的字节容量（可被自适应 resize 更新） */
+  let currentStagingSizeBytes = options?.stagingRingSize ?? DEFAULT_STAGING_RING_SIZE;
   const stagingSlotCount = options?.stagingRingSlots ?? DEFAULT_STAGING_RING_SLOTS;
 
   // ==================== 内部状态 ====================
@@ -309,7 +387,43 @@ export function createBufferPool(
   /** 是否已销毁 */
   let destroyed = false;
 
+  /**
+   * 最近若干帧每帧上传字节数（环形语义：最多保留 UPLOAD_HISTORY_FRAMES 条）。
+   * 对应需求中的 `_uploadHistory`。
+   */
+  const uploadHistory: number[] = [];
+
+  /** 自适应 staging ring 成功重建次数 */
+  let adaptiveResizeCount = 0;
+
+  /** 最近一次根据历史上传的 P95（字节） */
+  let p95UploadBytesStat = 0;
+
+  /** 自上次尝试自适应 resize 以来经历的 advance 次数（用于每 60 帧最多检查一次） */
+  let advancesSinceResizeCheck = 0;
+
   // ==================== StagingRing 初始化 ====================
+
+  /**
+   * 销毁当前 staging ring 全部 slot（unmap + destroy），清空数组。
+   */
+  function destroyStagingSlotsInternal(): void {
+    for (const slot of stagingSlots) {
+      try {
+        if (slot.isMapped) {
+          slot.buffer.unmap();
+        }
+      } catch {
+        // 设备丢失等场景下 unmap 可能失败
+      }
+      try {
+        slot.buffer.destroy();
+      } catch {
+        // 同上
+      }
+    }
+    stagingSlots.length = 0;
+  }
 
   /**
    * 创建 staging ring 的所有 slot。
@@ -317,10 +431,17 @@ export function createBufferPool(
    * 创建时使用 mappedAtCreation=true 以获得初始映射。
    */
   function initStagingRing(): void {
+    destroyStagingSlotsInternal();
+    const raw = finiteNonNegative(currentStagingSizeBytes);
+    const size = Math.max(
+      MIN_BUFFER_SIZE,
+      Math.min(MAX_ADAPTIVE_STAGING_BYTES, Math.floor(raw)),
+    );
+    currentStagingSizeBytes = size;
     for (let i = 0; i < stagingSlotCount; i++) {
       const buffer = gpuDevice.createBuffer({
         label: `geoforge-staging-ring-slot-${i}`,
-        size: stagingSlotSize,
+        size,
         usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
         mappedAtCreation: true,
       });
@@ -328,12 +449,69 @@ export function createBufferPool(
       const slot: StagingSlot = {
         buffer,
         offset: 0,
-        capacity: stagingSlotSize,
+        capacity: size,
         mappedArray: buffer.getMappedRange(),
         isMapped: true,
       };
 
       stagingSlots.push(slot);
+    }
+  }
+
+  /**
+   * 根据上传历史计算自适应目标 slot 大小（字节）。
+   * 公式：P95 × 1.5 → 向上取 2 的幂 → 钳制到 [1MB, 32MB]。
+   *
+   * @returns 建议的 staging 单 slot 字节数
+   */
+  function computeAdaptiveSize(): number {
+    try {
+      const p95 = computeP95Percentile(uploadHistory);
+      const scaled = p95 * 1.5;
+      const pow2 = nextPowerOfTwoCeil(scaled);
+      const clamped = Math.max(
+        MIN_ADAPTIVE_STAGING_BYTES,
+        Math.min(MAX_ADAPTIVE_STAGING_BYTES, pow2),
+      );
+      if (!Number.isFinite(clamped) || clamped <= 0) {
+        return Math.max(MIN_ADAPTIVE_STAGING_BYTES, Math.min(MAX_ADAPTIVE_STAGING_BYTES, currentStagingSizeBytes));
+      }
+      return clamped;
+    } catch {
+      return Math.max(MIN_ADAPTIVE_STAGING_BYTES, Math.min(MAX_ADAPTIVE_STAGING_BYTES, currentStagingSizeBytes));
+    }
+  }
+
+  /**
+   * 若当前 ring 容量与自适应目标差异过大（>2× 或 <0.5×），则重建 staging buffers。
+   * 失败时保持当前容量不变。
+   *
+   * @returns 是否已重建 ring（true 时 `currentSlotIndex` 已置 0）
+   */
+  function resizeStagingRing(): boolean {
+    try {
+      const adaptive = computeAdaptiveSize();
+      const cur = currentStagingSizeBytes;
+      if (!Number.isFinite(adaptive) || !Number.isFinite(cur) || cur <= 0) {
+        return false;
+      }
+      const significantlyLarger = cur > adaptive * 2;
+      const significantlySmaller = cur < adaptive * 0.5;
+      if (!significantlyLarger && !significantlySmaller) {
+        return false;
+      }
+
+      destroyStagingSlotsInternal();
+      currentStagingSizeBytes = adaptive;
+      initStagingRing();
+      currentSlotIndex = 0;
+      adaptiveResizeCount += 1;
+      return true;
+    } catch (err) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.warn('[BufferPool] resizeStagingRing failed; keeping current staging size', err);
+      }
+      return false;
     }
   }
 
@@ -573,30 +751,83 @@ export function createBufferPool(
   /**
    * 推进 StagingRing 到下一个 slot。
    * 在 device.queue.submit 之后调用。
+   * 记录本帧上传字节、更新自适应历史；至多每 60 次 advance 尝试一次 resize。
    * 重新映射下一个 slot（如果它尚未被映射）。
    */
   function advanceStagingRing(): void {
     assertNotDestroyed();
 
-    // 移动到下一个 slot（环形）
-    currentSlotIndex = (currentSlotIndex + 1) % stagingSlotCount;
+    try {
+      const finishedSlot = stagingSlots[currentSlotIndex];
+      const bytesThisFrame = finishedSlot ? finiteNonNegative(finishedSlot.offset) : 0;
+      uploadHistory.push(bytesThisFrame);
+      if (uploadHistory.length > UPLOAD_HISTORY_FRAMES) {
+        uploadHistory.shift();
+      }
+      p95UploadBytesStat = computeP95Percentile(uploadHistory);
 
-    const nextSlot = stagingSlots[currentSlotIndex];
+      advancesSinceResizeCheck += 1;
+      let ringRecreated = false;
+      if (advancesSinceResizeCheck >= STAGING_RESIZE_CHECK_INTERVAL_FRAMES) {
+        advancesSinceResizeCheck = 0;
+        ringRecreated = resizeStagingRing();
+      }
 
-    // 重置写入偏移
-    nextSlot.offset = 0;
-
-    // 如果下一个 slot 尚未映射，重新映射
-    if (!nextSlot.isMapped) {
-      // mapAsync 是异步的——对于三重缓冲，第 N+2 帧的 slot 应该已经完成了 GPU 读取
-      nextSlot.buffer.mapAsync(GPUMapMode.WRITE).then(() => {
-        nextSlot.mappedArray = nextSlot.buffer.getMappedRange();
-        nextSlot.isMapped = true;
-      }).catch((err) => {
-        console.warn(
-          `[BufferPool] Failed to map staging slot ${currentSlotIndex}:`, err
-        );
-      });
+      if (!ringRecreated) {
+        currentSlotIndex = (currentSlotIndex + 1) % stagingSlotCount;
+        const nextSlot = stagingSlots[currentSlotIndex];
+        if (!nextSlot) {
+          throw new Error('[BufferPool] advanceStagingRing: missing staging slot after advance');
+        }
+        nextSlot.offset = 0;
+        if (!nextSlot.isMapped) {
+          nextSlot.buffer.mapAsync(GPUMapMode.WRITE).then(() => {
+            nextSlot.mappedArray = nextSlot.buffer.getMappedRange();
+            nextSlot.isMapped = true;
+          }).catch((err) => {
+            console.warn(
+              `[BufferPool] Failed to map staging slot ${currentSlotIndex}:`,
+              err,
+            );
+          });
+        }
+      } else {
+        const slot0 = stagingSlots[0];
+        if (slot0) {
+          slot0.offset = 0;
+          if (!slot0.isMapped) {
+            slot0.buffer.mapAsync(GPUMapMode.WRITE).then(() => {
+              slot0.mappedArray = slot0.buffer.getMappedRange();
+              slot0.isMapped = true;
+            }).catch((err) => {
+              console.warn('[BufferPool] Failed to map staging slot 0 after resize:', err);
+            });
+          }
+        }
+      }
+    } catch (err) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.warn('[BufferPool] advanceStagingRing failed; attempting minimal advance', err);
+      }
+      try {
+        if (stagingSlots.length > 0) {
+          currentSlotIndex = (currentSlotIndex + 1) % stagingSlotCount;
+          const nextSlot = stagingSlots[currentSlotIndex];
+          if (nextSlot) {
+            nextSlot.offset = 0;
+            if (!nextSlot.isMapped) {
+              nextSlot.buffer.mapAsync(GPUMapMode.WRITE).then(() => {
+                nextSlot.mappedArray = nextSlot.buffer.getMappedRange();
+                nextSlot.isMapped = true;
+              }).catch(() => {
+                /* 保持当前大小，静默失败 */
+              });
+            }
+          }
+        }
+      } catch {
+        /* 保持当前 staging 配置 */
+      }
     }
   }
 
@@ -620,17 +851,7 @@ export function createBufferPool(
     totalAllocatedBytes = 0;
 
     // 销毁 staging ring
-    for (const slot of stagingSlots) {
-      try {
-        if (slot.isMapped) {
-          slot.buffer.unmap();
-        }
-        slot.buffer.destroy();
-      } catch {
-        // 安全忽略
-      }
-    }
-    stagingSlots.length = 0;
+    destroyStagingSlotsInternal();
 
     // 清空挂起拷贝
     pendingCopies = [];
@@ -665,6 +886,9 @@ export function createBufferPool(
         totalAllocated: totalAllocatedBytes,
         pooledFree: pooledCount,
         stagingUsed,
+        adaptiveResizeCount,
+        currentStagingSize: currentStagingSizeBytes,
+        p95UploadBytes: p95UploadBytesStat,
       };
     },
 
