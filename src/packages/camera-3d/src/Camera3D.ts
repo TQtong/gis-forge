@@ -1,5 +1,9 @@
 // ============================================================
 // camera-3d/Camera3D.ts — 3D 地球相机控制器（ECEF 坐标系）
+//
+// 编译期开发模式标志（生产构建 tree-shake 移除）
+declare const __DEV__: boolean;
+// ============================================================
 // 层级：独立相机包，实现 L3/CameraController 接口
 // 职责：ECEF 坐标定位、大圆弧飞行动画、地形碰撞、惯性轨道旋转。
 // 依赖：L0 CameraState/Viewport/BBox2D、L0 mat4/vec3/quat、L0 ellipsoid
@@ -313,6 +317,24 @@ export interface Camera3D extends CameraController {
      * cam.setZoomDistanceRange(100, 50_000_000);
      */
     setZoomDistanceRange(min: number, max: number): void;
+
+    /**
+     * 以屏幕锚点为中心缩放：从相机经锚点构造射线，与椭球求交后沿射线按 zoom 差移动相机位置，再钳制高度。
+     * `anchorLngLat` 与 2D/25D API 对齐，供调用方传入已拾取的地理锚点；当前实现以射线为主，开发模式下可校验一致性。
+     *
+     * @param anchorScreenX - 锚点屏幕 X（CSS 像素）
+     * @param anchorScreenY - 锚点屏幕 Y（CSS 像素）
+     * @param anchorLngLat - 锚点 [经度, 纬度]（度）
+     * @param newZoom - 目标缩放级别（映射为高度后钳制）
+     *
+     * @stability experimental
+     */
+    zoomAround(
+        anchorScreenX: number,
+        anchorScreenY: number,
+        anchorLngLat: [number, number],
+        newZoom: number,
+    ): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +792,16 @@ class Camera3DImpl implements Camera3D {
     /** 临时 Vec3f */
     private readonly _tv3: Float32Array;
 
+    /** zoomAround：逆投影近平面点（ECEF，world） */
+    private readonly _zrNear: Float32Array;
+    /** zoomAround：逆投影远平面点（ECEF，world） */
+    private readonly _zrFar: Float32Array;
+    /** zoomAround：归一化视线方向（ECEF） */
+    private readonly _zrDir: Float32Array;
+
+    /** 是否已至少执行过一次 {@link Camera3DImpl.update}（inverseVP 有效） */
+    private _hasUpdatedFrame: boolean = false;
+
     /**
      * 构造 Camera3D 实例。
      *
@@ -855,6 +887,9 @@ class Camera3DImpl implements Camera3D {
         this._camUp = vec3.create();
         this._camRight = vec3.create();
         this._tv3 = vec3.create();
+        this._zrNear = vec3.create();
+        this._zrFar = vec3.create();
+        this._zrDir = vec3.create();
     }
 
     // ===================================================================
@@ -1257,6 +1292,104 @@ class Camera3DImpl implements Camera3D {
         this._alt = clamp(this._alt, this._minZoomDist, this._maxZoomDist);
     }
 
+    /** @inheritdoc */
+    zoomAround(
+        anchorScreenX: number,
+        anchorScreenY: number,
+        anchorLngLat: [number, number],
+        newZoom: number,
+    ): void {
+        this._checkDestroyed();
+        if (
+            !Number.isFinite(anchorScreenX) ||
+            !Number.isFinite(anchorScreenY) ||
+            !Number.isFinite(anchorLngLat[0]) ||
+            !Number.isFinite(anchorLngLat[1]) ||
+            !Number.isFinite(newZoom)
+        ) {
+            if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.warn('[Camera3D] zoomAround: non-finite arguments ignored');
+            }
+            return;
+        }
+
+        if (!this._hasUpdatedFrame) {
+            if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.warn('[Camera3D] zoomAround: inverse VP not ready; call update() first');
+            }
+            return;
+        }
+
+        const vpW = Math.max(this._vpW, MIN_VIEWPORT_DIM);
+        const vpH = Math.max(this._vpH, MIN_VIEWPORT_DIM);
+
+        const oldZoom = altitudeToZoom(this._alt, this._fov);
+        const zNew = clamp(newZoom, this._constraints.minZoom, this._constraints.maxZoom);
+        if (Math.abs(zNew - oldZoom) < 1e-10) {
+            return;
+        }
+
+        const ndcX = (anchorScreenX / vpW) * 2 - 1;
+        const ndcY = 1 - (anchorScreenY / vpH) * 2;
+
+        vec3.set(this._zrNear, ndcX, ndcY, 1.0);
+        vec3.transformMat4(this._zrNear, this._zrNear, this._mutable.inverseVPMatrix);
+        vec3.set(this._zrFar, ndcX, ndcY, 0.0);
+        vec3.transformMat4(this._zrFar, this._zrFar, this._mutable.inverseVPMatrix);
+
+        this._zrDir[0] = this._zrFar[0] - this._zrNear[0];
+        this._zrDir[1] = this._zrFar[1] - this._zrNear[1];
+        this._zrDir[2] = this._zrFar[2] - this._zrNear[2];
+        const dlen = Math.sqrt(
+            this._zrDir[0] * this._zrDir[0] +
+                this._zrDir[1] * this._zrDir[1] +
+                this._zrDir[2] * this._zrDir[2],
+        );
+        if (dlen < 1e-12 || !Number.isFinite(dlen)) {
+            if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.warn('[Camera3D] zoomAround: degenerate ray direction');
+            }
+            this.setZoom(zNew);
+            return;
+        }
+        this._zrDir[0] /= dlen;
+        this._zrDir[1] /= dlen;
+        this._zrDir[2] /= dlen;
+
+        const ox = this._ecefPosD[0];
+        const oy = this._ecefPosD[1];
+        const oz = this._ecefPosD[2];
+        const dx = this._zrDir[0];
+        const dy = this._zrDir[1];
+        const dz = this._zrDir[2];
+
+        const tHit = raySphereIntersect(ox, oy, oz, dx, dy, dz, WGS84_A);
+        if (tHit <= 0 || !Number.isFinite(tHit)) {
+            if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.warn('[Camera3D] zoomAround: ray misses ellipsoid; falling back to setZoom');
+            }
+            this.setZoom(zNew);
+            return;
+        }
+
+        const zoomDelta = zNew - oldZoom;
+        const moveFactor = 1 - Math.pow(2, -zoomDelta * 0.1);
+        const step = tHit * moveFactor;
+        if (!Number.isFinite(step)) {
+            this.setZoom(zNew);
+            return;
+        }
+
+        const newX = ox + dx * step;
+        const newY = oy + dy * step;
+        const newZ = oz + dz * step;
+
+        ecefToGeodetic(this._tempGeoD, newX, newY, newZ);
+        this._lonRad = this._tempGeoD[0];
+        this._latRad = clamp(this._tempGeoD[1], -HALF_PI, HALF_PI);
+        this._alt = clamp(this._tempGeoD[2], this._minZoomDist, this._maxZoomDist);
+    }
+
     // ===================================================================
     // 交互处理
     // ===================================================================
@@ -1450,6 +1583,8 @@ class Camera3DImpl implements Camera3D {
 
         // ---- 12. 填充 CameraState ----
         this._fillCameraState();
+
+        this._hasUpdatedFrame = true;
 
         return this._mutable as CameraState;
     }

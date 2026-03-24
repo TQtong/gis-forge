@@ -45,6 +45,7 @@ import {
     pixelToLngLat,
     clampLatitude,
     lngLatToMercator,
+    mercatorToLngLat,
 } from '../../core/src/geo/mercator.ts';
 
 // ============================================================
@@ -372,6 +373,23 @@ export interface Camera2D extends CameraController {
      * const [sx, sy] = cam.lngLatToScreen(116.39, 39.91);
      */
     lngLatToScreen(lon: number, lat: number): [number, number];
+
+    /**
+     * 以锚点为中心缩放：锚点屏幕位置对应的地理坐标在缩放前后保持不变（Web Mercator 米空间）。
+     *
+     * @param anchorScreenX - 锚点屏幕 X（CSS 像素，左上角原点）
+     * @param anchorScreenY - 锚点屏幕 Y（CSS 像素）
+     * @param anchorLngLat - 锚点处的 [经度, 纬度]（度），须与当前视图一致
+     * @param newZoom - 目标缩放级别（会钳制到 [minZoom, maxZoom]）
+     *
+     * @stability stable
+     */
+    zoomAround(
+        anchorScreenX: number,
+        anchorScreenY: number,
+        anchorLngLat: [number, number],
+        newZoom: number,
+    ): void;
 }
 
 // ============================================================
@@ -1480,6 +1498,79 @@ class Camera2DImpl implements Camera2D {
         this._cy = _llOut[1];
 
         // 应用约束
+        const [cx2, cy2] = this._constrainCenter(this._cx, this._cy);
+        this._cx = cx2;
+        this._cy = cy2;
+    }
+
+    /**
+     * 以锚点为中心缩放：在墨卡托米坐标下保持锚点地理坐标对应屏幕位置不变。
+     *
+     * @param anchorScreenX - 锚点屏幕 X（CSS 像素）
+     * @param anchorScreenY - 锚点屏幕 Y（CSS 像素）
+     * @param anchorLngLat - 锚点 [lon, lat]（度）
+     * @param newZoom - 目标缩放级别
+     *
+     * @stability stable
+     */
+    zoomAround(
+        anchorScreenX: number,
+        anchorScreenY: number,
+        anchorLngLat: [number, number],
+        newZoom: number,
+    ): void {
+        this._checkDestroyed();
+        if (
+            !Number.isFinite(anchorScreenX) ||
+            !Number.isFinite(anchorScreenY) ||
+            !Number.isFinite(anchorLngLat[0]) ||
+            !Number.isFinite(anchorLngLat[1]) ||
+            !Number.isFinite(newZoom)
+        ) {
+            if (__DEV__) {
+                console.warn('[Camera2D] zoomAround: non-finite arguments ignored');
+            }
+            return;
+        }
+
+        const vpW = this._lastViewportWidth;
+        const vpH = this._lastViewportHeight;
+        if (vpW < MIN_VIEWPORT_DIM || vpH < MIN_VIEWPORT_DIM) {
+            if (__DEV__) {
+                console.warn('[Camera2D] zoomAround: viewport not ready');
+            }
+            return;
+        }
+
+        const oldZoom = this._zoom;
+        const zNew = clamp(newZoom, this._constraints.minZoom, this._constraints.maxZoom);
+        if (Math.abs(zNew - oldZoom) < EPSILON) {
+            return;
+        }
+
+        const scaleFactor = Math.pow(2, zNew - oldZoom);
+        if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+            if (__DEV__) {
+                console.warn('[Camera2D] zoomAround: invalid scale factor');
+            }
+            return;
+        }
+
+        lngLatToMercator(_pxA, anchorLngLat[0], anchorLngLat[1]);
+        lngLatToMercator(_pxB, this._cx, this._cy);
+        const anchorMx = _pxA[0];
+        const anchorMy = _pxA[1];
+        const centerMx = _pxB[0];
+        const centerMy = _pxB[1];
+
+        const newCenterMx = anchorMx + (centerMx - anchorMx) / scaleFactor;
+        const newCenterMy = anchorMy + (centerMy - anchorMy) / scaleFactor;
+
+        mercatorToLngLat(_llOut, newCenterMx, newCenterMy);
+        this._zoom = zNew;
+        this._cx = _llOut[0];
+        this._cy = _llOut[1];
+
         const [cx2, cy2] = this._constrainCenter(this._cx, this._cy);
         this._cx = cx2;
         this._cy = cy2;

@@ -48,6 +48,7 @@ import {
     pixelToLngLat,
     clampLatitude,
     lngLatToMercator,
+    mercatorToLngLat,
 } from '../../core/src/geo/mercator.ts';
 
 // ============================================================
@@ -152,6 +153,12 @@ const DEFAULT_EASE_DURATION_MS: number = 500;
 
 /** 极小值阈值，用于浮点零判断 */
 const EPSILON: number = 1e-10;
+
+/**
+ * 判定「近似俯视」的俯仰角阈值（弧度）。
+ * 低于此值时 {@link Camera25DImpl.zoomAround} 可走墨卡托米空间快路径（与 2D 一致）。
+ */
+const PITCH_NEAR_ZERO_FOR_ZOOM_AROUND: number = 1e-4;
 
 /** 视口最小合法边长（像素），防止零宽/高导致除零 */
 const MIN_VIEWPORT_DIM: number = 1;
@@ -508,6 +515,23 @@ export interface Camera25D extends CameraController {
      * @stability stable
      */
     lngLatToScreen(lon: number, lat: number): [number, number];
+
+    /**
+     * 以锚点为中心缩放：俯仰近 0 时与 2D 相同（墨卡托米空间）；否则先应用目标 zoom 再按屏幕误差修正中心。
+     *
+     * @param anchorScreenX - 锚点屏幕 X（CSS 像素）
+     * @param anchorScreenY - 锚点屏幕 Y（CSS 像素）
+     * @param anchorLngLat - 锚点 [经度, 纬度]（度）
+     * @param newZoom - 目标缩放级别
+     *
+     * @stability stable
+     */
+    zoomAround(
+        anchorScreenX: number,
+        anchorScreenY: number,
+        anchorLngLat: [number, number],
+        newZoom: number,
+    ): void;
 }
 
 // ============================================================
@@ -2125,6 +2149,106 @@ class Camera25DImpl implements Camera25D {
         }
 
         // 应用约束
+        const [cx2, cy2] = this._constrainCenter(this._cx, this._cy);
+        this._cx = cx2;
+        this._cy = cy2;
+    }
+
+    /**
+     * 以锚点为中心缩放：pitch≈0 时走墨卡托米空间快路径；否则先设 zoom 再按屏幕像素差修正中心（与 handleZoom 一致）。
+     *
+     * @param anchorScreenX - 锚点屏幕 X（CSS 像素）
+     * @param anchorScreenY - 锚点屏幕 Y（CSS 像素）
+     * @param anchorLngLat - 锚点 [lon, lat]（度）
+     * @param newZoom - 目标缩放级别
+     *
+     * @stability stable
+     */
+    zoomAround(
+        anchorScreenX: number,
+        anchorScreenY: number,
+        anchorLngLat: [number, number],
+        newZoom: number,
+    ): void {
+        this._checkDestroyed();
+        if (
+            !Number.isFinite(anchorScreenX) ||
+            !Number.isFinite(anchorScreenY) ||
+            !Number.isFinite(anchorLngLat[0]) ||
+            !Number.isFinite(anchorLngLat[1]) ||
+            !Number.isFinite(newZoom)
+        ) {
+            if (__DEV__) {
+                console.warn('[Camera25D] zoomAround: non-finite arguments ignored');
+            }
+            return;
+        }
+
+        const vpW = this._lastViewportWidth;
+        const vpH = this._lastViewportHeight;
+        if (vpW < MIN_VIEWPORT_DIM || vpH < MIN_VIEWPORT_DIM) {
+            if (__DEV__) {
+                console.warn('[Camera25D] zoomAround: viewport not ready');
+            }
+            return;
+        }
+
+        const oldZoom = this._zoom;
+        const zNew = clamp(newZoom, this._constraints.minZoom, this._constraints.maxZoom);
+        if (Math.abs(zNew - oldZoom) < EPSILON) {
+            return;
+        }
+
+        if (Math.abs(this._pitch) < PITCH_NEAR_ZERO_FOR_ZOOM_AROUND) {
+            const scaleFactor = Math.pow(2, zNew - oldZoom);
+            if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+                if (__DEV__) {
+                    console.warn('[Camera25D] zoomAround: invalid scale factor');
+                }
+                return;
+            }
+            lngLatToMercator(_pxA, anchorLngLat[0], anchorLngLat[1]);
+            lngLatToMercator(_pxB, this._cx, this._cy);
+            const newCenterMx = _pxA[0] + (_pxB[0] - _pxA[0]) / scaleFactor;
+            const newCenterMy = _pxA[1] + (_pxB[1] - _pxA[1]) / scaleFactor;
+            mercatorToLngLat(_llOut, newCenterMx, newCenterMy);
+            this._zoom = zNew;
+            this._cx = _llOut[0];
+            this._cy = _llOut[1];
+            const [cx2, cy2] = this._constrainCenter(this._cx, this._cy);
+            this._cx = cx2;
+            this._cy = cy2;
+            return;
+        }
+
+        this._zoom = zNew;
+
+        const [newSx, newSy] = this.lngLatToScreen(anchorLngLat[0], anchorLngLat[1]);
+        if (!Number.isFinite(newSx) || !Number.isFinite(newSy)) {
+            if (__DEV__) {
+                console.warn('[Camera25D] zoomAround: lngLatToScreen failed');
+            }
+            this._zoom = oldZoom;
+            return;
+        }
+
+        const offsetSx = anchorScreenX - newSx;
+        const offsetSy = anchorScreenY - newSy;
+
+        if (Math.abs(offsetSx) > EPSILON || Math.abs(offsetSy) > EPSILON) {
+            lngLatToPixel(_pxA, this._cx, this._cy, this._zoom);
+            const cosPitch = Math.max(Math.cos(this._pitch), EPSILON);
+            const sinB = Math.sin(this._bearing);
+            const cosB = Math.cos(this._bearing);
+            const worldDx = cosB * (-offsetSx) + sinB * (-offsetSy / cosPitch);
+            const worldDy = -sinB * (-offsetSx) + cosB * (-offsetSy / cosPitch);
+            _pxA[0] += worldDx;
+            _pxA[1] += worldDy;
+            pixelToLngLat(_llOut, _pxA[0], _pxA[1], this._zoom);
+            this._cx = _llOut[0];
+            this._cy = _llOut[1];
+        }
+
         const [cx2, cy2] = this._constrainCenter(this._cx, this._cy);
         this._cx = cx2;
         this._cy = cy2;
