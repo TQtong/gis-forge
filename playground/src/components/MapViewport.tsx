@@ -8,8 +8,9 @@
  */
 
 import { useRef, useEffect, useState } from 'react';
-import { Map, Layers, MonitorDot } from 'lucide-react';
+import { Map, MonitorDot } from 'lucide-react';
 import { useSceneStore } from '../stores/sceneStore';
+import { scenes } from '../scenes';
 
 // ═══════════════════════════════════════════════════════════
 // 常量
@@ -82,9 +83,6 @@ export function MapViewport(): JSX.Element {
   /** 当前激活的场景 ID */
   const activeSceneId = useSceneStore((s) => s.activeSceneId);
 
-  /** 引擎实例引用（非空时表示引擎正在运行） */
-  const engineRef = useSceneStore((s) => s.engineRef);
-
   // ─── 本地状态 ───
 
   /** 引擎运行状态标签（用于 HUD 显示） */
@@ -99,39 +97,54 @@ export function MapViewport(): JSX.Element {
    * 当前阶段（Phase 1）仅更新状态，实际引擎集成在 Phase 4 实现。
    */
   useEffect(() => {
-    if (!activeSceneId) {
-      // 无场景选中时重置为 idle
+    if (!activeSceneId || !containerRef.current) {
       setEngineStatus('idle');
       return;
     }
 
-    // 标记为加载中（实际引擎初始化时会异步完成）
     setEngineStatus('loading');
 
-    /**
-     * TODO（Phase 4）：引擎集成
-     * const scene = scenes[activeSceneId];
-     * if (scene && containerRef.current) {
-     *   scene.onEnter(containerRef.current);
-     *   setEngineStatus('ready');
-     * }
-     */
+    const scene = scenes[activeSceneId];
+    const container = containerRef.current;
 
-    // 临时模拟：短暂延迟后标记为 ready（模拟引擎初始化）
-    const timer = window.setTimeout(() => {
+    if (scene) {
+      // 清空容器内容（上一个场景的残留 DOM）
+      container.innerHTML = '';
+      try {
+        scene.onEnter(container);
+        setEngineStatus('ready');
+      } catch (err) {
+        console.error(`[MapViewport] scene onEnter failed:`, err);
+        setEngineStatus('error');
+      }
+    } else {
+      // 未注册的 sceneId — 显示通用占位信息
+      container.innerHTML = '';
+      const placeholder = document.createElement('div');
+      placeholder.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-secondary);font-family:Inter,system-ui,sans-serif;';
+      placeholder.innerHTML = `
+        <div style="font-size:40px;margin-bottom:12px;opacity:0.5;">📦</div>
+        <div style="font-size:16px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">${formatSceneName(activeSceneId)}</div>
+        <div style="font-size:13px;color:var(--text-muted);max-width:320px;text-align:center;line-height:1.6;">
+          该模块的交互式测试场景尚未实现。<br/>请选择带 ● 标记的已实现场景。
+        </div>
+      `;
+      container.appendChild(placeholder);
       setEngineStatus('ready');
-    }, 300);
+    }
 
     return () => {
-      // 清理定时器
-      window.clearTimeout(timer);
-
-      /**
-       * TODO（Phase 4）：场景清理
-       * const scene = scenes[activeSceneId];
-       * scene?.onLeave();
-       */
-
+      // 场景切换时清理上一个场景
+      if (scene) {
+        try {
+          scene.onLeave();
+        } catch {
+          // 忽略清理错误
+        }
+      }
+      if (container) {
+        container.innerHTML = '';
+      }
       setEngineStatus('idle');
     };
   }, [activeSceneId]);
@@ -161,55 +174,24 @@ export function MapViewport(): JSX.Element {
       className="w-full h-full relative overflow-hidden"
       style={{ background: 'var(--bg-primary)' }}
     >
-      {/* ─── 占位符（引擎未运行时显示） ─── */}
-      {!engineRef && (
+      {/* ─── 占位符（仅在无场景或 loading 状态时叠加半透明遮罩） ─── */}
+      {!activeSceneId && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 pointer-events-none">
-          {/* 根据是否选中场景显示不同图标和文字 */}
-          {activeSceneId ? (
-            <>
-              {/* 已选中场景但引擎未挂载 → 显示场景名称占位 */}
-              <div
-                className="p-4 rounded-2xl"
-                style={{ background: 'var(--bg-panel)', opacity: 0.6 }}
-              >
-                <Layers
-                  size={PLACEHOLDER_ICON_SIZE}
-                  style={{ color: 'var(--accent)' }}
-                />
-              </div>
-              <p
-                className="text-lg font-medium"
-                style={{ color: 'var(--text-secondary)', opacity: 0.8 }}
-              >
-                {sceneName}
-              </p>
-              <p
-                className="text-sm"
-                style={{ color: 'var(--text-muted)', opacity: 0.6 }}
-              >
-                引擎初始化中...
-              </p>
-            </>
-          ) : (
-            <>
-              {/* 未选中任何场景 → 引导用户选择 */}
-              <div
-                className="p-4 rounded-2xl"
-                style={{ background: 'var(--bg-panel)', opacity: 0.4 }}
-              >
-                <Map
-                  size={PLACEHOLDER_ICON_SIZE}
-                  style={{ color: 'var(--text-muted)' }}
-                />
-              </div>
-              <p
-                className="text-base"
-                style={{ color: 'var(--text-muted)', opacity: 0.6 }}
-              >
-                从左侧功能树选择一个测试场景
-              </p>
-            </>
-          )}
+          <div
+            className="p-4 rounded-2xl"
+            style={{ background: 'var(--bg-panel)', opacity: 0.4 }}
+          >
+            <Map
+              size={PLACEHOLDER_ICON_SIZE}
+              style={{ color: 'var(--text-muted)' }}
+            />
+          </div>
+          <p
+            className="text-base"
+            style={{ color: 'var(--text-muted)', opacity: 0.6 }}
+          >
+            从左侧功能树选择一个测试场景
+          </p>
         </div>
       )}
 
