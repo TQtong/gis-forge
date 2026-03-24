@@ -7,20 +7,39 @@ import {
     createSkyRenderer,
     computeHorizonYNormalized,
 } from '@/packages/gpu/src/l2/index.ts';
+import {
+    computeCamera25D,
+    coveringTiles,
+    worldToScreen,
+} from '@/hooks/useCamera25D';
+import type { Camera25DState, TileID } from '@/hooks/useCamera25D';
 
-/** 2.5D 天空 + 雾（与 L2 SkyRenderer / FogManager 共享配置） */
+/** 2.5D sky + fog instances (shared, stateless singletons matching L2 config). */
 const skyRenderer = createSkyRenderer();
 const fogManager = createFogManager();
 
-/**
- * Web Mercator helpers
- */
-const TILE_SIZE = 256;
+// ═══════════════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════════════
 
 /**
- * CSS `rotateX` tilt (degrees) for 2.5D — must match `MapViewport` `canvasTransformStyle`.
+ * Tile pixel size used by the 2D flat renderer (classic OSM 256 px tiles).
+ * The 2.5D pipeline uses TILE_SIZE=512 for world coordinates internally,
+ * but tile image fetching still uses the standard z/x/y grid.
  */
-export const TILT_ANGLE_DEG = 35;
+const TILE_SIZE_2D = 256;
+
+/**
+ * Pitch used for 2.5D rendering (radians).
+ * 35° ≈ 0.6109 rad — provides a good sense of perspective without extreme foreshortening.
+ */
+const PITCH_25D_RAD = 35 * Math.PI / 180;
+
+/**
+ * Vertical FOV for the 2.5D perspective camera (radians).
+ * 0.6435 rad ≈ 36.87° — matches the design document exactly.
+ */
+const FOV_25D = 0.6435;
 
 /** Mouse wheel: zoom change per pixel of deltaY (after LINE/PAGE normalization). */
 const WHEEL_ZOOM_RATE = 1 / 450;
@@ -115,6 +134,10 @@ function clampLatInteractive(lat: number): number {
     return Math.max(-85, Math.min(85, lat));
 }
 
+// ═══════════════════════════════════════════════════════════
+// 2D tile coordinate helpers (used by flat renderer + pan/zoom)
+// ═══════════════════════════════════════════════════════════
+
 /**
  * Converts CSS pixel position on the canvas to tile coordinates at floor(zoom),
  * matching the renderer and pan logic (fractional zoom via tile width scale).
@@ -140,7 +163,7 @@ function cssPixelToTileCoords(
     const scale = Math.pow(2, zoom - zInt);
     const centerTileX = lngToTileX(centerLng, zInt);
     const centerTileY = latToTileY(centerLat, zInt);
-    const tileW = TILE_SIZE * scale;
+    const tileW = TILE_SIZE_2D * scale;
     const offsetX = canvasWidth / 2 - centerTileX * tileW;
     const offsetY = canvasHeight / 2 - centerTileY * tileW;
     const tileX = (cssX - offsetX) / tileW;
@@ -227,6 +250,10 @@ function computeCenterAfterZoomAroundPoint(
     return { center: [newLng, newLat], zoom: clampedZoom };
 }
 
+// ═══════════════════════════════════════════════════════════
+// Tile image cache (shared across 2D and 2.5D)
+// ═══════════════════════════════════════════════════════════
+
 const tileCache = new Map<string, HTMLImageElement>();
 const loadingTiles = new Set<string>();
 
@@ -249,9 +276,77 @@ function getTileImage(x: number, y: number, z: number): HTMLImageElement | null 
     return null;
 }
 
+// ═══════════════════════════════════════════════════════════
+// 2.5D tile quad projection
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Projects the four corners of a tile through the VP matrix to screen space.
+ *
+ * Returns null only if all four corners would be behind the camera (clip w < 0).
+ * For Canvas 2D rendering we use the bounding rect of these four screen points.
+ *
+ * @param tid    - Tile identifier (z, x, y).
+ * @param camera - {@link Camera25DState} from {@link computeCamera25D}.
+ * @returns Four screen-space [x,y] pairs: [topLeft, topRight, bottomLeft, bottomRight], or null.
+ */
+function computeTileScreenQuad(
+    tid: TileID,
+    camera: Camera25DState,
+): [[number, number], [number, number], [number, number], [number, number]] | null {
+    const numTiles = 1 << tid.z;
+    const tileSize = camera.worldSize / numTiles;
+    const x0 = tid.x * tileSize;
+    const y0 = tid.y * tileSize;
+    const x1 = x0 + tileSize;
+    const y1 = y0 + tileSize;
+
+    const p0 = worldToScreen(x0, y0, camera);
+    const p1 = worldToScreen(x1, y0, camera);
+    const p2 = worldToScreen(x0, y1, camera);
+    const p3 = worldToScreen(x1, y1, camera);
+
+    return [p0, p1, p2, p3];
+}
+
+// ═══════════════════════════════════════════════════════════
+// 2.5D fog overlay (Canvas 2D approximation of GPU distance fog)
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Draw a vertical gradient fog overlay that fades distant (top) regions.
+ *
+ * @param ctx       - Canvas 2D context.
+ * @param w         - Canvas width.
+ * @param h         - Canvas height.
+ * @param horizonY  - Normalised horizon position (0 = top, 1 = bottom).
+ */
+function drawFogOverlay(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    horizonY: number,
+): void {
+    const horizonPx = horizonY * h;
+    /* Fog starts at 40% of the way from horizon to bottom, full at horizon */
+    const fogStartY = horizonPx + (h - horizonPx) * 0.1;
+    const grad = ctx.createLinearGradient(0, horizonPx, 0, fogStartY);
+    grad.addColorStop(0, 'rgba(10, 14, 23, 0.7)');
+    grad.addColorStop(1, 'rgba(10, 14, 23, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, horizonPx, w, fogStartY - horizonPx);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Main hook
+// ═══════════════════════════════════════════════════════════
+
 /**
  * Canvas 2D interactive OSM map renderer.
  * Handles pan (drag), zoom (scroll wheel), and syncs with mapStore.
+ *
+ * @param canvasRef    - Ref to the <canvas> element.
+ * @param containerRef - Ref to the parent container (for resize observation).
  */
 export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, containerRef: RefObject<HTMLDivElement | null>) {
     const rafId = useRef(0);
@@ -266,75 +361,111 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        const { center, zoom, mode, pitch } = useMapStore.getState();
+        const { center, zoom, mode } = useMapStore.getState();
         const [lng, lat] = center;
         const w = canvas.width;
         const h = canvas.height;
+        const is25d = mode === '2.5d';
+        const pitchRad = is25d ? PITCH_25D_RAD : 0;
         const zInt = Math.floor(zoom);
         const scale = Math.pow(2, zoom - zInt);
 
         const centerTileX = lngToTileX(lng, zInt);
         const centerTileY = latToTileY(lat, zInt);
 
-        const centerPixelX = centerTileX * TILE_SIZE * scale;
-        const centerPixelY = centerTileY * TILE_SIZE * scale;
+        const centerPixelX = centerTileX * TILE_SIZE_2D * scale;
+        const centerPixelY = centerTileY * TILE_SIZE_2D * scale;
 
         const offsetX = w / 2 - centerPixelX;
         const offsetY = h / 2 - centerPixelY;
 
-        const tileW = TILE_SIZE * scale;
+        const tileW = TILE_SIZE_2D * scale;
         const startTileX = Math.floor(-offsetX / tileW);
-        let startTileY = Math.floor(-offsetY / tileW);
+        const startTileY = Math.floor(-offsetY / tileW);
         const endTileX = Math.ceil((w - offsetX) / tileW);
         const endTileY = Math.ceil((h - offsetY) / tileW);
         const maxTile = Math.pow(2, zInt);
 
-        const modeNow = useMapStore.getState().mode;
-        if (modeNow === '2.5d') {
-            const extraRows = Math.ceil((endTileY - startTileY) * 0.8);
-            startTileY -= extraRows;
-        }
-
-        const is25d = mode === '2.5d';
-        const horizonY = is25d ? computeHorizonYNormalized(pitch) : 0;
-
         ctx.fillStyle = '#0a0e17';
         ctx.fillRect(0, 0, w, h);
 
-        if (is25d) {
-            const skyCfg = skyRenderer.getConfig();
-            if (fogManager.shouldSync(skyCfg)) {
-                fogManager.setConfig({ fogColor: skyCfg.fogColor });
-            }
-            fogManager.computeUniforms(zoom);
-            skyRenderer.renderToCanvas2D(ctx, w, h, horizonY, pitch);
-        }
-
         let needsRedraw = false;
 
-        for (let ty = startTileY; ty < endTileY; ty++) {
-            for (let tx = startTileX; tx < endTileX; tx++) {
-                const wrappedX = ((tx % maxTile) + maxTile) % maxTile;
-                if (ty < 0 || ty >= maxTile) continue;
+        if (is25d) {
+            // ═══ 2.5D: VP-matrix perspective pipeline ═══
 
-                const img = getTileImage(wrappedX, ty, zInt);
-                const drawX = tx * tileW + offsetX;
-                const drawY = ty * tileW + offsetY;
+            const camera = computeCamera25D(
+                center,
+                zoom,
+                pitchRad,
+                0,
+                FOV_25D,
+                { width: w, height: h },
+            );
 
+            /* Sky gradient above the horizon */
+            const horizonY = computeHorizonYNormalized(pitchRad);
+            skyRenderer.renderToCanvas2D(ctx, w, h, horizonY, pitchRad);
+
+            /* Covering tiles from the real frustum, sorted near→far by the algorithm. */
+            const tileIds = coveringTiles(camera);
+
+            /* Canvas 2D painter's algorithm needs far→near (back-to-front). */
+            tileIds.reverse();
+
+            const numTiles = 1 << Math.floor(zoom);
+
+            for (const tid of tileIds) {
+                const verts = computeTileScreenQuad(tid, camera);
+                if (!verts) continue;
+
+                /* Bounding rect of the projected quad (Canvas 2D can't do arbitrary quads) */
+                const minX = Math.min(verts[0][0], verts[1][0], verts[2][0], verts[3][0]);
+                const minY = Math.min(verts[0][1], verts[1][1], verts[2][1], verts[3][1]);
+                const maxX = Math.max(verts[0][0], verts[1][0], verts[2][0], verts[3][0]);
+                const maxY = Math.max(verts[0][1], verts[1][1], verts[2][1], verts[3][1]);
+
+                /* Skip tiles fully outside the viewport */
+                if (maxX < 0 || minX > w || maxY < 0 || minY > h) continue;
+
+                /* Wrap x into valid [0, numTiles) range for the OSM URL */
+                const wrappedX = ((tid.x % numTiles) + numTiles) % numTiles;
+
+                const img = getTileImage(wrappedX, tid.y, tid.z);
                 if (img) {
-                    ctx.drawImage(img, drawX, drawY, tileW, tileW);
+                    ctx.drawImage(img, minX, minY, maxX - minX, maxY - minY);
                 } else {
                     ctx.fillStyle = '#1a2744';
-                    ctx.fillRect(drawX, drawY, tileW, tileW);
-                    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-                    ctx.strokeRect(drawX, drawY, tileW, tileW);
+                    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
                     needsRedraw = true;
                 }
             }
-        }
 
-        if (is25d) {
-            fogManager.applyToCanvas2D(ctx, w, h, horizonY, pitch);
+            /* Fog overlay for far-away tiles near the horizon */
+            drawFogOverlay(ctx, w, h, horizonY);
+
+        } else {
+            // ═══ 2D flat rendering ═══
+            for (let ty = startTileY; ty < endTileY; ty++) {
+                for (let tx = startTileX; tx < endTileX; tx++) {
+                    const wrappedX = ((tx % maxTile) + maxTile) % maxTile;
+                    if (ty < 0 || ty >= maxTile) continue;
+
+                    const img = getTileImage(wrappedX, ty, zInt);
+                    const drawX = tx * tileW + offsetX;
+                    const drawY = ty * tileW + offsetY;
+
+                    if (img) {
+                        ctx.drawImage(img, drawX, drawY, tileW, tileW);
+                    } else {
+                        ctx.fillStyle = '#1a2744';
+                        ctx.fillRect(drawX, drawY, tileW, tileW);
+                        ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+                        ctx.strokeRect(drawX, drawY, tileW, tileW);
+                        needsRedraw = true;
+                    }
+                }
+            }
         }
 
         if (needsRedraw) {
@@ -354,15 +485,13 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
 
         const resizeCanvas = () => {
             const rect = container.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            canvas.style.width = `${rect.width}px`;
-            canvas.style.height = `${rect.height}px`;
-            const ctx = canvas.getContext('2d');
-            if (ctx) ctx.scale(dpr, dpr);
             canvas.width = rect.width;
             canvas.height = rect.height;
+            canvas.style.width = `${rect.width}px`;
+            canvas.style.height = `${rect.height}px`;
+            canvas.style.position = '';
+            canvas.style.top = '';
+            canvas.style.left = '';
             scheduleRender();
         };
 
@@ -442,8 +571,6 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
                 store.center[1],
                 store.zoom
             );
-            const scale = Math.pow(2, store.zoom - zInt);
-            const tileW = TILE_SIZE * scale;
             const mouseLng = tileXToLng(tileXAtMouse, zInt);
             const mouseLat = tileYToLat(tileYAtMouse, zInt);
             pendingCoord.current = [mouseLng, mouseLat];
@@ -455,6 +582,8 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
             lastMouse.current = { x: e.clientX, y: e.clientY };
 
             const [cLng, cLat] = store.center;
+            const scale = Math.pow(2, store.zoom - zInt);
+            const tileW = TILE_SIZE_2D * scale;
             const tileXCenter = lngToTileX(cLng, zInt);
             const tileYCenter = latToTileY(cLat, zInt);
             const newTileX = tileXCenter - dx / tileW;

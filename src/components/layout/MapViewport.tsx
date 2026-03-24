@@ -12,7 +12,7 @@ import { ZoomControl } from '@/components/map-controls/ZoomControl';
 import { HistoryPanel } from '@/components/history/HistoryPanel';
 import { SplitViewControl } from '@/components/map-controls/SplitViewControl';
 import { ToolHintBar } from '@/components/toolbar/ToolHintBar';
-import { useCanvasMap, TILT_ANGLE_DEG } from '@/hooks/useCanvasMap';
+import { useCanvasMap } from '@/hooks/useCanvasMap';
 import { useGlobeRenderer } from '@/hooks/useGlobeRenderer';
 import { useMapEvents } from '@/hooks/useMapEvents';
 import { useResponsive } from '@/hooks/useResponsive';
@@ -26,17 +26,11 @@ import { useStatusStore } from '@/stores/statusStore';
  * Central map region: engine canvas container, overlays, initialization message.
  */
 /**
- * CSS perspective transform style for 2.5D tilt view.
- * Returns a CSSProperties object to apply on the canvas wrapper.
+ * Canvas transform style.
+ * Now returns `transform: 'none'` for ALL modes — the 2.5D perspective
+ * is handled by the VP-matrix projection in {@link useCamera25D}, not CSS.
  */
-function canvasTransformStyle(mode: MapViewMode): React.CSSProperties {
-    if (mode === '2.5d') {
-        return {
-            transform: `perspective(1000px) rotateX(${TILT_ANGLE_DEG}deg) scale(1.1)`,
-            transformOrigin: 'center 70%',
-            transition: 'transform 0.6s cubic-bezier(0.4,0,0.2,1)',
-        };
-    }
+function canvasTransformStyle(_mode: MapViewMode): React.CSSProperties {
     return {
         transform: 'none',
         transition: 'transform 0.6s cubic-bezier(0.4,0,0.2,1)',
@@ -73,12 +67,12 @@ export function MapViewport(): ReactElement {
             ref={containerRef}
         >
             <div
-                className="absolute inset-0 z-[1]"
+                className="absolute inset-0 z-[1] overflow-hidden"
                 style={{ ...tileCanvasStyle, display: showTileCanvas ? 'block' : 'none' }}
             >
                 <canvas
                     ref={canvasRef}
-                    className="w-full h-full"
+                    className="w-full"
                     aria-label="地图画布"
                 />
             </div>
