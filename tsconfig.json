@@ -6,6 +6,7 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": ["vite/client", "@webgpu/types"],
     "skipLibCheck": true,
+    "jsx": "react-jsx",
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
@@ -21,6 +22,7 @@
     "noUncheckedSideEffectImports": true,
 
     "paths": {
+      "@/*": ["./src/*"],
       "@geoforge/core": ["./src/packages/core/src/index.ts"],
       "@geoforge/core/*": ["./src/packages/core/src/*"]
     }

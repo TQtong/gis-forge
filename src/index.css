@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+/* ── Dark theme (default) ── */
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-panel: #16213e;
+  --bg-panel-hover: #1a2744;
+  --bg-input: #0f1a2e;
+  --border: rgba(255,255,255,0.08);
+  --border-active: rgba(255,255,255,0.16);
+  --text-primary: #e0e0e0;
+  --text-secondary: #8899aa;
+  --text-muted: #556677;
+  --accent: #53a8b6;
+  --accent-hover: #6bc0ce;
+  --highlight: #0f3460;
+  --success: #4caf50;
+  --warning: #ff9800;
+  --error: #f44336;
+  --toast-success-border: #4caf50;
+  --toast-warning-border: #ff9800;
+  --toast-error-border: #f44336;
+  --drag-overlay: rgba(83,168,182,0.1);
+  --tool-hint-bg: rgba(0,0,0,0.7);
+  --group-header-bg: rgba(255,255,255,0.04);
+}
+
+/* ── Light theme ── */
+:root[data-theme="light"] {
+  --bg-primary: #f0f2f5;
+  --bg-panel: #ffffff;
+  --bg-panel-hover: #f5f5f5;
+  --bg-input: #fafafa;
+  --border: rgba(0,0,0,0.08);
+  --border-active: rgba(0,0,0,0.16);
+  --text-primary: #1a1a2e;
+  --text-secondary: #666666;
+  --text-muted: #999999;
+  --accent: #1976d2;
+  --accent-hover: #1565c0;
+  --highlight: #e3f2fd;
+  --success: #2e7d32;
+  --warning: #e65100;
+  --error: #c62828;
+  --toast-success-border: #2e7d32;
+  --toast-warning-border: #e65100;
+  --toast-error-border: #c62828;
+  --drag-overlay: rgba(25,118,210,0.08);
+  --tool-hint-bg: rgba(255,255,255,0.9);
+  --group-header-bg: rgba(0,0,0,0.02);
+}
+
+/* ── Base styles ── */
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  margin: 0;
+  padding: 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+code, .font-mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-active); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Focus ring ── */
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── High contrast ── */
+@media (prefers-contrast: more) {
+  :root {
+    --border: rgba(255,255,255,0.24);
+    --border-active: rgba(255,255,255,0.4);
+  }
+  :root[data-theme="light"] {
+    --border: rgba(0,0,0,0.24);
+    --border-active: rgba(0,0,0,0.4);
+  }
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
