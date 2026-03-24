@@ -160,17 +160,6 @@ const EPSILON: number = 1e-10;
  */
 const PITCH_NEAR_ZERO_FOR_ZOOM_AROUND: number = 1e-4;
 
-/**
- * 动态远裁面：pitch 低于此值（弧度）时按近似俯视处理（far = cameraToCenterDist×1.5）。
- * 约 0.57°；与视口填充文档「pitch < 0.01」一致。
- */
-const PITCH_NEAR_ZERO_FOR_FAR_PLANE: number = 0.01;
-
-/**
- * 视锥上边缘与地面相交分支的上界余量（弧度）：与 π/2 保留间隙，避免 `cos(topRayAngle)→0` 除法不稳定。
- */
-const TOP_RAY_ANGLE_EPS: number = 0.01;
-
 /** 视口最小合法边长（像素），防止零宽/高导致除零 */
 const MIN_VIEWPORT_DIM: number = 1;
 
@@ -1852,7 +1841,7 @@ class Camera25DImpl implements Camera25D {
      *    eye = center + [-sin(bearing)*sin(pitch)*altitude, cos(bearing)*sin(pitch)*altitude, cos(pitch)*altitude]
      * 3. lookAt(eye, target=[centerPx, centerPy, 0], up=rotate([0,1,0], bearing))
      * 4. perspectiveReversedZ(fov, aspect, near, far)
-     *    near = max(cameraToCenterDist×0.01, 10)；far = _computeFarPlane(cameraToCenterDist)
+     *    near = _computeNearZ()；far = _computeFarZ()（MapLibre 风格远裁面）
      * 5. VP = P × V, inverseVP = VP^(-1)
      *
      * @param deltaTime - 距上一帧时间差（秒）
@@ -2620,52 +2609,45 @@ class Camera25DImpl implements Camera25D {
     }
 
     /**
-     * 计算动态近裁面距离（Mercator 像素空间，与 eye–target 尺度一致）。
-     * Reversed-Z 下近裁面对应 depth=1.0。
+     * 计算近裁面距离（与 MapLibre 风格一致：相对「相机到地图中心」距离的比例下限）。
+     * 使用当前视口高度与垂直 FOV 推导 cameraToCenterDist，与 `_computeFarZ` 一致。
      *
-     * @param cameraToCenterDist - 相机到地面注视点的直线距离（≈ altPixels）
-     * @returns near 距离，至少为 10 或与距离成比例的下限
+     * @returns near 距离（Mercator 像素空间，与投影矩阵一致）
      */
-    private _computeNearPlane(cameraToCenterDist: number): number {
-        const dist = Number.isFinite(cameraToCenterDist) && cameraToCenterDist > 0 ? cameraToCenterDist : 1;
-        return Math.max(dist * 0.01, 10.0);
+    private _computeNearZ(): number {
+        const vpH = Math.max(this._lastViewportHeight, MIN_VIEWPORT_DIM);
+        const halfFov = this._fov / 2;
+        const tanHalf = Math.tan(halfFov);
+        const safeTan = Math.max(Math.abs(tanHalf), EPSILON);
+        const cameraToCenterDist = vpH / 2 / safeTan;
+        return Math.max(cameraToCenterDist * 0.01, 1.0);
     }
 
     /**
-     * 按俯仰角与视锥几何计算远裁面距离，使倾斜时地面延伸至地平线附近、减少远端裁剪空洞。
-     * 分支：近似俯视；视锥上沿仍与地面相交；上沿指向天空（大 pitch）。
+     * 计算远裁面距离（MapLibre 推导：视锥上沿与地面对齐时的距离 + 余量）。
+     * 高 pitch 时保证 far 足够大，避免近地平线处地面被裁切。
      *
-     * @param cameraToCenterDist - 相机到地面中心点的距离（Mercator 像素，与 `_rebuildMatrices` 中 altPixels 一致）
-     * @returns far 平面距离（世界单位与投影一致）
+     * @returns far 距离（Mercator 像素空间，与投影矩阵一致）
      */
-    private _computeFarPlane(cameraToCenterDist: number): number {
-        const dist = Number.isFinite(cameraToCenterDist) && cameraToCenterDist > EPSILON
-            ? cameraToCenterDist
-            : 1;
-        const halfFov = this._fov * 0.5;
-        const pitch = this._pitch;
-        if (pitch < PITCH_NEAR_ZERO_FOR_FAR_PLANE) {
-            return dist * 1.5;
+    private _computeFarZ(): number {
+        const vpH = Math.max(this._lastViewportHeight, MIN_VIEWPORT_DIM);
+        const halfFov = this._fov / 2;
+        const tanHalf = Math.tan(halfFov);
+        const safeTan = Math.max(Math.abs(tanHalf), EPSILON);
+        const cameraToCenterDist = vpH / 2 / safeTan;
+        const angleToHorizon = Math.PI / 2 - this._pitch - halfFov;
+
+        let farZ: number;
+
+        if (angleToHorizon > 0.01) {
+            const topHalfSurfaceDist =
+                (Math.sin(this._pitch) * cameraToCenterDist) / Math.sin(angleToHorizon);
+            farZ = topHalfSurfaceDist * 1.1;
+        } else {
+            farZ = cameraToCenterDist * 100.0;
         }
-        const topRayAngle = pitch + halfFov;
-        const cosPitch = Math.max(Math.cos(pitch), EPSILON);
-        const cameraHeight = dist * cosPitch;
-        const horizonLimit = Math.PI / 2 - TOP_RAY_ANGLE_EPS;
-        if (topRayAngle < horizonLimit) {
-            const cosTop = Math.cos(topRayAngle);
-            const safeCos = Math.max(Math.abs(cosTop), EPSILON);
-            const groundDist = cameraHeight / safeCos;
-            if (!Number.isFinite(groundDist)) {
-                if (typeof __DEV__ !== 'undefined' && __DEV__) {
-                    console.warn('[Camera25D] _computeFarPlane: groundDist 非有限，使用 pitch 分支');
-                }
-            } else {
-                return Math.max(groundDist * 1.5, dist * 2.0);
-            }
-        }
-        const pitchNormalized = pitch / (Math.PI / 2);
-        const mult = Math.min(2 + pitchNormalized * 98, 100);
-        return dist * mult;
+
+        return Math.max(farZ, cameraToCenterDist * 2.0);
     }
 
     /**
@@ -2675,7 +2657,7 @@ class Camera25DImpl implements Camera25D {
      * 1. 使用 perspectiveReversedZ 替代 ortho
      * 2. 相机位置沿 pitch 方向后退
      * 3. up 向量随 bearing 旋转
-     * 4. near/far 平面随 altitude 和 pitch 动态调整
+     * 4. near/far 由 `_computeNearZ` / `_computeFarZ`（视口 FOV + pitch）与 MapLibre 一致
      *
      * @param viewport - 当前视口
      */
@@ -2741,14 +2723,10 @@ class Camera25DImpl implements Camera25D {
             // 构建视图矩阵
             mat4.lookAt(this._mutable.viewMatrix, _eye, _target, _up);
 
-            // 构建投影矩阵：透视 Reversed-Z（near/far 与 eye–target 距离同尺度）
+            // 构建投影矩阵：透视 Reversed-Z（near/far 由视口+FOV+pitch 推导，与 MapLibre 一致）
             const aspect = viewport.width / viewport.height;
-            const cameraToCenterDist = Math.max(
-                Math.hypot(offsetBack, offsetUp),
-                EPSILON,
-            );
-            const near = this._computeNearPlane(cameraToCenterDist);
-            const far = this._computeFarPlane(cameraToCenterDist);
+            const near = this._computeNearZ();
+            const far = this._computeFarZ();
             if (!(far > near) || !Number.isFinite(near) || !Number.isFinite(far)) {
                 if (typeof __DEV__ !== 'undefined' && __DEV__) {
                     console.warn(
@@ -2789,6 +2767,21 @@ class Camera25DImpl implements Camera25D {
                 mat4.identity(this._mutable.inverseVPMatrix);
                 if (typeof __DEV__ !== 'undefined' && __DEV__) {
                     console.warn('[Camera25D] VP matrix is singular, inverseVP fallback to identity');
+                }
+            }
+
+            if (__DEV__) {
+                const halfFov = this._fov / 2;
+                const vpH = Math.max(this._lastViewportHeight, MIN_VIEWPORT_DIM);
+                const ctcDist = vpH / 2 / Math.tan(halfFov);
+                const ratio = far / ctcDist;
+                if (ratio < 1.5) {
+                    console.warn(
+                        '[Camera25D] farZ ratio too small:',
+                        ratio.toFixed(2),
+                        'at pitch:',
+                        ((this._pitch * 180) / Math.PI).toFixed(1) + '°',
+                    );
                 }
             }
         }

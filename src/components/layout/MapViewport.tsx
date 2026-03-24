@@ -12,7 +12,7 @@ import { ZoomControl } from '@/components/map-controls/ZoomControl';
 import { HistoryPanel } from '@/components/history/HistoryPanel';
 import { SplitViewControl } from '@/components/map-controls/SplitViewControl';
 import { ToolHintBar } from '@/components/toolbar/ToolHintBar';
-import { useCanvasMap } from '@/hooks/useCanvasMap';
+import { useCanvasMap, TILT_ANGLE_DEG } from '@/hooks/useCanvasMap';
 import { useGlobeRenderer } from '@/hooks/useGlobeRenderer';
 import { useMapEvents } from '@/hooks/useMapEvents';
 import { useResponsive } from '@/hooks/useResponsive';
@@ -32,7 +32,7 @@ import { useStatusStore } from '@/stores/statusStore';
 function canvasTransformStyle(mode: MapViewMode): React.CSSProperties {
     if (mode === '2.5d') {
         return {
-            transform: 'perspective(1200px) rotateX(40deg) scale(1.15)',
+            transform: `perspective(1000px) rotateX(${TILT_ANGLE_DEG}deg) scale(1.1)`,
             transformOrigin: 'center 70%',
             transition: 'transform 0.6s cubic-bezier(0.4,0,0.2,1)',
         };

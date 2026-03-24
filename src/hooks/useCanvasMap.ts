@@ -17,6 +17,11 @@ const fogManager = createFogManager();
  */
 const TILE_SIZE = 256;
 
+/**
+ * CSS `rotateX` tilt (degrees) for 2.5D — must match `MapViewport` `canvasTransformStyle`.
+ */
+export const TILT_ANGLE_DEG = 35;
+
 /** Mouse wheel: zoom change per pixel of deltaY (after LINE/PAGE normalization). */
 const WHEEL_ZOOM_RATE = 1 / 450;
 /** Trackpad: higher event rate → lower rate to avoid overshooting. */
@@ -279,10 +284,16 @@ export function useCanvasMap(canvasRef: RefObject<HTMLCanvasElement | null>, con
 
         const tileW = TILE_SIZE * scale;
         const startTileX = Math.floor(-offsetX / tileW);
-        const startTileY = Math.floor(-offsetY / tileW);
+        let startTileY = Math.floor(-offsetY / tileW);
         const endTileX = Math.ceil((w - offsetX) / tileW);
         const endTileY = Math.ceil((h - offsetY) / tileW);
         const maxTile = Math.pow(2, zInt);
+
+        const modeNow = useMapStore.getState().mode;
+        if (modeNow === '2.5d') {
+            const extraRows = Math.ceil((endTileY - startTileY) * 0.8);
+            startTileY -= extraRows;
+        }
 
         const is25d = mode === '2.5d';
         const horizonY = is25d ? computeHorizonYNormalized(pitch) : 0;
