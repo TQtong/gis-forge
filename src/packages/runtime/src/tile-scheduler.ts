@@ -36,6 +36,80 @@ const MIN_TILE_SIZE_PX = 1;
 const MAX_LAT_CLAMP = 85.05112878;
 /** 浮点比较 epsilon。 */
 const EPS = 1e-6;
+/** LOD 衰减：与中心 tile 距离比较时的参考距离（tile 单位）；与 `distanceFromCenter` 同量纲。 */
+const TILE_LOD_CENTER_DISTANCE_TILE_UNITS = 1;
+/** 默认：屏幕上同时允许的最大 zoom 档位数（与 MapLibre `maxZoomLevelsOnScreen` 对齐）。 */
+const DEFAULT_TILE_LOD_MAX_LEVELS_ON_SCREEN = 4;
+/** 默认：高 pitch 时总瓦片数上限 = 基准可见格数 × 该比值。 */
+const DEFAULT_TILE_LOD_TILE_COUNT_MAX_MIN_RATIO = 3;
+
+/**
+ * 高 pitch 时按距地图中心的距离衰减瓦片 zoom（减少远端高清瓦片请求、保证覆盖）。
+ */
+export interface TileLodConfig {
+  /** Max different zoom levels on screen at once. @range [1,8] @default 4 */
+  maxZoomLevelsOnScreen: number;
+  /** Ratio of max tiles to min tiles at high pitch. @range [1,10] @default 3 */
+  tileCountMaxMinRatio: number;
+}
+
+/**
+ * 按与中心的距离计算该位置应采样的整数 zoom（越远越低）。
+ * 公式：`clamp(centerZoom - floor(log2(distanceFromCenter / centerDistance)), centerZoom - maxLevels + 1, centerZoom)`。
+ *
+ * @param centerZoom - 视口中心处目标整数 zoom（与瓦片 z 一致）
+ * @param distanceFromCenter - 与中心 tile 的平面距离（与中心同 z 的 tile 单位，如欧氏距离）
+ * @param centerDistance - 参考距离；超过该距离后开始按 log2 降 zoom
+ * @param maxLevels - 允许的最大 zoom 跨度档位数（对应 `TileLodConfig.maxZoomLevelsOnScreen`）
+ * @returns 建议的整数 zoom（已钳制）
+ *
+ * @example
+ * computeTileZoomAtDistance(10, 4, 1, 4); // 较远 → 低于 10
+ */
+export function computeTileZoomAtDistance(
+  centerZoom: number,
+  distanceFromCenter: number,
+  centerDistance: number,
+  maxLevels: number,
+): number {
+  try {
+    const cz = clampInt(centerZoom, 0, 30);
+    const maxLv = Math.max(1, Math.min(8, Math.floor(finiteNumber(maxLevels, DEFAULT_TILE_LOD_MAX_LEVELS_ON_SCREEN))));
+    const dc = Math.max(EPS, finiteNumber(centerDistance, TILE_LOD_CENTER_DISTANCE_TILE_UNITS));
+    const d = Math.max(0, finiteNumber(distanceFromCenter, 0));
+    const ratio = d / dc;
+    const safeRatio = ratio > 0 ? ratio : Number.MIN_VALUE;
+    const logTerm = Math.floor(Math.log2(safeRatio));
+    const rawTarget = cz - logTerm;
+    const lo = cz - maxLv + 1;
+    const hi = cz;
+    return clampInt(rawTarget, lo, hi);
+  } catch (err) {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      console.warn('[TileScheduler] computeTileZoomAtDistance failed', err);
+    }
+    return clampInt(centerZoom, 0, 30);
+  }
+}
+
+/**
+ * 将瓦片沿四叉树向上收束到不高于 `targetZ` 的祖先（用于 LOD 降级）。
+ *
+ * @param coord - 当前格点瓦片坐标（与调度 grid 同 z）
+ * @param targetZ - 目标整数 zoom（≤ coord.z）
+ * @param minZ - 数据源最小 zoom
+ * @returns 祖先瓦片坐标
+ */
+function tileDownToZoom(coord: TileCoord, targetZ: number, minZ: number): TileCoord {
+  const tz = clampInt(targetZ, minZ, coord.z);
+  let c = coord;
+  let guard = 0;
+  while (c.z > tz && guard < 64) {
+    c = parentTile(c);
+    guard += 1;
+  }
+  return c;
+}
 
 /**
  * 单个候选瓦片的优先级信息。
@@ -97,6 +171,8 @@ export interface TileSchedulerConfig {
     /** 已缓存（loaded/cached）分项权重 */
     readonly cache: number;
   };
+  /** 高 pitch 时按距离衰减 zoom 与总瓦片上限（Layer 3 + 6.3）。 */
+  readonly tileLod: TileLodConfig;
 }
 
 /**
@@ -240,6 +316,10 @@ export interface TileScheduler {
     readonly totalErrors: number;
     /** 本帧候选池的平均综合优先级分数（无候选时为 0） */
     readonly avgTilePriority: number;
+    /** 本帧经 LOD 降级后（使用更低 zoom 祖先）的瓦片数（去重后） */
+    readonly lodDecreasedTileCount: number;
+    /** 本帧相对中心 zoom 的最大降级档数（整数，0 表示未降级） */
+    readonly maxZoomDelta: number;
   };
 }
 
@@ -545,6 +625,9 @@ function tileKey(c: TileCoord): string {
 function mergeTileSchedulerConfig(partial?: Partial<TileSchedulerConfig>): TileSchedulerConfig {
   const p = partial ?? {};
   const pw: Partial<TileSchedulerConfig['priorityWeights']> = p.priorityWeights ?? {};
+  const tl: Partial<TileLodConfig> = p.tileLod ?? {};
+  const maxLevels = Math.max(1, Math.min(8, Math.floor(finiteNumber(tl.maxZoomLevelsOnScreen ?? DEFAULT_TILE_LOD_MAX_LEVELS_ON_SCREEN, DEFAULT_TILE_LOD_MAX_LEVELS_ON_SCREEN))));
+  const ratio = Math.max(1, Math.min(10, finiteNumber(tl.tileCountMaxMinRatio ?? DEFAULT_TILE_LOD_TILE_COUNT_MAX_MIN_RATIO, DEFAULT_TILE_LOD_TILE_COUNT_MAX_MIN_RATIO)));
   return {
     maxConcurrentLoads: Math.max(1, Math.floor(finiteNumber(p.maxConcurrentLoads ?? DEFAULT_MAX_CONCURRENT_LOADS, DEFAULT_MAX_CONCURRENT_LOADS))),
     maxCacheSize: Math.max(1, Math.floor(finiteNumber(p.maxCacheSize ?? DEFAULT_MAX_CACHE_SIZE, DEFAULT_MAX_CACHE_SIZE))),
@@ -566,6 +649,10 @@ function mergeTileSchedulerConfig(partial?: Partial<TileSchedulerConfig>): TileS
       sse: Math.max(0, finiteNumber(pw.sse ?? DEFAULT_PRIORITY_WEIGHT_SSE, DEFAULT_PRIORITY_WEIGHT_SSE)),
       visibility: Math.max(0, finiteNumber(pw.visibility ?? DEFAULT_PRIORITY_WEIGHT_VISIBILITY, DEFAULT_PRIORITY_WEIGHT_VISIBILITY)),
       cache: Math.max(0, finiteNumber(pw.cache ?? DEFAULT_PRIORITY_WEIGHT_CACHE, DEFAULT_PRIORITY_WEIGHT_CACHE)),
+    },
+    tileLod: {
+      maxZoomLevelsOnScreen: maxLevels,
+      tileCountMaxMinRatio: ratio,
     },
   };
 }
@@ -699,6 +786,10 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
 
   /** 最近一帧候选池的平均综合优先级（无候选时为 0） */
   let lastAvgTilePriority = 0;
+  /** 最近一帧 LOD 降级后的瓦片数（去重后，跨 source 累计） */
+  let lastLodDecreasedTileCount = 0;
+  /** 最近一帧最大 zoom 降级档数 */
+  let lastMaxZoomDelta = 0;
 
   const scheduler: TileScheduler = {
     get config(): TileSchedulerConfig {
@@ -710,7 +801,9 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
         partial.priorityWeights !== undefined
           ? { ...partial, priorityWeights: { ...cfg.priorityWeights, ...partial.priorityWeights } }
           : partial;
-      cfg = mergeTileSchedulerConfig({ ...cfg, ...mergedPartial });
+      const tileLodMerged =
+        partial.tileLod !== undefined ? { ...cfg.tileLod, ...partial.tileLod } : cfg.tileLod;
+      cfg = mergeTileSchedulerConfig({ ...cfg, ...mergedPartial, tileLod: tileLodMerged });
     },
 
     get stats() {
@@ -721,6 +814,8 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
         totalLoaded,
         totalErrors,
         avgTilePriority: lastAvgTilePriority,
+        lodDecreasedTileCount: lastLodDecreasedTileCount,
+        maxZoomDelta: lastMaxZoomDelta,
       };
     },
 
@@ -794,6 +889,9 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
       const cameraZoom = finiteNumber(camera.zoom, 0);
       const pitch = finiteNumber(camera.pitch, 0);
 
+      lastLodDecreasedTileCount = 0;
+      lastMaxZoomDelta = 0;
+
       for (const [sourceId, entry] of sources.entries()) {
         const opt = entry.options;
         const z = pickTileZoom(cameraZoom, opt.minZoom, opt.maxZoom, opt.overzoomEnabled, cfg.overzoomLevels);
@@ -819,9 +917,15 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
 
         const visibleForSource: TileCoord[] = [];
 
+        /** 经距离 LOD 合并后的条目（key = tileKey(effective)） */
+        const lodMerged = new Map<
+          string,
+          { readonly coord: TileCoord; readonly maxDistance: number; readonly zoomDelta: number; visible: boolean }
+        >();
+
         for (let y = y0; y <= y1; y += 1) {
           for (let x = x0; x <= x1; x += 1) {
-            const coord: TileCoord = { x, y, z };
+            const gridCoord: TileCoord = { x, y, z };
             if (opt.bounds) {
               const bb = tileToBBox(x, y, z);
               if (!bboxIntersects(bb, opt.bounds)) {
@@ -829,66 +933,132 @@ export function createTileScheduler(config?: Partial<TileSchedulerConfig>): Tile
               }
             }
 
-            const centerTileX = cx;
-            const centerTileY = cy;
-            const m = measurePriority(coord, centerTileX, centerTileY, cameraZoom, pitch, cfg);
-            const isVisible = x >= xc0 && x <= xc1 && y >= yc0 && y <= yc1;
-            const isNeeded = true;
-
-            const rec = getRecord(sourceId, coord, true);
-            if (!rec) {
-              continue;
-            }
-            rec.lastAccessFrame = frameCounter;
-
-            if (isVisible) {
-              visibleForSource.push(coord);
-              visibleAll.push(coord);
-            }
-
-            // placeholder：若未就绪，则指向父瓦片刻画“模糊贴图”（MVP）
-            if (rec.state !== 'loaded' && rec.state !== 'cached') {
-              let p = parentTile(coord);
-              let guard = 0;
-              while (guard < 32 && p.z >= opt.minZoom) {
-                const pr = getRecord(sourceId, p, false);
-                if (pr && (pr.state === 'loaded' || pr.state === 'cached')) {
-                  // key 必须包含 sourceId：不同 source 可能共享同一 tile 坐标
-                  placeholder.set(`${sourceId}:${tileKey(coord)}`, p);
-                  break;
-                }
-                p = parentTile(p);
-                guard += 1;
+            const distance = Math.hypot(x - cx, y - cy);
+            let desiredZ: number;
+            try {
+              desiredZ = computeTileZoomAtDistance(
+                z,
+                distance,
+                TILE_LOD_CENTER_DISTANCE_TILE_UNITS,
+                cfg.tileLod.maxZoomLevelsOnScreen,
+              );
+            } catch (errLod) {
+              if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.warn('[TileScheduler] computeTileZoomAtDistance in update failed', errLod);
               }
+              desiredZ = z;
             }
-
-            if (!isNeeded) {
-              continue;
-            }
-
-            // SSE：超阈值则跳过加载（仍可用于占位/可见统计）
-            if (m.screenSpaceError > cfg.screenSpaceErrorThreshold) {
-              continue;
-            }
-
-            if (rec.state === 'empty' || rec.state === 'error') {
-              const priorityScore = computeTilePriority(coord, camera, cfg, {
-                sse: m.screenSpaceError,
-                intersectsFrustum: isVisible,
-                inCache: false,
+            const clampedDesired = clampInt(desiredZ, opt.minZoom, z);
+            const effective = tileDownToZoom(gridCoord, clampedDesired, opt.minZoom);
+            const zoomDelta = z - effective.z;
+            const kEff = tileKey(effective);
+            const isVisibleCell = x >= xc0 && x <= xc1 && y >= yc0 && y <= yc1;
+            const prev = lodMerged.get(kEff);
+            if (!prev) {
+              lodMerged.set(kEff, {
+                coord: effective,
+                maxDistance: distance,
+                zoomDelta,
+                visible: isVisibleCell,
               });
-              candidates.push({
-                sourceId,
-                priority: {
-                  coord,
-                  distance: m.distance,
-                  screenSpaceError: m.screenSpaceError,
-                  priorityScore,
-                  isVisible,
-                  isNeeded,
-                },
+            } else {
+              lodMerged.set(kEff, {
+                coord: effective,
+                maxDistance: Math.max(prev.maxDistance, distance),
+                zoomDelta: Math.max(prev.zoomDelta, zoomDelta),
+                visible: prev.visible || isVisibleCell,
               });
             }
+          }
+        }
+
+        const baseTileCount = Math.max(1, (xc1 - xc0 + 1) * (yc1 - yc0 + 1));
+        const maxTileCount = Math.max(1, Math.floor(baseTileCount * cfg.tileLod.tileCountMaxMinRatio));
+        if (lodMerged.size > maxTileCount) {
+          const ranked = Array.from(lodMerged.entries());
+          ranked.sort((a, b) => b[1].maxDistance - a[1].maxDistance);
+          const drop = lodMerged.size - maxTileCount;
+          for (let di = 0; di < drop; di += 1) {
+            const head = ranked[di];
+            if (head) {
+              lodMerged.delete(head[0]);
+            }
+          }
+        }
+
+        for (const v of lodMerged.values()) {
+          if (v.zoomDelta > 0) {
+            lastLodDecreasedTileCount += 1;
+          }
+          if (v.zoomDelta > lastMaxZoomDelta) {
+            lastMaxZoomDelta = v.zoomDelta;
+          }
+        }
+
+        for (const v of lodMerged.values()) {
+          const coord = v.coord;
+          if (opt.bounds) {
+            const bbEff = tileToBBox(coord.x, coord.y, coord.z);
+            if (!bboxIntersects(bbEff, opt.bounds)) {
+              continue;
+            }
+          }
+
+          const centerAtZ = lonLatToTileXY(centerLon, centerLat, coord.z);
+          const m = measurePriority(coord, centerAtZ.x, centerAtZ.y, cameraZoom, pitch, cfg);
+          const isVisible = v.visible;
+          const isNeeded = true;
+
+          const rec = getRecord(sourceId, coord, true);
+          if (!rec) {
+            continue;
+          }
+          rec.lastAccessFrame = frameCounter;
+
+          if (isVisible) {
+            visibleForSource.push(coord);
+            visibleAll.push(coord);
+          }
+
+          if (rec.state !== 'loaded' && rec.state !== 'cached') {
+            let p = parentTile(coord);
+            let guard = 0;
+            while (guard < 32 && p.z >= opt.minZoom) {
+              const pr = getRecord(sourceId, p, false);
+              if (pr && (pr.state === 'loaded' || pr.state === 'cached')) {
+                placeholder.set(`${sourceId}:${tileKey(coord)}`, p);
+                break;
+              }
+              p = parentTile(p);
+              guard += 1;
+            }
+          }
+
+          if (!isNeeded) {
+            continue;
+          }
+
+          if (m.screenSpaceError > cfg.screenSpaceErrorThreshold) {
+            continue;
+          }
+
+          if (rec.state === 'empty' || rec.state === 'error') {
+            const priorityScore = computeTilePriority(coord, camera, cfg, {
+              sse: m.screenSpaceError,
+              intersectsFrustum: isVisible,
+              inCache: false,
+            });
+            candidates.push({
+              sourceId,
+              priority: {
+                coord,
+                distance: m.distance,
+                screenSpaceError: m.screenSpaceError,
+                priorityScore,
+                isVisible,
+                isNeeded,
+              },
+            });
           }
         }
 

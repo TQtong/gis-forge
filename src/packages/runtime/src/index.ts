@@ -37,8 +37,16 @@ export type {
 } from './memory-budget.ts';
 export { createMemoryBudget } from './memory-budget.ts';
 
-export type { TileState, TilePriority, TileSchedulerConfig, TileSourceOptions, TileScheduleResult, TileScheduler } from './tile-scheduler.ts';
-export { createTileScheduler, computeTilePriority } from './tile-scheduler.ts';
+export type {
+  TileState,
+  TilePriority,
+  TileLodConfig,
+  TileSchedulerConfig,
+  TileSourceOptions,
+  TileScheduleResult,
+  TileScheduler,
+} from './tile-scheduler.ts';
+export { createTileScheduler, computeTilePriority, computeTileZoomAtDistance } from './tile-scheduler.ts';
 
 export type { FramePhase, FrameCallback, FrameScheduler } from './frame-scheduler.ts';
 export { createFrameScheduler } from './frame-scheduler.ts';

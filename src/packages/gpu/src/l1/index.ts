@@ -26,7 +26,7 @@ export type { BufferHandle, StagingAllocation, BufferPool } from './buffer-pool.
 export { createBufferPool } from './buffer-pool.ts';
 
 // --- Module 4: TextureManager ---
-export type { TextureHandle, AtlasRegion, TextureManager } from './texture-manager.ts';
+export type { TextureHandle, AtlasRegion, TextureManager, AnisotropicFilterConfig } from './texture-manager.ts';
 export { createTextureManager } from './texture-manager.ts';
 
 // --- Module 5: GPUMemoryTracker ---

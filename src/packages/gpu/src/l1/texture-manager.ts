@@ -17,6 +17,7 @@
 
 import type { GPUMemoryTracker } from './memory-tracker.ts';
 import { uniqueId } from '../../../core/src/infra/id.ts';
+import { GeoForgeError, GeoForgeErrorCode } from '../../../core/src/infra/errors.ts';
 
 /** 开发构建时由打包器注入；未定义时按 false 处理。 */
 declare const __DEV__: boolean | undefined;
@@ -80,6 +81,18 @@ export interface AtlasRegion {
 
   /** 区域的像素高度（不含 padding）。 */
   readonly pixelHeight: number;
+}
+
+// ===================== Anisotropic (raster tiles) =====================
+
+/**
+ * 瓦片栅格纹理采样用的各向异性过滤配置（高 pitch 时减轻远处模糊）。
+ */
+export interface AnisotropicFilterConfig {
+  /** Pitch threshold to enable anisotropic filtering. @default 20 @unit degrees */
+  activationPitch: number;
+  /** Max anisotropy level. @range [1,16] @default 16 */
+  maxAnisotropy: number;
 }
 
 // ===================== TextureManager 接口 =====================
@@ -171,7 +184,31 @@ export interface TextureManager {
 
     /** 最近一次 defrag 估算回收的字节数（像素面积差 × RGBA8）。 */
     readonly reclaimedBytes: number;
+
+    /** 当前帧是否因 pitch 高于阈值而选用各向异性瓦片采样器。 */
+    readonly anisotropicEnabled: boolean;
+    /** 当前生效的各向异性倍数（未启用时为 1）。 */
+    readonly currentAnisotropy: number;
   };
+
+  /**
+   * 更新各向异性过滤参数；若 `maxAnisotropy` 变化会重建各向异性采样器。
+   *
+   * @param config - 完整配置（与内部状态合并后写回）
+   */
+  setAnisotropicConfig(config: AnisotropicFilterConfig): void;
+
+  /**
+   * 按相机 pitch（度）切换标准 / 各向异性瓦片采样器；仅在跨越阈值时产生一次 `__DEV__` 日志。
+   *
+   * @param pitchDegrees - 相机 pitch，单位度（与 `CameraState.pitch` 弧度不同，调用方需转换）
+   */
+  updatePitchForAnisotropy(pitchDegrees: number): void;
+
+  /**
+   * 返回当前应绑定的瓦片纹理采样器（标准或各向异性）。
+   */
+  getActiveTileSampler(): GPUSampler;
 
   /**
    * 销毁所有纹理和 Atlas。
@@ -248,6 +285,11 @@ const BYTES_PER_PIXEL_RGBA8 = 4;
 /** 默认 Atlas 填充（每侧 padding 像素） */
 const DEFAULT_ATLAS_PADDING = 1;
 
+/** 默认：pitch（度）超过该值启用各向异性瓦片采样。 */
+const DEFAULT_ANISOTROPIC_ACTIVATION_PITCH_DEG = 20;
+/** 默认：请求的各向异性上限（最终受 `GPUDevice.limits.maxTextureMaxAnisotropy` 约束）。 */
+const DEFAULT_ANISOTROPIC_MAX = 16;
+
 /** 建议触发 defrag 的碎片率下限（O7） */
 const DEFRAG_FRAGMENTATION_THRESHOLD = 0.3;
 
@@ -295,6 +337,51 @@ interface AtlasLiveEntry {
 }
 
 // ===================== 辅助函数 =====================
+
+/**
+ * 将输入限制为有限数（GPU 配置用）。
+ *
+ * @param v - 输入
+ * @param fallback - 非有限时的回退值
+ * @returns 有限数
+ */
+function finiteNumberGpu(v: number, fallback: number): number {
+  return Number.isFinite(v) ? v : fallback;
+}
+
+/**
+ * 归一化各向异性配置到合法范围。
+ *
+ * @param config - 调用方输入
+ * @returns 归一化后的配置
+ */
+function normalizeAnisotropicFilterConfig(config: AnisotropicFilterConfig): AnisotropicFilterConfig {
+  return {
+    activationPitch: Math.max(0, finiteNumberGpu(config.activationPitch, DEFAULT_ANISOTROPIC_ACTIVATION_PITCH_DEG)),
+    maxAnisotropy: Math.max(1, Math.min(16, Math.floor(finiteNumberGpu(config.maxAnisotropy, DEFAULT_ANISOTROPIC_MAX)))),
+  };
+}
+
+/**
+ * 获取设备允许的各向异性上限。
+ *
+ * @param device - GPU 设备
+ * @returns ≥1 的整数
+ */
+function getDeviceMaxAnisotropy(device: GPUDevice): number {
+  try {
+    const lim = device.limits as GPUDevice['limits'] & { maxTextureMaxAnisotropy?: number };
+    const v = lim.maxTextureMaxAnisotropy;
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 1) {
+      return Math.floor(v);
+    }
+  } catch (err) {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      console.warn('[TextureManager] getDeviceMaxAnisotropy failed', err);
+    }
+  }
+  return 1;
+}
 
 /**
  * 获取图像源的宽高。
@@ -414,12 +501,185 @@ export function createTextureManager(
   /** 最近一次 defrag 估算回收字节数 */
   let lastReclaimedBytes = 0;
 
+  /** 瓦片采样：线性 + mipmap + clamp（标准，各向异性=1） */
+  let tileSamplerStandard: GPUSampler | null = null;
+  /** 瓦片采样：同上，但 `maxAnisotropy`>1（随配置与设备上限变化） */
+  let tileSamplerAnisotropic: GPUSampler | null = null;
+  /** 已创建的各向异性采样器对应的有效上限（变化时需重建） */
+  let lastBuiltAnisotropyCap = -1;
+  /** 当前各向异性配置 */
+  let anisotropicConfig: AnisotropicFilterConfig = normalizeAnisotropicFilterConfig({
+    activationPitch: DEFAULT_ANISOTROPIC_ACTIVATION_PITCH_DEG,
+    maxAnisotropy: DEFAULT_ANISOTROPIC_MAX,
+  });
+  /** 上一帧是否选用各向异性采样器（用于 `getActiveTileSampler`） */
+  let pitchAnisotropySamplerActive = false;
+  /** 最近一次 `updatePitchForAnisotropy` 报告的倍数（未启用为 1） */
+  let reportedAnisotropy = 1;
+  /** 用于 `__DEV__`：上一帧是否选用各向异性采样器（初值与零 pitch 一致，避免首帧误打日志） */
+  let lastPitchAnisotropySamplerActive = false;
+
   // ==================== 内部方法 ====================
 
   function assertNotDestroyed(): void {
     if (destroyed) {
       throw new Error('[TextureManager] Cannot use a destroyed TextureManager');
     }
+  }
+
+  /**
+   * 懒创建标准与各向异性瓦片采样器；当设备上限或配置变化时重建各向异性实例。
+   */
+  function ensureTileSamplers(): void {
+    assertNotDestroyed();
+    if (!tileSamplerStandard) {
+      try {
+        tileSamplerStandard = gpuDevice.createSampler({
+          label: 'geoforge-tile-sampler-standard',
+          magFilter: 'linear',
+          minFilter: 'linear',
+          mipmapFilter: 'linear',
+          addressModeU: 'clamp-to-edge',
+          addressModeV: 'clamp-to-edge',
+          maxAnisotropy: 1,
+        });
+      } catch (err) {
+        const cause = err instanceof Error ? err : undefined;
+        throw new GeoForgeError(
+          GeoForgeErrorCode.BUFFER_OOM,
+          '[TextureManager] createSampler(standard tile) failed',
+          { stage: 'ensureTileSamplers', kind: 'standard' },
+          cause,
+        );
+      }
+    }
+
+    const deviceCap = getDeviceMaxAnisotropy(gpuDevice);
+    const requested = Math.min(anisotropicConfig.maxAnisotropy, deviceCap);
+    const effectiveCap = Math.max(1, Math.min(16, requested));
+
+    if (tileSamplerAnisotropic && lastBuiltAnisotropyCap === effectiveCap) {
+      return;
+    }
+
+    tileSamplerAnisotropic = null;
+    lastBuiltAnisotropyCap = -1;
+
+    try {
+      tileSamplerAnisotropic = gpuDevice.createSampler({
+        label: 'geoforge-tile-sampler-anisotropic',
+        magFilter: 'linear',
+        minFilter: 'linear',
+        mipmapFilter: 'linear',
+        addressModeU: 'clamp-to-edge',
+        addressModeV: 'clamp-to-edge',
+        maxAnisotropy: effectiveCap,
+      });
+      lastBuiltAnisotropyCap = effectiveCap;
+    } catch (err) {
+      const cause = err instanceof Error ? err : undefined;
+      throw new GeoForgeError(
+        GeoForgeErrorCode.BUFFER_OOM,
+        '[TextureManager] createSampler(anisotropic tile) failed',
+        { stage: 'ensureTileSamplers', kind: 'anisotropic', effectiveCap },
+        cause,
+      );
+    }
+  }
+
+  /**
+   * 写入各向异性配置并确保采样器与之一致。
+   *
+   * @param config - 新配置（整体替换为归一化结果）
+   */
+  function setAnisotropicConfig(config: AnisotropicFilterConfig): void {
+    assertNotDestroyed();
+    try {
+      const prevCap = lastBuiltAnisotropyCap;
+      anisotropicConfig = normalizeAnisotropicFilterConfig(config);
+      const deviceCap = getDeviceMaxAnisotropy(gpuDevice);
+      const requested = Math.min(anisotropicConfig.maxAnisotropy, deviceCap);
+      const effectiveCap = Math.max(1, Math.min(16, requested));
+      if (prevCap !== effectiveCap) {
+        tileSamplerAnisotropic = null;
+        lastBuiltAnisotropyCap = -1;
+      }
+      ensureTileSamplers();
+      reportedAnisotropy = pitchAnisotropySamplerActive ? effectiveCap : 1;
+    } catch (err) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.warn('[TextureManager] setAnisotropicConfig', err);
+      }
+      throw err instanceof GeoForgeError
+        ? err
+        : new GeoForgeError(
+            GeoForgeErrorCode.BUFFER_OOM,
+            '[TextureManager] setAnisotropicConfig failed',
+            {},
+            err instanceof Error ? err : undefined,
+          );
+    }
+  }
+
+  /**
+   * 根据 pitch（度）切换标准 / 各向异性采样路径。
+   *
+   * @param pitchDegrees - pitch，单位度
+   */
+  function updatePitchForAnisotropy(pitchDegrees: number): void {
+    assertNotDestroyed();
+    const pitchDeg = finiteNumberGpu(pitchDegrees, 0);
+    try {
+      ensureTileSamplers();
+    } catch (err) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.warn('[TextureManager] updatePitchForAnisotropy: ensureTileSamplers failed', err);
+      }
+      pitchAnisotropySamplerActive = false;
+      reportedAnisotropy = 1;
+      return;
+    }
+
+    const enabled = pitchDeg > anisotropicConfig.activationPitch;
+    if (lastPitchAnisotropySamplerActive !== enabled) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.info(
+          `[TextureManager] pitch=${pitchDeg.toFixed(2)}° → tile sampler ${enabled ? 'anisotropic' : 'standard'}`,
+        );
+      }
+    }
+    lastPitchAnisotropySamplerActive = enabled;
+    pitchAnisotropySamplerActive = enabled;
+    const deviceCap = getDeviceMaxAnisotropy(gpuDevice);
+    const requested = Math.min(anisotropicConfig.maxAnisotropy, deviceCap);
+    const effectiveCap = Math.max(1, Math.min(16, requested));
+    reportedAnisotropy = enabled ? effectiveCap : 1;
+  }
+
+  /**
+   * 返回当前帧应绑定的瓦片采样器。
+   */
+  function getActiveTileSampler(): GPUSampler {
+    assertNotDestroyed();
+    try {
+      ensureTileSamplers();
+    } catch (err) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.warn('[TextureManager] getActiveTileSampler: fallback standard', err);
+      }
+      throw err instanceof GeoForgeError
+        ? err
+        : new GeoForgeError(
+            GeoForgeErrorCode.BUFFER_OOM,
+            '[TextureManager] getActiveTileSampler failed',
+            {},
+            err instanceof Error ? err : undefined,
+          );
+    }
+    if (pitchAnisotropySamplerActive && tileSamplerAnisotropic) {
+      return tileSamplerAnisotropic;
+    }
+    return tileSamplerStandard as GPUSampler;
   }
 
   /**
@@ -1015,6 +1275,13 @@ export function createTextureManager(
     defragCount = 0;
     lastReclaimedBytes = 0;
 
+    tileSamplerStandard = null;
+    tileSamplerAnisotropic = null;
+    lastBuiltAnisotropyCap = -1;
+    lastPitchAnisotropySamplerActive = false;
+    pitchAnisotropySamplerActive = false;
+    reportedAnisotropy = 1;
+
     destroyed = true;
   }
 
@@ -1029,6 +1296,9 @@ export function createTextureManager(
     defragmentAtlas,
     getFragmentation,
     shouldDefragment,
+    setAnisotropicConfig,
+    updatePitchForAnisotropy,
+    getActiveTileSampler,
 
     get stats() {
       const utilization: Record<string, number> = {};
@@ -1050,6 +1320,8 @@ export function createTextureManager(
         fragmentationByAtlas,
         fragmentation: fragMax,
         reclaimedBytes: lastReclaimedBytes,
+        anisotropicEnabled: pitchAnisotropySamplerActive,
+        currentAnisotropy: reportedAnisotropy,
       };
     },
 
