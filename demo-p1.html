@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GeoForge P1 MVP — Terrain / Globe / ViewMorph / 3DTiles</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        background: #0a0e17;
+        color: #e0e6ed;
+        min-height: 100vh;
+      }
+      header {
+        padding: 14px 24px;
+        background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%);
+        border-bottom: 1px solid #21262d;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      header h1 {
+        font-size: 18px;
+        font-weight: 600;
+        background: linear-gradient(90deg, #58a6ff, #da7cff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      header .badge {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 12px;
+        background: #8b5cf622;
+        color: #da7cff;
+        border: 1px solid #8b5cf644;
+      }
+      .main {
+        display: flex;
+        gap: 0;
+        height: calc(100vh - 48px);
+      }
+      .sidebar {
+        width: 420px;
+        min-width: 420px;
+        background: #0d1117;
+        border-right: 1px solid #21262d;
+        overflow-y: auto;
+        padding: 16px;
+      }
+      .sidebar h2 {
+        font-size: 13px;
+        font-weight: 600;
+        color: #8b949e;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 12px;
+      }
+      #stats {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .stat {
+        font-size: 13px;
+        font-weight: 600;
+        padding: 3px 10px;
+        border-radius: 12px;
+      }
+      .stat.pass { background: #238636; color: #fff; }
+      .stat.fail { background: #da3633; color: #fff; }
+      .stat.total { background: #30363d; color: #c9d1d9; }
+      .test-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        margin-bottom: 3px;
+        line-height: 1.4;
+      }
+      .test-item.pass { color: #3fb950; }
+      .test-item.fail { color: #f85149; background: #f8514910; }
+      .test-item .icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+      .test-item .name { font-weight: 600; min-width: 180px; }
+      .test-item .detail {
+        color: #8b949e;
+        font-family: 'Cascadia Code', 'Fira Code', monospace;
+        font-size: 11px;
+        word-break: break-all;
+      }
+      .canvas-area {
+        flex: 1;
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        overflow-y: auto;
+      }
+      .viz-row {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      .viz-card {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 12px;
+        text-align: center;
+      }
+      .viz-card h3 {
+        font-size: 12px;
+        color: #da7cff;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .viz-card canvas {
+        border-radius: 4px;
+        display: block;
+        image-rendering: pixelated;
+      }
+      .viz-card .caption {
+        font-size: 11px;
+        color: #8b949e;
+        margin-top: 6px;
+      }
+      .info-panel {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 16px 20px;
+        max-width: 800px;
+        width: 100%;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #8b949e;
+      }
+      .info-panel code {
+        background: #1f2937;
+        padding: 1px 5px;
+        border-radius: 3px;
+        font-size: 12px;
+        color: #da7cff;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>GeoForge Engine</h1>
+      <span class="badge">P1 Core 3D MVP</span>
+    </header>
+    <div class="main">
+      <div class="sidebar">
+        <h2>P1 Package Tests</h2>
+        <div id="stats"></div>
+        <div id="test-results"></div>
+      </div>
+      <div class="canvas-area">
+        <div class="viz-row">
+          <div class="viz-card">
+            <h3>Atmosphere Transmittance LUT</h3>
+            <canvas id="lut-canvas" width="128" height="32" style="width:256px; height:64px;"></canvas>
+            <div class="caption">128×32 RGBA — Rayleigh + Mie scattering</div>
+          </div>
+          <div class="viz-card">
+            <h3>Starfield Distribution</h3>
+            <canvas id="star-canvas" width="200" height="200"></canvas>
+            <div class="caption">2000 stars — Marsaglia sphere sampling</div>
+          </div>
+          <div class="viz-card">
+            <h3>WGS84 Ellipsoid Wireframe</h3>
+            <canvas id="globe-canvas" width="200" height="200"></canvas>
+            <div class="caption">16-segment mesh — orthographic projection</div>
+          </div>
+        </div>
+        <div class="info-panel">
+          <p>
+            <strong>P1 Core 3D Packages:</strong>
+            <code>layer-terrain</code> (DEM decode + mesh gen + elevation queries),
+            <code>globe</code> (atmosphere LUT + starfield + sun position + CSM),
+            <code>view-morph</code> (2D↔2.5D↔3D transitions),
+            <code>layer-3dtiles</code> (BVH traversal + SSE + memory management).
+          </p>
+          <p style="margin-top:8px;">
+            Total: 4 packages, ~7,500 lines of TypeScript, 50 public methods, 15 internal structures.
+            Zero npm dependencies. All algorithms self-implemented.
+          </p>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/demo-p1.ts"></script>
+  </body>
+</html>
