@@ -646,6 +646,23 @@ import { createCamera3D } from '../packages/runtime/src/camera-3d.ts';
 import { createViewMorph } from '../packages/runtime/src/view-morph.ts';
 import { initializeL3 } from '../packages/runtime/src/index.ts';
 
+// ============================================================
+// L4 场景层模块导入
+// ============================================================
+
+import { createSceneGraph } from '../packages/scene/src/scene-graph.ts';
+import { createLayerManager, createDefaultLayer } from '../packages/scene/src/layer-manager.ts';
+import { createSourceManager } from '../packages/scene/src/source-manager.ts';
+import { createStyleEngine } from '../packages/scene/src/style-engine.ts';
+import { createFeatureStateManager } from '../packages/scene/src/feature-state.ts';
+import { createLabelManager } from '../packages/scene/src/label-manager.ts';
+import { createGlyphManager } from '../packages/scene/src/glyph-manager.ts';
+import { createAntiMeridianHandler } from '../packages/scene/src/antimeridian.ts';
+import { createAnimationManager } from '../packages/scene/src/animation.ts';
+import { createSpatialQuery } from '../packages/scene/src/spatial-query.ts';
+import { createA11yManager } from '../packages/scene/src/a11y.ts';
+import { initializeL4 } from '../packages/scene/src/index.ts';
+
 /**
  * 运行 L1 层的集成测试。
  * 这些测试需要 WebGPU 可用——在浏览器环境中执行。
@@ -1746,6 +1763,144 @@ async function runL3Tests(): Promise<void> {
 }
 
 // ============================================================
+// 10. L4 场景层模块测试（纯语义层，无需 WebGPU）
+// ============================================================
+
+/**
+ * 运行 L4 场景层的集成测试。
+ * 覆盖 SceneGraph / LayerManager / SourceManager / StyleEngine /
+ * FeatureStateManager / LabelManager / GlyphManager / AntiMeridianHandler /
+ * AnimationManager / SpatialQuery / A11yManager / initializeL4 共 12 个模块。
+ * L4 全部为语义层逻辑，无需 WebGPU。
+ */
+async function runL4Tests(): Promise<void> {
+  // ---- SceneGraph ----
+  group('L4/SceneGraph');
+  test('create and add layer', () => {
+    const sg = createSceneGraph();
+    const layer = createDefaultLayer({ id: 'test', type: 'fill', source: 'src1' });
+    sg.addLayer(layer);
+    assert(sg.getVisibleLayers().length === 1);
+    assert(sg.getActiveProjections().length >= 1);
+  });
+  test('remove layer', () => {
+    const sg = createSceneGraph();
+    const layer = createDefaultLayer({ id: 'rm', type: 'fill', source: 'src1' });
+    sg.addLayer(layer);
+    sg.removeLayer('rm');
+    assert(sg.getVisibleLayers().length === 0);
+  });
+
+  // ---- LayerManager ----
+  group('L4/LayerManager');
+  test('addLayer and getLayer', () => {
+    const lm = createLayerManager();
+    const layer = lm.addLayer({ id: 'lm1', type: 'fill', source: 'src' });
+    assert(layer.id === 'lm1');
+    assert(lm.getLayer('lm1') !== undefined);
+  });
+
+  // ---- SourceManager ----
+  group('L4/SourceManager');
+  await testAsync('add and initialize source', async () => {
+    const sm = createSourceManager();
+    await sm.addSource({ id: 'src1', type: 'vector', url: 'https://example.com/tiles' });
+    const source = sm.getSource('src1');
+    assert(source !== undefined, 'source should exist');
+    assert(source!.id === 'src1');
+  });
+
+  // ---- StyleEngine ----
+  group('L4/StyleEngine');
+  test('compile constant color', () => {
+    const se = createStyleEngine();
+    const result = se.compile('#ff0000');
+    assert(result.wgslCode.length > 0);
+    assert(result.isConstant === true);
+  });
+  test('evaluate expression', () => {
+    const se = createStyleEngine();
+    const val = se.evaluate(42, { zoom: 10 });
+    assert(val === 42);
+  });
+
+  // ---- FeatureStateManager ----
+  group('L4/FeatureStateManager');
+  test('setState and getState', () => {
+    const fs = createFeatureStateManager();
+    fs.setState('source1', 'feat1', { hover: true, selected: false });
+    const state = fs.getState('source1', 'feat1');
+    assert(state !== undefined);
+    assert(state!.hover === true);
+    assert(fs.trackedFeatureCount === 1);
+  });
+
+  // ---- LabelManager ----
+  group('L4/LabelManager');
+  test('submit and resolve', () => {
+    const lm = createLabelManager();
+    lm.submitLabels([{
+      id: 'lb1', layerId: 'layer1', featureId: 'f1', text: 'Hello',
+      position: [400, 300] as const, anchor: 'center' as const, priority: 1,
+      placement: 'point' as const, offset: [0, 0] as const, rotation: 0,
+      allowOverlap: true,
+    }]);
+    const mockCamera = {
+      center: [116.39, 39.91] as [number, number], zoom: 10, bearing: 0, pitch: 0,
+      viewMatrix: new Float32Array(16), projectionMatrix: new Float32Array(16),
+      vpMatrix: new Float32Array(16), inverseVPMatrix: new Float32Array(16),
+      position: new Float32Array(3), altitude: 5000, fov: Math.PI / 4, roll: 0,
+    };
+    const mockVp = { width: 800, height: 600, physicalWidth: 1600, physicalHeight: 1200, pixelRatio: 2 };
+    const placed = lm.resolve(mockCamera, mockVp);
+    assert(placed.length >= 0);
+    assert(lm.stats.totalSubmitted >= 1);
+  });
+
+  // ---- AntiMeridianHandler ----
+  group('L4/AntiMeridianHandler');
+  test('normalizeLongitude', () => {
+    const am = createAntiMeridianHandler();
+    assertApprox(am.normalizeLongitude(200), -160, 0.01);
+    assertApprox(am.normalizeLongitude(-200), 160, 0.01);
+    assertApprox(am.normalizeLongitude(0), 0, 0.01);
+  });
+
+  // ---- AnimationManager ----
+  group('L4/AnimationManager');
+  test('create and update', () => {
+    const am = createAnimationManager();
+    am.update(0.016);
+    assert(am.getActiveAnimations().length === 0);
+  });
+
+  // ---- SpatialQuery ----
+  group('L4/SpatialQuery');
+  test('queryInBBox returns empty', () => {
+    const sq = createSpatialQuery();
+    const results = sq.queryInBBox({ west: 0, south: 0, east: 10, north: 10 });
+    assert(results.length === 0);
+  });
+
+  // ---- initializeL4 集成 ----
+  group('L4/initializeL4');
+  test('full L4 initialization', () => {
+    const l4 = initializeL4();
+    assert(l4.sceneGraph !== null);
+    assert(l4.layerManager !== null);
+    assert(l4.sourceManager !== null);
+    assert(l4.styleEngine !== null);
+    assert(l4.labelManager !== null);
+    assert(l4.glyphManager !== null);
+    assert(l4.featureState !== null);
+    assert(l4.antimeridian !== null);
+    assert(l4.animationManager !== null);
+    assert(l4.spatialQuery !== null);
+    assert(l4.a11y !== null);
+  });
+}
+
+// ============================================================
 // 渲染测试结果到 DOM
 // ============================================================
 
@@ -1777,7 +1932,7 @@ function renderResults(): void {
     <div class="stat"><div class="value" style="color:#3fb950">${totalPass}</div><div class="label">Passed</div></div>
     <div class="stat"><div class="value" style="color:${totalFail > 0 ? '#f85149' : '#3fb950'}">${totalFail}</div><div class="label">Failed</div></div>
     <div class="stat"><div class="value">${allTests.length}</div><div class="label">Modules</div></div>
-    <div class="stat"><div class="value">62</div><div class="label">Total Files</div></div>
+    <div class="stat"><div class="value">74</div><div class="label">Total Files</div></div>
     <div class="stat"><div class="value">0</div><div class="label">Dependencies</div></div>
   `;
 }
@@ -2070,6 +2225,12 @@ async function main(): Promise<void> {
   await runL3Tests();
 
   // 重新渲染结果（包含 L3 测试）
+  renderResults();
+
+  // L4 测试为语义层逻辑，无需 WebGPU
+  await runL4Tests();
+
+  // 重新渲染结果（包含 L4 测试）
   renderResults();
 
   // 启动 WebGPU 渲染演示
