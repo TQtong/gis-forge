@@ -18,7 +18,9 @@ export type {
   MapMouseEvent,
 } from '../../preset-2d/src/map-2d.ts';
 
-export type { Feature, BBox2D, LightSpec } from '@geoforge/core';
+export type { Feature } from '../../core/src/types/feature.ts';
+export type { BBox2D } from '../../core/src/types/math-types.ts';
+export type { LightSpec } from '../../core/src/types/style-spec.ts';
 
 export { Map25D, normalizeBearingDeg, clampPitchDeg, mergeLight } from '../../preset-25d/src/map-25d.ts';
 export type { Map25DOptions } from '../../preset-25d/src/map-25d.ts';

@@ -5,13 +5,13 @@
 // 内部通过 jumpTo/flyTo 与 Map2D 的弧度制相机对齐。
 // ============================================================
 
-import type { LightSpec } from '@geoforge/core';
+import type { LightSpec } from '../../core/src/types/style-spec.ts';
 
 import { GeoForgeError, GeoForgeErrorCode, Map2D } from '../../preset-2d/src/map-2d.ts';
 import type { AnimationOptions, Map2DOptions } from '../../preset-2d/src/map-2d.ts';
 
 // --- 从 L0 再导出光照类型（与 StyleSpec.light 一致） ---
-export type { LightSpec } from '@geoforge/core';
+export type { LightSpec } from '../../core/src/types/style-spec.ts';
 
 /** 默认最大俯仰角（度），对标常见 Web 地图可倾斜上限。 */
 const DEFAULT_MAX_PITCH_DEG = 85;

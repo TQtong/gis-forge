@@ -7,8 +7,9 @@ declare const __DEV__: boolean | undefined;
 // 完整 WebGPU 渲染链路由引擎其他层接入，此处不创建 GPU 资源。
 // ============================================================
 
-import type { BBox2D, Feature } from '@geoforge/core';
-import { uniqueId } from '@geoforge/core';
+import type { BBox2D } from '../../core/src/types/math-types.ts';
+import type { Feature } from '../../core/src/types/feature.ts';
+import { uniqueId } from '../../core/src/infra/id.ts';
 
 import { GeoForgeError, GeoForgeErrorCode } from '../../preset-2d/src/map-2d.ts';
 
