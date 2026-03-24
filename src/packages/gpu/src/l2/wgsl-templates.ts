@@ -5,21 +5,21 @@
 // ============================================================
 
 import depthSortTemplateWgsl from '../wgsl/templates/depth-sort-template.wgsl?raw';
-import fillGradientWgsl from '../wgsl/templates/fill-gradient.wgsl?raw';
-import fillSolidWgsl from '../wgsl/templates/fill-solid.wgsl?raw';
+import fillGradientWgsl from '../wgsl/style/fill-gradient.wgsl?raw';
+import fillSolidWgsl from '../wgsl/style/fill-solid.wgsl?raw';
 import fragmentTemplateWgsl from '../wgsl/templates/fragment-template.wgsl?raw';
 import frustumCullTemplateWgsl from '../wgsl/templates/frustum-cull-template.wgsl?raw';
-import globeWgsl from '../wgsl/templates/globe.wgsl?raw';
-import lineWgsl from '../wgsl/templates/line.wgsl?raw';
-import logDepthRaw from '../wgsl/templates/log-depth.wgsl?raw';
-import mercatorWgsl from '../wgsl/templates/mercator.wgsl?raw';
-import msdfTextRaw from '../wgsl/templates/msdf-text.wgsl?raw';
-import orthoWgsl from '../wgsl/templates/ortho.wgsl?raw';
-import pointWgsl from '../wgsl/templates/point.wgsl?raw';
-import polygonWgsl from '../wgsl/templates/polygon.wgsl?raw';
-import sdfLineWgsl from '../wgsl/templates/sdf-line.wgsl?raw';
-import splitDoubleWgsl from '../wgsl/templates/split-double.wgsl?raw';
-import strokeWgsl from '../wgsl/templates/stroke.wgsl?raw';
+import globeWgsl from '../wgsl/projection/globe.wgsl?raw';
+import lineWgsl from '../wgsl/geometry/line.wgsl?raw';
+import logDepthRaw from '../wgsl/feature/log-depth.wgsl?raw';
+import mercatorWgsl from '../wgsl/projection/mercator.wgsl?raw';
+import msdfTextRaw from '../wgsl/feature/msdf-text.wgsl?raw';
+import orthoWgsl from '../wgsl/projection/ortho.wgsl?raw';
+import pointWgsl from '../wgsl/geometry/point.wgsl?raw';
+import polygonWgsl from '../wgsl/geometry/polygon.wgsl?raw';
+import sdfLineWgsl from '../wgsl/feature/sdf-line.wgsl?raw';
+import splitDoubleWgsl from '../wgsl/feature/split-double.wgsl?raw';
+import strokeWgsl from '../wgsl/style/stroke.wgsl?raw';
 import vertexTemplateWgsl from '../wgsl/templates/vertex-template.wgsl?raw';
 
 /**
