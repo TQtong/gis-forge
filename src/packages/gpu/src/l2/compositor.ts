@@ -8,6 +8,10 @@
 
 import type { DepthManager } from './depth-manager.ts';
 import type { BlendPresets } from './blend-presets.ts';
+import depthUnificationWgsl from '../wgsl/compositor/depth-unification.wgsl?raw';
+import composeHeaderWgsl from '../wgsl/compositor/compose-header.wgsl?raw';
+import oitHeaderWgsl from '../wgsl/compositor/oit-header.wgsl?raw';
+import fullscreenVertexWgsl from '../wgsl/compositor/fullscreen-vertex.wgsl?raw';
 
 // ===================== 常量 =====================
 
@@ -118,37 +122,7 @@ export interface Compositor {
  * @returns 可拼接到主 shader 的 WGSL 字符串
  */
 function buildDepthUnificationWgsl(): string {
-  return `
-const DEPTH_SPACE_REVERSED_Z: u32 = 0u;
-const DEPTH_SPACE_LINEAR: u32 = 1u;
-const DEPTH_SPACE_LOGARITHMIC: u32 = 2u;
-
-fn geoforge_unify_depth_to_view_z(
-  raw_depth: f32,
-  space: u32,
-  near: f32,
-  far: f32,
-  log_c: f32
-) -> f32 {
-  let d = clamp(raw_depth, 0.0, 1.0);
-  let n = max(near, 1e-6);
-  let f_dist = max(far, n + 1e-6);
-  if (space == DEPTH_SPACE_REVERSED_Z) {
-    let denom = max(n + d * (f_dist - n), 1e-6);
-    return (n * f_dist) / denom;
-  }
-  if (space == DEPTH_SPACE_LINEAR) {
-    return n + d * (f_dist - n);
-  }
-  let lc = max(log_c, 1e-6);
-  let t = 1.0 - d;
-  let log_n = log(lc * n + 1.0);
-  let log_f = log(lc * f_dist + 1.0);
-  let log_z = mix(log_n, log_f, t);
-  let z_abs = (exp(log_z) - 1.0) / lc;
-  return clamp(z_abs, n, f_dist);
-}
-`;
+  return depthUnificationWgsl;
 }
 
 /**
@@ -176,39 +150,7 @@ function depthSpaceToU32(space: CompositorInput['depthSpace']): number {
  */
 function buildComposeShaderWgsl(): string {
   const bindings: string[] = [];
-  bindings.push(`
-struct CompositorUniform {
-  count: u32,
-  near: f32,
-  far: f32,
-  log_c: f32,
-  modes_m0: vec4<u32>,
-  modes_m1: vec4<u32>,
-  prios_m0: vec4<f32>,
-  prios_m1: vec4<f32>,
-}
-@group(0) @binding(0) var<uniform> compositor_params: CompositorUniform;
-
-fn comp_get_mode(i: u32) -> u32 {
-  if (i < 4u) {
-    let v = compositor_params.modes_m0;
-    return select(select(select(v.x, v.y, i == 1u), v.z, i == 2u), v.w, i == 3u);
-  }
-  let j = i - 4u;
-  let v = compositor_params.modes_m1;
-  return select(select(select(v.x, v.y, j == 1u), v.z, j == 2u), v.w, j == 3u);
-}
-
-fn comp_get_prio(i: u32) -> f32 {
-  if (i < 4u) {
-    let v = compositor_params.prios_m0;
-    return select(select(select(v.x, v.y, i == 1u), v.z, i == 2u), v.w, i == 3u);
-  }
-  let j = i - 4u;
-  let v = compositor_params.prios_m1;
-  return select(select(select(v.x, v.y, j == 1u), v.z, j == 2u), v.w, j == 3u);
-}
-`);
+  bindings.push(composeHeaderWgsl);
 
   for (let i = 0; i < MAX_COMPOSITOR_INPUTS; i++) {
     bindings.push(`@group(0) @binding(${1 + i}) var tex_color_${i}: texture_2d<f32>;`);
@@ -221,27 +163,7 @@ fn comp_get_prio(i: u32) -> f32 {
   }
 
   const fsParts: string[] = [];
-  fsParts.push(`
-struct VertexOutput {
-  @builtin(position) position: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
-  var positions = array<vec2<f32>, 3>(
-    vec2<f32>(-1.0, -1.0),
-    vec2<f32>(3.0, -1.0),
-    vec2<f32>(-1.0, 3.0),
-  );
-  let pos = positions[vid];
-  let uv = vec2<f32>(pos.x * 0.5 + 0.5, 0.5 - pos.y * 0.5);
-  var out: VertexOutput;
-  out.position = vec4<f32>(pos, 0.0, 1.0);
-  out.uv = uv;
-  return out;
-}
-
+  fsParts.push(`${fullscreenVertexWgsl}
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let dims0 = textureDimensions(tex_color_0);
@@ -300,35 +222,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
  * @returns 完整 shader 源码
  */
 function buildOitShaderComplete(): string {
-  const header = buildDepthUnificationWgsl();
   let b = 3;
   const lines: string[] = [];
-  lines.push(header);
-  lines.push(`
-struct OitUniform {
-  opaque_count: u32,
-  trans_count: u32,
-  near: f32,
-  far: f32,
-  log_c: f32,
-  _pad: u32,
-  trans_m0: vec4<u32>,
-  trans_m1: vec4<u32>,
-}
-@group(0) @binding(0) var<uniform> oit_params: OitUniform;
-@group(0) @binding(1) var tex_background: texture_2d<f32>;
-@group(0) @binding(2) var samp_linear: sampler;
-
-fn oit_get_mode(i: u32) -> u32 {
-  if (i < 4u) {
-    let v = oit_params.trans_m0;
-    return select(select(select(v.x, v.y, i == 1u), v.z, i == 2u), v.w, i == 3u);
-  }
-  let j = i - 4u;
-  let v = oit_params.trans_m1;
-  return select(select(select(v.x, v.y, j == 1u), v.z, j == 2u), v.w, j == 3u);
-}
-`);
+  lines.push(depthUnificationWgsl);
+  lines.push(oitHeaderWgsl);
 
   for (let i = 0; i < MAX_COMPOSITOR_INPUTS; i++) {
     lines.push(`@group(0) @binding(${b + i}) var oit_tc_${i}: texture_2d<f32>;`);
@@ -338,12 +235,7 @@ fn oit_get_mode(i: u32) -> u32 {
     lines.push(`@group(0) @binding(${b + i}) var oit_td_${i}: texture_2d<f32>;`);
   }
 
-  lines.push(`
-struct VO {
-  @builtin(position) position: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-}
-
+  lines.push(`${fullscreenVertexWgsl}
 fn sort8_indices(z: array<f32, ${MAX_COMPOSITOR_INPUTS}>, count: u32) -> array<u32, ${MAX_COMPOSITOR_INPUTS}> {
   var idx: array<u32, ${MAX_COMPOSITOR_INPUTS}>;
   for (var i: u32 = 0u; i < ${MAX_COMPOSITOR_INPUTS}u; i = i + 1u) {
@@ -362,26 +254,11 @@ fn sort8_indices(z: array<f32, ${MAX_COMPOSITOR_INPUTS}>, count: u32) -> array<u
   }
   return idx;
 }
-
-@vertex
-fn vs_oit(@builtin(vertex_index) vid: u32) -> VO {
-  var positions = array<vec2<f32>, 3>(
-    vec2<f32>(-1.0, -1.0),
-    vec2<f32>(3.0, -1.0),
-    vec2<f32>(-1.0, 3.0),
-  );
-  let pos = positions[vid];
-  let uv = vec2<f32>(pos.x * 0.5 + 0.5, 0.5 - pos.y * 0.5);
-  var o: VO;
-  o.position = vec4<f32>(pos, 0.0, 1.0);
-  o.uv = uv;
-  return o;
-}
 `);
 
   let frag = `
 @fragment
-fn fs_oit(in: VO) -> @location(0) vec4<f32> {
+fn fs_oit(in: VertexOutput) -> @location(0) vec4<f32> {
   let dims_bg = textureDimensions(tex_background);
   let coord = vec2<i32>(
     i32(clamp(in.uv.x, 0.0, 1.0) * f32(max(dims_bg.x, 1u) - 1u)),
@@ -726,7 +603,7 @@ export function createCompositor(
       layout: 'auto',
       vertex: {
         module: oitModule,
-        entryPoint: 'vs_oit',
+        entryPoint: 'vs_main',
       },
       fragment: {
         module: oitModule,

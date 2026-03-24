@@ -12,6 +12,9 @@
 
 import type { TextureHandle } from '../l1/texture-manager.ts';
 import { uniqueId } from '../../../core/src/infra/id.ts';
+import logDepthVertexWgsl from '../wgsl/depth/log-depth-vertex.wgsl?raw';
+import logDepthFragmentWgsl from '../wgsl/depth/log-depth-fragment.wgsl?raw';
+import linearizeDepthWgsl from '../wgsl/depth/linearize-depth.wgsl?raw';
 
 // ===================== 常量 =====================
 
@@ -107,30 +110,7 @@ export interface DepthManager {
  * const module = device.createShaderModule({ code: mainShader + wgsl });
  */
 function buildLogDepthVertexWgsl(): string {
-  return `
-/// GeoForge 对数深度参数（放入 uniform buffer，16 字节对齐）。
-struct GeoForgeLogDepthParams {
-  near: f32,
-  far: f32,
-  /// 对数尺度 C，用于 log(C * z + 1)；典型 0.1 ~ 1.0。
-  log_c: f32,
-  _pad: f32,
-}
-
-/// 将标准 clip 向量转为适合 Reversed-Z + 对数深度的 clip。
-/// clip_in 为 projection * model_view * vec4(position,1) 的结果。
-fn geoforge_log_depth_vertex_clip(clip_in: vec4<f32>, p: GeoForgeLogDepthParams) -> vec4<f32> {
-  let w = max(clip_in.w, 1e-6);
-  let z_view = clip_in.z;
-  let z_abs = max(-z_view, p.near);
-  let log_z = log(p.log_c * z_abs + 1.0);
-  let log_n = log(p.log_c * p.near + 1.0);
-  let log_f = log(p.log_c * p.far + 1.0);
-  let t = (log_z - log_n) / max(log_f - log_n, 1e-6);
-  let z_rev = (1.0 - t) * w;
-  return vec4<f32>(clip_in.xy, z_rev, w);
-}
-`;
+  return logDepthVertexWgsl;
 }
 
 /**
@@ -142,13 +122,7 @@ fn geoforge_log_depth_vertex_clip(clip_in: vec4<f32>, p: GeoForgeLogDepthParams)
  * const fragAux = buildLogDepthFragmentWgsl();
  */
 function buildLogDepthFragmentWgsl(): string {
-  return `
-/// 从插值齐次坐标取当前片段的 NDC 深度（Reversed-Z 下近处趋近 1）。
-fn geoforge_log_depth_fragment_ndc_z(clip_pos: vec4<f32>) -> f32 {
-  let w = max(clip_pos.w, 1e-6);
-  return clip_pos.z / w;
-}
-`;
+  return logDepthFragmentWgsl;
 }
 
 /**
@@ -160,33 +134,7 @@ fn geoforge_log_depth_fragment_ndc_z(clip_pos: vec4<f32>) -> f32 {
  * const linearWgsl = buildLinearizeDepthWgsl();
  */
 function buildLinearizeDepthWgsl(): string {
-  return `
-/// 将 Reversed-Z 深度采样（0=远、1=近）还原为视空间正距离。
-/// 适用于未叠加对数扭曲的透视投影；若与 geoforge_log_depth_vertex_clip 联用，
-/// 应优先使用深度纹理中的实际值配合场景统一投影反算。
-fn geoforge_linearize_reversed_z_depth(depth_sample: f32, near: f32, far: f32) -> f32 {
-  let d = clamp(depth_sample, 0.0, 1.0);
-  let denom = max(near + d * (far - near), 1e-6);
-  return (near * far) / denom;
-}
-
-/// 当深度缓冲存储为对数归一化后的 Reversed-Z 时，用标量参数反推视距（避免与顶点片段 struct 重复定义）。
-fn geoforge_linearize_log_reversed_z(
-  depth_sample: f32,
-  near: f32,
-  far: f32,
-  log_c: f32
-) -> f32 {
-  let d = clamp(depth_sample, 0.0, 1.0);
-  let t = 1.0 - d;
-  let lc = max(log_c, 1e-6);
-  let log_n = log(lc * near + 1.0);
-  let log_f = log(lc * far + 1.0);
-  let log_z = mix(log_n, log_f, t);
-  let z_abs = (exp(log_z) - 1.0) / lc;
-  return clamp(z_abs, near, far);
-}
-`;
+  return linearizeDepthWgsl;
 }
 
 // ===================== 内部实现 =====================
