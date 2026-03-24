@@ -101,7 +101,7 @@ packages/
 ```
 完整目录树见 `docs/architecture/GeoForge_Directory_Structure.md`（@GeoForge_Directory_Structure.md）
 
-## 14 条硬约束
+## 20 条硬约束
 1. **先查架构再写代码**——确认模块在七层中的位置
 2. **类型从 L0 import**——Feature/CameraState/PickResult/Viewport/BBox2D/TileCoord/StyleExpression 禁止重定义
 3. **零依赖**——禁止任何 npm 包
@@ -116,6 +116,12 @@ packages/
 12. **bearing 非 heading**——旋转角统一 `bearing`（弧度）
 13. **异步 Picking**——`queryRenderedFeatures` 返回 `Promise<Feature[]>`
 14. **Tree-Shaking**——命名 export，无 default，无顶层副作用
+15. **结构化错误**——所有错误必须使用 `GeoForgeError(code, message, context)`，禁止裸 `throw new Error()`。错误码定义在 `core/infra/errors.ts`
+16. **内部通信走 Bus**——模块间跨层通知使用 `InternalBus.emit/on`，禁止直接方法调用跨模块通知（如 TileScheduler 不直接调用 Layer.onTileLoaded，而是 emit 'tile:loaded'）
+17. **对象池化**——帧循环内的临时对象（CameraState 快照/TileScheduleResult/事件对象/临时 Float32Array）必须使用 `ObjectPool.acquire/release`，禁止每帧 new
+18. **API 稳定性标记**——公共方法必须标注 `@stability stable|experimental|internal`。stable 遵循 semver，experimental 可在 minor 变更，internal 随时可变
+19. **性能预算**——新增渲染功能必须评估对帧时间的影响。超预算功能必须在 `PerformanceManager` 中注册降级路径
+20. **DevTools 可剥离**——所有调试代码通过 `if (__DEV__)` 条件编译包裹，生产构建 tree-shake 移除。禁止在非 `__DEV__` 路径中引用 DevTools
 
 ## 帧循环
 ```
@@ -150,6 +156,42 @@ Shader=模块组合+Variant缓存 | CPU-GPU=流水线并行(N+1/N) | 混合=多P
 
 ## 移动端
 `compat-mobile` 包：能力检测→降质策略→激进 LOD→`powerPreference:'high-performance'`→降渲染分辨率→减后处理 Pass
+
+## 非功能性基础设施（v2.3 新增）
+
+### InternalBus（内部事件总线）
+模块间松耦合通信：`bus.emit('tile:loaded', { sourceId, coord, data })` / `bus.on('tile:loaded', handler)`
+内置事件：tile:loaded/error/evicted、camera:changed/idle、memory:warning/eviction、layer:added/removed、device:lost/restored、frame:begin/end
+
+### GeoForgeError（结构化错误）
+```typescript
+throw new GeoForgeError(GeoForgeErrorCode.SHADER_COMPILE_FAILED, '投影模块语法错误', { layerId, moduleId }, cause);
+// 输出：[GPU_SHADER_COMPILE] 投影模块语法错误 | layerId=buildings | 💡建议：检查 WGSL vec3 对齐到 16 字节
+```
+错误码分组：GPU_(DEVICE_LOST/SHADER_COMPILE/BUFFER_OOM) / DATA_(TILE_LOAD/DECODE/PARSE) / CONFIG_(INVALID_LAYER/UNKNOWN_PROJECTION) / EXT_(INIT/RENDER/DISABLED) / WORKER_(CRASH/TIMEOUT)
+
+### ObjectPool（对象池）
+`acquire() → release()`。帧内临时对象（CameraState 快照/TileScheduleResult/事件对象/临时 TypedArray）禁止 new，必须池化。
+
+### PerformanceManager（自适应降级）
+降级链（连续超预算时按序执行）：关MSAA → 关后处理 → 降分辨率(1.0→0.75→0.5) → 升SSE阈值 → 减标注 → 关大气/阴影。连续达标则反序恢复。
+预算：targetFPS=60 / maxGPUTimeMs=12 / maxJSTimeMs=4 / maxTriangles=2M / maxDrawCalls=200
+
+### DevTools（可剥离调试面板）
+瓦片检查器 / GPU内存分布 / Shader变体列表 / 图层性能 / 帧回放 / 队列状态。全部 `if (__DEV__)` 包裹，生产构建 tree-shake 移除。
+
+### LayerPlugin（图层自描述协议）
+```typescript
+{ type: 's2', workerTasks: [...], shaderModules: [...], createLayer: (spec, ctx) => new S2Layer(spec, ctx) }
+engine.registerPlugin(s2Plugin);  // 一行注册，自动注册 Worker 任务 + Shader 模块
+```
+新增图层从"改 8 个文件"降为"写 1 个文件 + 1 行注册"。
+
+### 依赖约束
+构建时 ESLint 规则 + CI 脚本检查：L0 不依赖任何包，L1 只依赖 L0，... 禁止循环依赖。
+
+### API 稳定性
+@stability stable（semver，不 break）/ experimental（minor 可变）/ internal（随时可变）。废弃流程：标 @deprecated → 下 minor 打 warn → 下 major 删除。
 
 ## Git
 `type(scope): description` — feat/fix/refactor/perf/test/docs/chore

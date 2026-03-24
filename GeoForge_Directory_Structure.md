@@ -101,10 +101,13 @@ geoforge/
 │   │   │       ├── index.ts
 │   │   │       ├── coordinate.ts              # CRS 注册表 + 坐标转换管线（register/transform/transformArray）
 │   │   │       ├── projection.ts              # 投影模块接口定义（ProjectionDef：project/unproject/bounds/wrapsX）
-│   │   │       ├── event.ts                   # 事件总线（on/off/once/emit，typed EventMap）
+│   │   │       ├── event.ts                   # 用户事件总线（on/off/once/emit，typed EventMap）
+│   │   │       ├── internal-bus.ts            # ★ 内部事件总线（tile:loaded/camera:changed/memory:warning 等模块间松耦合通信）
+│   │   │       ├── errors.ts                  # ★ GeoForgeError + GeoForgeErrorCode（结构化错误 + 上下文 + DeveloperHint）
+│   │   │       ├── object-pool.ts             # ★ 通用对象池（acquire/release，帧内临时对象复用）
 │   │   │       ├── id.ts                      # ID 生成器（uniqueId/sequentialId/nanoid-like）
-│   │   │       ├── logger.ts                  # 日志系统（debug/info/warn/error/none 分级，performance.mark 集成）
-│   │   │       └── config.ts                  # EngineConfig 完整定义 + createDefaultConfig()
+│   │   │       ├── logger.ts                  # 日志系统（debug/info/warn/error/none 分级 + DeveloperHint 友好提示）
+│   │   │       └── config.ts                  # EngineConfig 完整定义 + createDefaultConfig() + PerformanceBudget
 │   │   │
 │   │   └── __tests__/
 │   │       ├── math/
@@ -167,7 +170,8 @@ geoforge/
 │   │   │   │   ├── compute-pass-manager.ts    # ComputePassManager（createFrustumCullTask/createDepthSortTask/createLabelCollisionTask/createPointClusterTask/encodeAll）
 │   │   │   │   ├── blend-presets.ts           # BlendPresets（opaque/alphaBlend/premultipliedAlpha/additive/multiply/screen/stencilOnly/custom）
 │   │   │   │   ├── uniform-layout-builder.ts  # UniformLayoutBuilder（WGSL 对齐规则/generateWGSL/UniformWriter）
-│   │   │   │   └── wgsl-templates.ts          # WGSLTemplates（vertexTemplate/fragmentTemplate/computeTemplates + 内置模块：mercator.wgsl/globe.wgsl/split_double.wgsl/log_depth.wgsl/sdf_line.wgsl/msdf_text.wgsl）
+│   │   │   │   ├── wgsl-templates.ts          # WGSLTemplates（vertexTemplate/fragmentTemplate/computeTemplates + 内置模块：mercator.wgsl/globe.wgsl/split_double.wgsl/log_depth.wgsl/sdf_line.wgsl/msdf_text.wgsl）
+│   │   │   │   └── devtools.ts                # ★ DevTools 诊断面板（瓦片检查器/GPU内存分布/Shader变体/图层性能/帧回放，__DEV__ 条件编译可剥离）
 │   │   │   │
 │   │   │   └── wgsl/                          # ── WGSL 着色器源码 ──
 │   │   │       ├── templates/
@@ -223,7 +227,8 @@ geoforge/
 │   │   │   ├── memory-budget.ts               # MemoryBudget（GPU+CPU 双轨/warning 80%/eviction 90%/5 级淘汰链/check/snapshot）
 │   │   │   ├── request-scheduler.ts           # RequestScheduler（5 级优先队列 critical>high>normal>low>prefetch/cancel/指数退避/HTTP2 检测）
 │   │   │   ├── error-recovery.ts              # ErrorRecovery（report/shouldRetry/指数退避+jitter/handleWorkerCrash/handleDeviceLost/markPermanentFailure）
-│   │   │   └── camera-controller.ts           # CameraController 抽象接口（setCenter/setZoom/setBearing/setPitch/jumpTo/flyTo/easeTo/stop/update/handlePan*/handleZoom/handleRotate/惯性/事件）
+│   │   │   ├── camera-controller.ts           # CameraController 抽象接口（setCenter/setZoom/setBearing/setPitch/jumpTo/flyTo/easeTo/stop/update/handlePan*/handleZoom/handleRotate/惯性/事件）
+│   │   │   └── performance-manager.ts         # ★ PerformanceManager 自适应降级（PerformanceBudget/QualityLevel/降级链：MSAA→后处理→分辨率→SSE→标注→大气）
 │   │   │
 │   │   └── __tests__/
 │   │       ├── frame-scheduler.test.ts
@@ -251,7 +256,8 @@ geoforge/
 │   │   │   ├── antimeridian.ts                # AntiMeridianHandler（splitGeometry/splitFeatures/getWorldCopies/normalizeTileCoord/normalizeLongitude）
 │   │   │   ├── animation.ts                   # AnimationManager（animateProperty/flyTo[→CameraController]/setClock/playClock/pauseClock/update/getAnimation/cancelAll）+ Animation + AnimationOptions
 │   │   │   ├── spatial-query.ts               # SpatialQuery（queryAtPoint/queryInRect/queryInBBox/queryInPolygon/queryInRadius/queryNearest/screenToLngLat/lngLatToScreen）+ QueryOptions
-│   │   │   └── a11y.ts                        # A11yManager（键盘导航/ARIA/焦点管理/高对比度/prefers-reduced-motion）
+│   │   │   ├── a11y.ts                        # A11yManager（键盘导航/ARIA/焦点管理/高对比度/prefers-reduced-motion）
+│   │   │   └── layer-plugin.ts                # ★ LayerPlugin 自描述协议（workerTasks+shaderModules+createLayer，一行注册新图层类型）
 │   │   │
 │   │   └── __tests__/
 │   │       ├── scene-graph.test.ts
@@ -583,7 +589,8 @@ geoforge/
 └── scripts/
     ├── build.ts                               # 全量构建脚本
     ├── dev.ts                                 # 开发服务器
-    └── bundle-size.ts                         # 打包体积分析
+    ├── bundle-size.ts                         # 打包体积分析
+    └── check-deps.ts                          # ★ 依赖约束检查（CI 运行，验证每个包只 import 允许的依赖，禁止循环依赖）
 ```
 
 ---
