@@ -12,6 +12,9 @@ import { BufferAnalysis } from '@/components/analysis/BufferAnalysis';
 import { GeoForgeToaster } from '@/components/common/Toast';
 import { MobileTabBar } from '@/components/layout/MobileTabBar';
 import { SettingsDialog } from '@/components/settings/SettingsDialog';
+import { InitLoading } from '@/components/loading/InitLoading';
+import { WebGPUError } from '@/components/loading/WebGPUError';
+import { useGeoForgeMap } from '@/hooks/useGeoForgeMap';
 import { useUrlState } from '@/hooks/useUrlState';
 import { ClassificationDialog } from '@/components/analysis/ClassificationDialog';
 import { ContourAnalysis } from '@/components/analysis/ContourAnalysis';
@@ -28,6 +31,9 @@ import { ViewshedAnalysis } from '@/components/analysis/ViewshedAnalysis';
  */
 export function App() {
     useUrlState();
+
+    const mapContainerRef = useRef<HTMLDivElement>(null);
+    const { status: engineStatus, progress: engineProgress, steps: engineSteps } = useGeoForgeMap(mapContainerRef);
 
     const theme = useUIStore((s) => s.theme);
     const leftPanelCollapsed = useUIStore((s) => s.leftPanelCollapsed);
@@ -118,6 +124,14 @@ export function App() {
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
     }, [toggleLeftPanel, toggleRightPanel, setActiveTool, setHistoryPanelOpen]);
+
+    if (engineStatus === 'unsupported') {
+        return <WebGPUError />;
+    }
+
+    if (engineStatus === 'loading') {
+        return <InitLoading progress={engineProgress} steps={engineSteps} />;
+    }
 
     return (
         <div className="h-screen w-screen overflow-hidden flex flex-col bg-[var(--bg-primary)]">

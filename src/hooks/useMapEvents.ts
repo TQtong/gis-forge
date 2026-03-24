@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import type { Feature } from '@/types';
 import { useMapStore } from '@/stores/mapStore';
 import { useSelectionStore } from '@/stores/selectionStore';
@@ -65,14 +65,12 @@ export function useMapEvents(containerRef: RefObject<HTMLDivElement | null>): {
     contextMenuLngLat: [number, number] | null;
     closeContextMenu: () => void;
 } {
-    const setMouseCoord = useStatusStore((s) => s.setMouseCoord);
     const activeTool = useMapStore((s) => s.activeTool);
     const addSelectedFeature = useSelectionStore((s) => s.addSelectedFeature);
-    const setHoveredFeature = useSelectionStore((s) => s.setHoveredFeature);
 
     const [contextMenuPos, setContextMenuPosState] = useState<ContextMenuClientPos | null>(null);
     const [contextMenuLngLat, setContextMenuLngLat] = useState<[number, number] | null>(null);
-    const [pointerClientPos, setPointerClientPos] = useState<ContextMenuClientPos | null>(null);
+    const pointerClientPosRef = useRef<ContextMenuClientPos | null>(null);
 
     const setContextMenuPos = useCallback((pos: ContextMenuClientPos | null) => {
         setContextMenuPosState(pos);
@@ -88,24 +86,15 @@ export function useMapEvents(containerRef: RefObject<HTMLDivElement | null>): {
 
     const onMouseMove = useCallback(
         (e: MouseEvent) => {
-            const el = containerRef.current;
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            const [lng, lat] = clientToLngLat(el, e.clientX, e.clientY);
-            setMouseCoord([lng, lat]);
-            setPointerClientPos({ x: e.clientX, y: e.clientY });
-
-            const seq = Math.floor(x / 40) + Math.floor(y / 40) * 1000;
-            setHoveredFeature(createMockFeature(lng, lat, seq));
+            pointerClientPosRef.current = { x: e.clientX, y: e.clientY };
         },
-        [containerRef, setHoveredFeature, setMouseCoord],
+        [],
     );
 
     const onMouseLeave = useCallback(() => {
-        setMouseCoord(null);
-    }, [setMouseCoord]);
+        pointerClientPosRef.current = null;
+        useStatusStore.getState().setMouseCoord(null);
+    }, []);
 
     const onClick = useCallback(
         (e: MouseEvent) => {
@@ -144,12 +133,12 @@ export function useMapEvents(containerRef: RefObject<HTMLDivElement | null>): {
             el.removeEventListener('click', onClick);
             el.removeEventListener('contextmenu', onContextMenu);
         };
-    }, [containerRef, onClick, onContextMenu, onMouseLeave, onMouseMove]);
+    }, [containerRef, onClick, onContextMenu, onMouseLeave, onMouseMove, activeTool]);
 
     return {
         contextMenuPos,
         setContextMenuPos,
-        pointerClientPos,
+        pointerClientPos: pointerClientPosRef.current,
         contextMenuLngLat,
         closeContextMenu,
     };

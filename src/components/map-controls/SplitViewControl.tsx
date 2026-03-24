@@ -9,13 +9,13 @@ export function SplitViewControl() {
   const mode = useUIStore((s) => s.splitViewMode);
   const setMode = useUIStore((s) => s.setSplitViewMode);
   const setEnabled = useUIStore((s) => s.setSplitViewEnabled);
-  const layers = useLayerStore((s) => s.getAllLayers());
+  const groups = useLayerStore((s) => s.groups);
 
   if (!enabled) {
     return null;
   }
 
-  const layerOptions = layers.filter((l) => l.visible);
+  const layerOptions = groups.flatMap((g) => g.layers).filter((l) => l.visible);
 
   return (
     <div className="absolute left-0 right-0 top-0 z-20 flex flex-col gap-2 border-b border-[var(--border)] bg-[var(--bg-panel)]/95 px-3 py-2 backdrop-blur-sm">

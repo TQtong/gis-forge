@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactElement } from 'react';
+import { useEffect, useRef, useMemo, type ReactElement, type CSSProperties } from 'react';
 import { FileDragOverlay } from '@/components/map-controls/FileDragOverlay';
 import { MiniMap } from '@/components/map-controls/MiniMap';
 import { TimeSlider } from '@/components/map-controls/TimeSlider';
@@ -12,22 +12,49 @@ import { ZoomControl } from '@/components/map-controls/ZoomControl';
 import { HistoryPanel } from '@/components/history/HistoryPanel';
 import { SplitViewControl } from '@/components/map-controls/SplitViewControl';
 import { ToolHintBar } from '@/components/toolbar/ToolHintBar';
+import { useCanvasMap } from '@/hooks/useCanvasMap';
+import { useGlobeRenderer } from '@/hooks/useGlobeRenderer';
 import { useMapEvents } from '@/hooks/useMapEvents';
 import { useResponsive } from '@/hooks/useResponsive';
 import { useSelectTool } from '@/hooks/useSelectTool';
 import { useMapStore } from '@/stores/mapStore';
+import type { MapViewMode } from '@/stores/mapStore';
 import { useSelectionStore } from '@/stores/selectionStore';
 import { useStatusStore } from '@/stores/statusStore';
 
 /**
  * Central map region: engine canvas container, overlays, initialization message.
  */
+/**
+ * CSS perspective transform style for 2.5D tilt view.
+ * Returns a CSSProperties object to apply on the canvas wrapper.
+ */
+function canvasTransformStyle(mode: MapViewMode): React.CSSProperties {
+    if (mode === '2.5d') {
+        return {
+            transform: 'perspective(1200px) rotateX(40deg) scale(1.15)',
+            transformOrigin: 'center 70%',
+            transition: 'transform 0.6s cubic-bezier(0.4,0,0.2,1)',
+        };
+    }
+    return {
+        transform: 'none',
+        transition: 'transform 0.6s cubic-bezier(0.4,0,0.2,1)',
+    };
+}
+
 export function MapViewport(): ReactElement {
     const breakpoint = useResponsive();
     const containerRef = useRef<HTMLDivElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const globeCanvasRef = useRef<HTMLCanvasElement>(null);
     const hoveredFeature = useSelectionStore((s) => s.hoveredFeature);
     const zoom = useMapStore((s) => s.zoom);
+    const mode = useMapStore((s) => s.mode);
     const setStatusZoom = useStatusStore((s) => s.setZoom);
+
+    useCanvasMap(canvasRef, containerRef);
+    useGlobeRenderer(globeCanvasRef, containerRef, mode === 'globe');
 
     const { pointerClientPos, contextMenuPos, contextMenuLngLat, closeContextMenu } =
         useMapEvents(containerRef);
@@ -37,12 +64,31 @@ export function MapViewport(): ReactElement {
         setStatusZoom(zoom);
     }, [setStatusZoom, zoom]);
 
+    const tileCanvasStyle = useMemo<CSSProperties>(() => canvasTransformStyle(mode), [mode]);
+    const showTileCanvas = mode === '2d' || mode === '2.5d';
+
     return (
         <div
-            className={`w-full h-full relative bg-[#0a0e17] ${breakpoint === 'mobile' ? 'pb-14' : ''}`}
+            className={`w-full h-full relative bg-[#0a0e17] overflow-hidden ${breakpoint === 'mobile' ? 'pb-14' : ''}`}
             ref={containerRef}
         >
-            <div className="absolute inset-0 z-[1]" aria-label="地图画布容器" />
+            <div
+                className="absolute inset-0 z-[1]"
+                style={{ ...tileCanvasStyle, display: showTileCanvas ? 'block' : 'none' }}
+            >
+                <canvas
+                    ref={canvasRef}
+                    className="w-full h-full"
+                    aria-label="地图画布"
+                />
+            </div>
+
+            <canvas
+                ref={globeCanvasRef}
+                className="absolute inset-0 z-[2] w-full h-full"
+                style={{ display: mode === 'globe' ? 'block' : 'none' }}
+                aria-label="地球视图"
+            />
 
             <SplitViewControl />
             <HistoryPanel />
@@ -76,11 +122,6 @@ export function MapViewport(): ReactElement {
             />
 
             <FileDragOverlay containerRef={containerRef} />
-
-            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none gap-2 z-[0]">
-                <p className="text-lg font-medium text-[var(--text-primary)]">🗺️ GeoForge WebGPU Map</p>
-                <p className="text-sm text-[var(--text-muted)]">Initializing...</p>
-            </div>
 
             {selectionBox && selectionBox.width + selectionBox.height > 2 && (
                 <div
