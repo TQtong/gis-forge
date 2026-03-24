@@ -667,6 +667,12 @@ import { createExtensionRegistry } from '../packages/extensions/src/registry.ts'
 import { createExtensionLifecycle } from '../packages/extensions/src/lifecycle.ts';
 import { initializeL5 } from '../packages/extensions/src/index.ts';
 
+import { Map2D } from '../packages/preset-2d/src/map-2d.ts';
+import { NavigationControl, ScaleControl, AttributionControl } from '../packages/preset-2d/src/controls.ts';
+import { Map25D } from '../packages/preset-25d/src/map-25d.ts';
+import { Globe3D } from '../packages/preset-3d/src/globe-3d.ts';
+import { MapFull } from '../packages/preset-full/src/map-full.ts';
+
 /**
  * 运行 L1 层的集成测试。
  * 这些测试需要 WebGPU 可用——在浏览器环境中执行。
@@ -1959,6 +1965,127 @@ async function runL5Tests(): Promise<void> {
 }
 
 // ============================================================
+// 12. L6 预设层模块测试（DOM + 状态，无需完整 WebGPU 链）
+// ============================================================
+
+/**
+ * 运行 L6 预设层集成测试：Map2D / Controls / Map25D / Globe3D / MapFull。
+ */
+async function runL6Tests(): Promise<void> {
+  group('L6/Map2D');
+  test('create Map2D', () => {
+    const container = document.createElement('div');
+    container.style.width = '200px';
+    container.style.height = '150px';
+    document.body.appendChild(container);
+
+    const map = new Map2D({ container, center: [116.39, 39.91], zoom: 10 });
+    assert(map.getCenter()[0] === 116.39, 'center lon');
+    assert(map.getZoom() === 10, 'zoom');
+    assert(map.getCanvas() instanceof HTMLCanvasElement, 'canvas');
+    assert(!map.loaded(), 'not loaded yet');
+
+    map.remove();
+    document.body.removeChild(container);
+  });
+
+  test('jumpTo and setCenter', () => {
+    const container = document.createElement('div');
+    container.style.width = '200px';
+    container.style.height = '150px';
+    document.body.appendChild(container);
+
+    const map = new Map2D({ container });
+    map.jumpTo({ center: [120, 30], zoom: 5 });
+    assertApprox(map.getCenter()[0], 120, 0.01);
+    assertApprox(map.getZoom(), 5, 0.01);
+
+    map.setCenter([100, 40]);
+    assertApprox(map.getCenter()[0], 100, 0.01);
+
+    map.remove();
+    document.body.removeChild(container);
+  });
+
+  test('addLayer and removeLayer', () => {
+    const container = document.createElement('div');
+    container.style.width = '200px';
+    container.style.height = '150px';
+    document.body.appendChild(container);
+
+    const map = new Map2D({ container });
+    map.addSource('test-src', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({ id: 'test-layer', type: 'fill', source: 'test-src' });
+    assert(map.getLayer('test-layer') !== undefined, 'layer exists');
+
+    map.removeLayer('test-layer');
+    assert(map.getLayer('test-layer') === undefined, 'layer removed');
+
+    map.remove();
+    document.body.removeChild(container);
+  });
+
+  group('L6/Controls');
+  test('NavigationControl', () => {
+    const ctrl = new NavigationControl();
+    assert(ctrl !== null);
+  });
+  test('ScaleControl', () => {
+    const ctrl = new ScaleControl({ unit: 'metric' });
+    assert(ctrl !== null);
+  });
+  test('AttributionControl', () => {
+    const ctrl = new AttributionControl();
+    assert(ctrl !== null);
+  });
+
+  group('L6/Map25D');
+  test('create Map25D with pitch/bearing', () => {
+    const container = document.createElement('div');
+    container.style.width = '200px';
+    container.style.height = '150px';
+    document.body.appendChild(container);
+
+    const map = new Map25D({ container, pitch: 45, bearing: 90 });
+    assert(map.getPitch() >= 0, 'has pitch');
+    assert(map.getBearing() >= 0, 'has bearing');
+
+    map.remove();
+    document.body.removeChild(container);
+  });
+
+  group('L6/Globe3D');
+  test('create Globe3D', () => {
+    const container = document.createElement('div');
+    container.style.width = '200px';
+    container.style.height = '150px';
+    document.body.appendChild(container);
+
+    const globe = new Globe3D({ container });
+    const pos = globe.getCameraPosition();
+    assert(typeof pos.lon === 'number', 'has lon');
+    assert(typeof pos.bearing === 'number', 'uses bearing not heading');
+
+    globe.remove();
+    document.body.removeChild(container);
+  });
+
+  group('L6/MapFull');
+  test('create MapFull with mode', () => {
+    const container = document.createElement('div');
+    container.style.width = '200px';
+    container.style.height = '150px';
+    document.body.appendChild(container);
+
+    const map = new MapFull({ container, mode: '2d' });
+    assert(map.currentMode === '2d', 'initial mode');
+
+    map.remove();
+    document.body.removeChild(container);
+  });
+}
+
+// ============================================================
 // 渲染测试结果到 DOM
 // ============================================================
 
@@ -1990,7 +2117,7 @@ function renderResults(): void {
     <div class="stat"><div class="value" style="color:#3fb950">${totalPass}</div><div class="label">Passed</div></div>
     <div class="stat"><div class="value" style="color:${totalFail > 0 ? '#f85149' : '#3fb950'}">${totalFail}</div><div class="label">Failed</div></div>
     <div class="stat"><div class="value">${allTests.length}</div><div class="label">Modules</div></div>
-    <div class="stat"><div class="value">83</div><div class="label">Total Files</div></div>
+    <div class="stat"><div class="value">89</div><div class="label">Total Files</div></div>
     <div class="stat"><div class="value">0</div><div class="label">Dependencies</div></div>
   `;
 }
@@ -2293,6 +2420,9 @@ async function main(): Promise<void> {
 
   // L5 扩展层测试（纯 CPU）
   await runL5Tests();
+  renderResults();
+
+  await runL6Tests();
   renderResults();
 
   // 启动 WebGPU 渲染演示
