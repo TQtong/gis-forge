@@ -663,6 +663,10 @@ import { createSpatialQuery } from '../packages/scene/src/spatial-query.ts';
 import { createA11yManager } from '../packages/scene/src/a11y.ts';
 import { initializeL4 } from '../packages/scene/src/index.ts';
 
+import { createExtensionRegistry } from '../packages/extensions/src/registry.ts';
+import { createExtensionLifecycle } from '../packages/extensions/src/lifecycle.ts';
+import { initializeL5 } from '../packages/extensions/src/index.ts';
+
 /**
  * 运行 L1 层的集成测试。
  * 这些测试需要 WebGPU 可用——在浏览器环境中执行。
@@ -1901,6 +1905,60 @@ async function runL4Tests(): Promise<void> {
 }
 
 // ============================================================
+// 11. L5 扩展层模块测试（纯 CPU，无需 WebGPU）
+// ============================================================
+
+/**
+ * 运行 L5 扩展层的集成测试。
+ * 覆盖 ExtensionRegistry / ExtensionLifecycle / initializeL5。
+ */
+async function runL5Tests(): Promise<void> {
+  group('L5/ExtensionRegistry');
+  test('register and query layer', () => {
+    const reg = createExtensionRegistry();
+    reg.registerLayer('test-layer', () => ({ id: 'test', type: 'custom', render: () => {}, onAdd: () => {}, onRemove: () => {} }));
+    assert(reg.has('layer', 'test-layer'));
+    assert(reg.getLayer('test-layer') !== undefined);
+    assert(reg.listAll().length === 1);
+  });
+  test('register shader hook', () => {
+    const reg = createExtensionRegistry();
+    reg.registerShaderHook('night', { hookPoint: 'fragment_color_after_style', wgslCode: 'color *= 0.3;' });
+    assert(reg.has('shaderHook', 'night'));
+    const hooks = reg.getShaderHooks('fragment_color_after_style');
+    assert(hooks.length >= 1);
+  });
+  test('unregister', () => {
+    const reg = createExtensionRegistry();
+    reg.registerProjection('test-proj', { id: 'test', displayName: 'Test', project: (x: number, y: number) => [x, y] as [number, number], unproject: (x: number, y: number) => [x, y] as [number, number], vertexShaderCode: '', bounds: { west: -180, south: -90, east: 180, north: 90 }, isGlobal: true, requiresDoublePrecision: false, wrapsX: false, antimeridianHandling: 'none' as const });
+    assert(reg.unregister('projection', 'test-proj') === true);
+    assert(!reg.has('projection', 'test-proj'));
+  });
+
+  group('L5/ExtensionLifecycle');
+  test('safeExecute catches errors', () => {
+    const reg = createExtensionRegistry();
+    const lc = createExtensionLifecycle(reg);
+    const result = lc.safeExecute('bad-ext', () => { throw new Error('boom'); }, 42);
+    assert(result === 42, 'should return fallback');
+  });
+  test('checkCompatibility', () => {
+    const reg = createExtensionRegistry();
+    const lc = createExtensionLifecycle(reg);
+    const compat = lc.checkCompatibility({});
+    assert(compat.compatible === true, 'empty meta should be compatible');
+  });
+
+  group('L5/initializeL5');
+  test('full L5 initialization', () => {
+    const l5 = initializeL5();
+    assert(l5.registry !== null);
+    assert(l5.lifecycle !== null);
+    assert(l5.interactionManager !== null);
+  });
+}
+
+// ============================================================
 // 渲染测试结果到 DOM
 // ============================================================
 
@@ -1932,7 +1990,7 @@ function renderResults(): void {
     <div class="stat"><div class="value" style="color:#3fb950">${totalPass}</div><div class="label">Passed</div></div>
     <div class="stat"><div class="value" style="color:${totalFail > 0 ? '#f85149' : '#3fb950'}">${totalFail}</div><div class="label">Failed</div></div>
     <div class="stat"><div class="value">${allTests.length}</div><div class="label">Modules</div></div>
-    <div class="stat"><div class="value">74</div><div class="label">Total Files</div></div>
+    <div class="stat"><div class="value">83</div><div class="label">Total Files</div></div>
     <div class="stat"><div class="value">0</div><div class="label">Dependencies</div></div>
   `;
 }
@@ -2231,6 +2289,10 @@ async function main(): Promise<void> {
   await runL4Tests();
 
   // 重新渲染结果（包含 L4 测试）
+  renderResults();
+
+  // L5 扩展层测试（纯 CPU）
+  await runL5Tests();
   renderResults();
 
   // 启动 WebGPU 渲染演示
