@@ -38,9 +38,6 @@ const DEFAULT_PICKING_COLOR_FORMAT: GPUTextureFormat = 'rgba8unorm';
 /** 后处理输出默认格式。 */
 const DEFAULT_POST_OUTPUT_FORMAT: GPUTextureFormat = 'rgba16float';
 
-/** 屏幕 Pass 清屏颜色（线性空间近似 sRGB 深灰）。 */
-const DEFAULT_SCREEN_CLEAR: GPUColor = { r: 0.08, g: 0.09, b: 0.11, a: 1 };
-
 /** 默认拾取视口像素坐标（未指定时使用视口中心）。 */
 const DEFAULT_PICK_CENTER = 0.5;
 
@@ -331,6 +328,21 @@ function clearAllPasses(graph: RenderGraph): void {
   for (const id of ids) {
     graph.removePass(id);
   }
+}
+
+/**
+ * 断言 FrameGraphBuilder 使用的 {@link RenderGraph} 为 {@link RenderGraphImpl}（含 clearColor 状态）。
+ *
+ * @param graph - 构建器持有的图
+ * @returns 具体实现引用
+ */
+function requireRenderGraphImpl(graph: RenderGraph): RenderGraphImpl {
+  if (!(graph instanceof RenderGraphImpl)) {
+    throw new Error(
+      'FrameGraphBuilder: RenderGraph 必须是 createRenderGraph(device) 返回的 RenderGraphImpl 实例',
+    );
+  }
+  return graph;
 }
 
 /**
@@ -626,7 +638,8 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
     }
     const layers = options.layers ?? [];
     const deps = [...(options.dependencies ?? [])];
-    const cc = options.clearColor ?? [0, 0, 0, 1];
+    const explicitClear = options.clearColor;
+    const graphImpl = requireRenderGraphImpl(this._graph);
     const colorName = `scene-${sid}-color`;
     const depthName = `scene-${sid}-depth`;
     const colorOut: ResourceReference = {
@@ -652,6 +665,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
       execute: (ctx) => {
         const colorView = ctx.getTextureView(colorName);
         const depthView = ctx.getTextureView(depthName);
+        const cc = explicitClear ?? graphImpl.getClearColor();
         const pass = ctx.encoder.beginRenderPass({
           label: `geoforge:scene:${sid}`,
           colorAttachments: [
@@ -746,6 +760,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
     this._canReuse = false;
     const id = `screen-${this._screenSeq++}`;
     const sorted = sortLayers(options.layers ?? []);
+    const graphImpl = requireRenderGraphImpl(this._graph);
     const outRef: ResourceReference = {
       name: SWAPCHAIN_TEXTURE_NAME,
       type: 'texture',
@@ -760,12 +775,13 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
       outputs: [outRef],
       execute: (ctx) => {
         const view = ctx.getTextureView(SWAPCHAIN_TEXTURE_NAME);
+        const cc = graphImpl.getClearColor();
         const pass = ctx.encoder.beginRenderPass({
           label: `geoforge:screen:${id}`,
           colorAttachments: [
             {
               view,
-              clearValue: DEFAULT_SCREEN_CLEAR,
+              clearValue: { r: cc[0], g: cc[1], b: cc[2], a: cc[3] },
               loadOp: 'clear',
               storeOp: 'store',
             },

@@ -14,6 +14,9 @@
 
 import type { CameraState, Viewport } from '../../../core/src/types/viewport.ts';
 
+/** 构建期开发模式；生产构建中 `false` 以 tree-shake 调试分支。 */
+declare const __DEV__: boolean;
+
 // ===================== 常量 =====================
 
 /** 未绑定帧状态时的默认逻辑宽度（像素），避免 0 尺寸纹理创建失败。 */
@@ -40,7 +43,28 @@ export const SWAPCHAIN_TEXTURE_NAME = 'geoforge-swapchain-current';
 /** 内部标记：已合并 Pass 的前缀，便于 DOT / 调试识别。 */
 const MERGED_PASS_PREFIX = 'merged-render::';
 
+/**
+ * 默认帧缓冲清除色（深色主题，线性 RGBA）。
+ * 与 {@link ClearColorConfig.clearColor} 默认一致；地平线以上未绘制区域显示为深蓝灰而非纯黑。
+ */
+export const DEFAULT_CLEAR_COLOR_RGBA: readonly [number, number, number, number] = [
+  0.1, 0.1, 0.18, 1.0,
+];
+
 // ===================== 公共类型 =====================
+
+/**
+ * 帧缓冲清除颜色配置（swapchain / 场景 Pass 的默认 clear）。
+ * 由 {@link RenderGraphImpl.setClearColor} 应用；显式传入 `addSceneRenderPass({ clearColor })` 时仍优先使用每 Pass 覆盖值。
+ */
+export interface ClearColorConfig {
+  /**
+   * 帧缓冲清除颜色（地平线以上 fallback 背景）。
+   * 深色主题默认：[0.10, 0.10, 0.18, 1.0]（#1a1a2e）；浅色主题常用：[0.94, 0.95, 0.96, 1.0]（#f0f2f5）。
+   * 分量线性空间 0~1；启用天空 Pass 后多数像素由天空着色覆盖。
+   */
+  clearColor: [number, number, number, number];
+}
 
 /**
  * RenderGraph 支持的 Pass 种类。
@@ -266,6 +290,19 @@ export interface RenderGraph {
   toDot(): string;
 
   /**
+   * 设置默认帧缓冲清除颜色（RGBA，线性 0~1）。
+   * 影响 {@link FrameGraphBuilder} 中未显式指定 `clearColor` 的场景 Pass 与屏幕 Pass 的 `clearValue`。
+   *
+   * @param color - 四通道颜色；非法分量将被钳制，全无效时回退 {@link DEFAULT_CLEAR_COLOR_RGBA}
+   */
+  setClearColor(color: [number, number, number, number]): void;
+
+  /**
+   * 获取当前默认清除颜色（拷贝元组，调用方可安全修改返回值）。
+   */
+  getClearColor(): [number, number, number, number];
+
+  /**
    * 当前注册的所有 Pass（只读映射）。
    */
   readonly passes: ReadonlyMap<string, RenderPassNode>;
@@ -393,6 +430,31 @@ function sanitizeSize(
   const ww = Number.isFinite(w) && (w as number) > 0 ? Math.floor(w as number) : fallbackW;
   const hh = Number.isFinite(h) && (h as number) > 0 ? Math.floor(h as number) : fallbackH;
   return { width: Math.max(1, ww), height: Math.max(1, hh) };
+}
+
+/**
+ * 将输入 RGBA 钳制到 [0,1]；任一分量非有限则使用默认值对应通道。
+ *
+ * @param color - 四通道输入
+ * @param defaults - 回退默认值（通常为 {@link DEFAULT_CLEAR_COLOR_RGBA}）
+ * @returns 安全 RGBA 元组
+ */
+function sanitizeClearColorTuple(
+  color: [number, number, number, number],
+  defaults: readonly [number, number, number, number]
+): [number, number, number, number] {
+  const clamp01 = (v: number, d: number): number => {
+    if (!Number.isFinite(v)) {
+      return d;
+    }
+    return Math.min(1, Math.max(0, v));
+  };
+  return [
+    clamp01(color[0], defaults[0]),
+    clamp01(color[1], defaults[1]),
+    clamp01(color[2], defaults[2]),
+    clamp01(color[3], defaults[3]),
+  ];
 }
 
 /**
@@ -560,6 +622,17 @@ export class RenderGraphImpl implements RenderGraph {
   private _frame: FrameBinding | null = null;
 
   /**
+   * 默认帧缓冲清除色（swapchain / 场景 Pass 未显式指定 clear 时使用）。
+   * 初始为深色主题 {@link DEFAULT_CLEAR_COLOR_RGBA}。
+   */
+  private _clearColor: [number, number, number, number] = [
+    DEFAULT_CLEAR_COLOR_RGBA[0],
+    DEFAULT_CLEAR_COLOR_RGBA[1],
+    DEFAULT_CLEAR_COLOR_RGBA[2],
+    DEFAULT_CLEAR_COLOR_RGBA[3],
+  ];
+
+  /**
    * 构造 RenderGraph。
    *
    * @param device - WebGPU 设备
@@ -590,6 +663,50 @@ export class RenderGraphImpl implements RenderGraph {
     surface?: FrameBinding['surface']
   ): void {
     this._frame = { camera, viewport, frameIndex, surface };
+  }
+
+  /**
+   * @inheritdoc
+   */
+  setClearColor(color: [number, number, number, number]): void {
+    if (!Array.isArray(color) || color.length < 4) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          'RenderGraphImpl.setClearColor: 需要长度为 4 的 RGBA 元组，已回退默认深色清除色',
+        );
+      }
+      this._clearColor = sanitizeClearColorTuple(
+        [...DEFAULT_CLEAR_COLOR_RGBA] as [number, number, number, number],
+        DEFAULT_CLEAR_COLOR_RGBA,
+      );
+      return;
+    }
+    const allFinite = [color[0], color[1], color[2], color[3]].every((c) => Number.isFinite(c));
+    if (!allFinite) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          'RenderGraphImpl.setClearColor: 存在非有限分量，已按通道回退到默认或钳制到 [0,1]',
+        );
+      }
+    }
+    this._clearColor = sanitizeClearColorTuple(
+      [color[0], color[1], color[2], color[3]],
+      DEFAULT_CLEAR_COLOR_RGBA,
+    );
+  }
+
+  /**
+   * @inheritdoc
+   */
+  getClearColor(): [number, number, number, number] {
+    return [
+      this._clearColor[0],
+      this._clearColor[1],
+      this._clearColor[2],
+      this._clearColor[3],
+    ];
   }
 
   /**

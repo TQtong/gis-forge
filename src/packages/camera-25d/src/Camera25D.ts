@@ -160,6 +160,17 @@ const EPSILON: number = 1e-10;
  */
 const PITCH_NEAR_ZERO_FOR_ZOOM_AROUND: number = 1e-4;
 
+/**
+ * 动态远裁面：pitch 低于此值（弧度）时按近似俯视处理（far = cameraToCenterDist×1.5）。
+ * 约 0.57°；与视口填充文档「pitch < 0.01」一致。
+ */
+const PITCH_NEAR_ZERO_FOR_FAR_PLANE: number = 0.01;
+
+/**
+ * 视锥上边缘与地面相交分支的上界余量（弧度）：与 π/2 保留间隙，避免 `cos(topRayAngle)→0` 除法不稳定。
+ */
+const TOP_RAY_ANGLE_EPS: number = 0.01;
+
 /** 视口最小合法边长（像素），防止零宽/高导致除零 */
 const MIN_VIEWPORT_DIM: number = 1;
 
@@ -1655,43 +1666,18 @@ class Camera25DImpl implements Camera25D {
      * const horizonY = cam.getHorizonY();
      */
     getHorizonY(): number {
-        // pitch=0 时地平线不可见
-        if (this._pitch < EPSILON) {
-            return 0;
-        }
-
         const vpH = this._lastViewportHeight;
-        // 地平线在视口中的归一化位置：
-        // 透视投影中，从视口顶部开始计算，地平线位于
-        // 视口高度的 (1 - cos(pitch) / cos(pitch - fov/2)) 处
-        // 这来自于透视投影的角度关系：
-        // 视锥体顶部射线角度 = pitch - fov/2
-        // 地平线角度 = pitch（视线水平时与地面平行）
-        const halfFov = this._fov * 0.5;
-
-        // 如果 pitch - halfFov >= π/2，整个视口都在地平线以上
-        if (this._pitch - halfFov >= Math.PI * 0.5) {
-            return vpH;
-        }
-
-        // 如果 pitch <= halfFov，地平线在视口上方不可见
-        if (this._pitch <= halfFov) {
+        if (vpH < MIN_VIEWPORT_DIM) {
             return 0;
         }
-
-        // 计算地平线在视口中的位置
-        // 视锥体顶部方向的角度（相对于竖直方向）
-        const topAngle = this._pitch - halfFov;
-        // 地平线方向（正水平）角度 = π/2
-        // 视锥体总张角 = fov
-        // 地平线在视锥体中的归一化位置
-        const horizonAngleFromTop = (Math.PI * 0.5) - topAngle;
-        // 归一化到 [0, 1]，0=视口顶部，1=视口底部
-        const normalizedY = 1.0 - (horizonAngleFromTop / this._fov);
-        // 钳制到合法范围
-        const clampedY = clamp(normalizedY, 0, 1);
-
-        return clampedY * vpH;
+        const normalized = this._computeHorizonY();
+        if (!Number.isFinite(normalized)) {
+            if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.warn('[Camera25D] getHorizonY: _computeHorizonY 非有限，回退 0');
+            }
+            return 0;
+        }
+        return clamp(normalized, 0, 1) * vpH;
     }
 
     /**
@@ -1866,8 +1852,7 @@ class Camera25DImpl implements Camera25D {
      *    eye = center + [-sin(bearing)*sin(pitch)*altitude, cos(bearing)*sin(pitch)*altitude, cos(pitch)*altitude]
      * 3. lookAt(eye, target=[centerPx, centerPy, 0], up=rotate([0,1,0], bearing))
      * 4. perspectiveReversedZ(fov, aspect, near, far)
-     *    near = altitude * 0.1
-     *    far = altitude * (1 + 1/cos(pitch)) * 2
+     *    near = max(cameraToCenterDist×0.01, 10)；far = _computeFarPlane(cameraToCenterDist)
      * 5. VP = P × V, inverseVP = VP^(-1)
      *
      * @param deltaTime - 距上一帧时间差（秒）
@@ -2597,6 +2582,93 @@ class Camera25DImpl implements Camera25D {
     }
 
     /**
+     * 计算地平线在当前视口中的归一化垂直位置（0=顶部，1=底部）。
+     * 基于中心视线与竖直方向夹角及垂直 FOV 的透视关系：`horizonAngle = π/2 - pitch`。
+     *
+     * @returns [0,1] 内归一化 Y；越接近 1 表示地平线越靠近视口底边
+     */
+    private _computeHorizonY(): number {
+        const halfFov = this._fov * 0.5;
+        if (!(halfFov > EPSILON) || !Number.isFinite(halfFov)) {
+            if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.warn('[Camera25D] _computeHorizonY: halfFov 无效，回退 0');
+            }
+            return 0;
+        }
+        const horizonAngle = Math.PI / 2 - this._pitch;
+        if (!Number.isFinite(horizonAngle)) {
+            return 0;
+        }
+        if (horizonAngle >= halfFov) {
+            return 0.0;
+        }
+        if (horizonAngle <= -halfFov) {
+            return 1.0;
+        }
+        const tanHalf = Math.tan(halfFov);
+        if (Math.abs(tanHalf) < EPSILON) {
+            return 0.5;
+        }
+        const tanH = Math.tan(horizonAngle);
+        if (!Number.isFinite(tanH)) {
+            if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.warn('[Camera25D] _computeHorizonY: tan(horizonAngle) 非有限');
+            }
+            return horizonAngle > 0 ? 0 : 1;
+        }
+        return 0.5 - (tanH / tanHalf) * 0.5;
+    }
+
+    /**
+     * 计算动态近裁面距离（Mercator 像素空间，与 eye–target 尺度一致）。
+     * Reversed-Z 下近裁面对应 depth=1.0。
+     *
+     * @param cameraToCenterDist - 相机到地面注视点的直线距离（≈ altPixels）
+     * @returns near 距离，至少为 10 或与距离成比例的下限
+     */
+    private _computeNearPlane(cameraToCenterDist: number): number {
+        const dist = Number.isFinite(cameraToCenterDist) && cameraToCenterDist > 0 ? cameraToCenterDist : 1;
+        return Math.max(dist * 0.01, 10.0);
+    }
+
+    /**
+     * 按俯仰角与视锥几何计算远裁面距离，使倾斜时地面延伸至地平线附近、减少远端裁剪空洞。
+     * 分支：近似俯视；视锥上沿仍与地面相交；上沿指向天空（大 pitch）。
+     *
+     * @param cameraToCenterDist - 相机到地面中心点的距离（Mercator 像素，与 `_rebuildMatrices` 中 altPixels 一致）
+     * @returns far 平面距离（世界单位与投影一致）
+     */
+    private _computeFarPlane(cameraToCenterDist: number): number {
+        const dist = Number.isFinite(cameraToCenterDist) && cameraToCenterDist > EPSILON
+            ? cameraToCenterDist
+            : 1;
+        const halfFov = this._fov * 0.5;
+        const pitch = this._pitch;
+        if (pitch < PITCH_NEAR_ZERO_FOR_FAR_PLANE) {
+            return dist * 1.5;
+        }
+        const topRayAngle = pitch + halfFov;
+        const cosPitch = Math.max(Math.cos(pitch), EPSILON);
+        const cameraHeight = dist * cosPitch;
+        const horizonLimit = Math.PI / 2 - TOP_RAY_ANGLE_EPS;
+        if (topRayAngle < horizonLimit) {
+            const cosTop = Math.cos(topRayAngle);
+            const safeCos = Math.max(Math.abs(cosTop), EPSILON);
+            const groundDist = cameraHeight / safeCos;
+            if (!Number.isFinite(groundDist)) {
+                if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                    console.warn('[Camera25D] _computeFarPlane: groundDist 非有限，使用 pitch 分支');
+                }
+            } else {
+                return Math.max(groundDist * 1.5, dist * 2.0);
+            }
+        }
+        const pitchNormalized = pitch / (Math.PI / 2);
+        const mult = Math.min(2 + pitchNormalized * 98, 100);
+        return dist * mult;
+    }
+
+    /**
      * 重建所有变换矩阵（2.5D 透视投影）。
      *
      * 关键区别于 Camera2D：
@@ -2669,24 +2741,40 @@ class Camera25DImpl implements Camera25D {
             // 构建视图矩阵
             mat4.lookAt(this._mutable.viewMatrix, _eye, _target, _up);
 
-            // 构建投影矩阵：透视 Reversed-Z
+            // 构建投影矩阵：透视 Reversed-Z（near/far 与 eye–target 距离同尺度）
             const aspect = viewport.width / viewport.height;
-            // near 平面距离：海拔的 10%（保证近处不被裁剪）
-            const near = Math.max(altPixels * 0.1, 0.1);
-            // far 平面距离：考虑 pitch 角度的扩展
-            // 高 pitch 时能看到更远的地面，需要更大的 far
-            // 公式：far = altPixels × (1 + 1/cos(pitch)) × 2
-            // 1/cos(pitch) 是倾斜时可见距离的放大因子
-            const pitchFactor = 1.0 + 1.0 / Math.max(cosPitch, EPSILON);
-            const far = altPixels * pitchFactor * 2.0;
-
-            mat4.perspectiveReversedZ(
-                this._mutable.projectionMatrix,
-                this._fov,
-                aspect,
-                near,
-                far,
+            const cameraToCenterDist = Math.max(
+                Math.hypot(offsetBack, offsetUp),
+                EPSILON,
             );
+            const near = this._computeNearPlane(cameraToCenterDist);
+            const far = this._computeFarPlane(cameraToCenterDist);
+            if (!(far > near) || !Number.isFinite(near) || !Number.isFinite(far)) {
+                if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                    console.warn(
+                        '[Camera25D] _rebuildMatrices: near/far 无效，使用 legacy 回退',
+                        { near, far },
+                    );
+                }
+                const fallbackNear = Math.max(altPixels * 0.1, 0.1);
+                const pitchFactor = 1.0 + 1.0 / Math.max(cosPitch, EPSILON);
+                const fallbackFar = altPixels * pitchFactor * 2.0;
+                mat4.perspectiveReversedZ(
+                    this._mutable.projectionMatrix,
+                    this._fov,
+                    aspect,
+                    fallbackNear,
+                    fallbackFar,
+                );
+            } else {
+                mat4.perspectiveReversedZ(
+                    this._mutable.projectionMatrix,
+                    this._fov,
+                    aspect,
+                    near,
+                    far,
+                );
+            }
 
             // VP = P × V
             mat4.multiply(

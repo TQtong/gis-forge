@@ -2,7 +2,7 @@
 // l2/index.ts — L2 渲染层统一导出（Barrel Export）
 // 上层模块通过此文件导入 L2 的所有公共接口。
 //
-// 导出 13 个模块的接口类型和工厂函数：
+// 导出 15 个模块的接口类型和工厂函数（含 SkyRenderer / FogManager）：
 //   1.  BlendPresets          — 混合模式预设
 //   2.  UniformLayoutBuilder  — Uniform 自动布局
 //   3.  WGSLTemplates         — WGSL 模板
@@ -16,6 +16,8 @@
 //   11. PickingEngine         — Color-ID 拾取
 //   12. RenderGraph           — 渲染图 DAG
 //   13. FrameGraphBuilder     — 声明式帧图构建
+//   14. SkyRenderer           — 2.5D 天空渐变
+//   15. FogManager            — 距离雾
 // ============================================================
 
 // --- Module 1: BlendPresets ---
@@ -89,6 +91,7 @@ export { createPickingEngine } from './picking-engine.ts';
 
 // --- Module 12: RenderGraph ---
 export type {
+  ClearColorConfig,
   RenderPassType,
   RenderPassNode,
   ResourceReference,
@@ -96,7 +99,7 @@ export type {
   CompiledRenderGraph,
   RenderGraph,
 } from './render-graph.ts';
-export { createRenderGraph } from './render-graph.ts';
+export { createRenderGraph, DEFAULT_CLEAR_COLOR_RGBA, RenderGraphImpl } from './render-graph.ts';
 
 // --- Module 13: FrameGraphBuilder ---
 export type {
@@ -104,6 +107,20 @@ export type {
   FrameGraphBuilder,
 } from './frame-graph-builder.ts';
 export { createFrameGraphBuilder, computeCameraHash } from './frame-graph-builder.ts';
+
+// --- Module 14: SkyRenderer ---
+export type { SkyConfig, SkyRenderer, SkyUniforms } from './sky-renderer.ts';
+export {
+  SKY_PRESETS,
+  createSkyRenderer,
+  hexToRGBA,
+  smoothstep,
+  computeHorizonYNormalized,
+} from './sky-renderer.ts';
+
+// --- Module 15: Fog ---
+export type { FogConfig, FogManager, FogUniforms } from './fog-config.ts';
+export { createFogManager } from './fog-config.ts';
 
 // ============================================================
 // L2 全局初始化便捷函数
