@@ -2677,14 +2677,15 @@ class Camera25DImpl implements Camera25D {
             const centerPxX = _pxA[0];
             const centerPxY = _pxA[1];
 
-            // 计算等效海拔（Mercator 像素单位）
-            // 使用 Mercator 像素空间中的「高度」：
-            // 将真实海拔（米）转换为 Mercator 像素
-            const altMeters = altitudeFromZoom(z, this._cy);
-            // Mercator 像素尺度 = EARTH_CIRCUMFERENCE / worldSize
-            const worldSize = TILE_SIZE * Math.pow(2, z);
-            const metersPerPixel = Math.max(EARTH_CIRCUMFERENCE / worldSize, EPSILON);
-            const altPixels = altMeters / metersPerPixel;
+            // 计算相机到地面中心的距离（Mercator 像素单位）。
+            // 使等式成立：pitch=0 时透视视图可见范围 === 正交视图可见范围。
+            // 推导：可见高度 = 2 × altPixels × tan(fov/2) = vpH
+            //        ⇒ altPixels = vpH / (2 × tan(fov/2))
+            // 这与 _computeNearZ / _computeFarZ 中的 cameraToCenterDist 一致，
+            // 保证近裁面不会裁切地面几何体。
+            const vpH = Math.max(viewport.height, MIN_VIEWPORT_DIM);
+            const tanHalfFov = Math.max(Math.tan(this._fov / 2), EPSILON);
+            const altPixels = vpH / 2 / tanHalfFov;
 
             // 相机位置计算：
             // 从中心点沿 pitch 方向后退 altPixels 距离
@@ -2786,14 +2787,15 @@ class Camera25DImpl implements Camera25D {
             }
         }
 
-        // 计算海拔（米）
-        const altitude = altitudeFromZoom(z, this._cy);
+        // 计算海拔（米）— 用于 CameraState 元数据（LOD / fog 等）
+        // altitudeFromZoom 给出地理意义上的等效海拔
+        const altitudeMeters = altitudeFromZoom(z, this._cy);
 
         // 世界坐标系下的相机位置（Mercator 米制坐标）
         lngLatToMercator(_mercOut, this._cx, this._cy);
         this._mutable.position[0] = _mercOut[0];
         this._mutable.position[1] = _mercOut[1];
-        this._mutable.position[2] = altitude;
+        this._mutable.position[2] = altitudeMeters;
 
         // 填充标量字段
         this._mutable.center[0] = this._cx;
@@ -2802,7 +2804,7 @@ class Camera25DImpl implements Camera25D {
         this._mutable.bearing = this._bearing;
         this._mutable.pitch = this._pitch;
         this._mutable.roll = 0;
-        this._mutable.altitude = altitude;
+        this._mutable.altitude = altitudeMeters;
         this._mutable.fov = this._fov;
     }
 

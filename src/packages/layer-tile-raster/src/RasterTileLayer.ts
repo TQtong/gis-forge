@@ -991,16 +991,154 @@ function lngLatToWorldPixel(lng: number, lat: number, worldSize: number): [numbe
   return [px, py];
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 屏幕→地面反投影工具函数（Pipeline v2 §3.5 / §4.2 实现）
+// ════════════════════════════════════════════════════════════════════
+
 /**
- * 计算当前相机视口覆盖的瓦片列表。
- * 基于相机 center/zoom 计算视口边界，然后枚举所有被覆盖的瓦片。
+ * 4×4 列主序矩阵 × 4D 齐次向量乘法。
+ * 用于将 NDC 坐标通过 inverseVPMatrix 反投影到世界像素坐标系。
  *
- * @param camera - 当前相机状态
- * @param canvasWidth - CSS 画布宽度
+ * @param m  - 4×4 矩阵（Float32Array[16]，column-major）
+ * @param x  - 齐次向量 x 分量
+ * @param y  - 齐次向量 y 分量
+ * @param z  - 齐次向量 z 分量
+ * @param w  - 齐次向量 w 分量
+ * @returns [rx, ry, rz, rw] 结果四维向量
+ *
+ * @example
+ * const clip = mulMat4Vec4(invVP, ndcX, ndcY, 1.0, 1.0);
+ * const worldX = clip[0] / clip[3];
+ */
+function mulMat4Vec4(
+  m: Float32Array,
+  x: number, y: number, z: number, w: number,
+): [number, number, number, number] {
+  return [
+    m[0] * x + m[4] * y + m[8]  * z + m[12] * w,
+    m[1] * x + m[5] * y + m[9]  * z + m[13] * w,
+    m[2] * x + m[6] * y + m[10] * z + m[14] * w,
+    m[3] * x + m[7] * y + m[11] * z + m[15] * w,
+  ];
+}
+
+/**
+ * 屏幕像素 → 地面世界像素坐标（相机相对坐标系）。
+ *
+ * 将屏幕点通过 inverseVPMatrix 反投影为射线（near/far 两端），
+ * 然后与 z=0 地面平面求交。
+ *
+ * Reversed-Z 约定：近裁面 ndc_z=1，远裁面 ndc_z=0。
+ * 正交投影（2D）同样适用——射线竖直穿过地面，t 恒为正。
+ *
+ * @param sx    - 屏幕 x（CSS 像素）
+ * @param sy    - 屏幕 y（CSS 像素）
+ * @param invVP - 逆 VP 矩阵（Float32Array[16]，column-major）
+ * @param vpW   - 视口宽度（CSS 像素）
+ * @param vpH   - 视口高度（CSS 像素）
+ * @returns 相机相对世界像素坐标 [rx, ry]；射线不与地面相交返回 null
+ *
+ * @example
+ * const ground = screenToGroundRel(400, 300, invVP, 800, 600);
+ * if (ground) { const [rx, ry] = ground; }
+ */
+function screenToGroundRel(
+  sx: number, sy: number,
+  invVP: Float32Array,
+  vpW: number, vpH: number,
+): [number, number] | null {
+  // 屏幕像素 → NDC [-1, 1]
+  const ndcX = (sx / vpW) * 2 - 1;
+  const ndcY = 1 - (sy / vpH) * 2;
+
+  // Reversed-Z: near=1, far=0
+  const a = mulMat4Vec4(invVP, ndcX, ndcY, 1, 1);
+  const b = mulMat4Vec4(invVP, ndcX, ndcY, 0, 1);
+
+  // 透视除法 → 世界坐标（相机相对）
+  const nearX = a[0] / a[3], nearY = a[1] / a[3], nearZ = a[2] / a[3];
+  const farX  = b[0] / b[3], farY  = b[1] / b[3], farZ  = b[2] / b[3];
+
+  // 射线与 z=0 平面求交: P(t) = near + t·(far − near), 令 P.z = 0
+  const dz = farZ - nearZ;
+  /** 平行于地面的射线（dz≈0）无法求交 */
+  if (Math.abs(dz) < 1e-10) { return null; }
+  const t = -nearZ / dz;
+  /** t<0 表示地面在射线反方向——该屏幕点看向天空 */
+  if (t < 0) { return null; }
+
+  return [
+    nearX + t * (farX - nearX),
+    nearY + t * (farY - nearY),
+  ];
+}
+
+/**
+ * 屏幕射线不与地面相交时的兜底——沿射线水平方向延伸到最远可视距离。
+ * 用于 pitch 较大时屏幕上部看向天空/地平线的采样点。
+ *
+ * 策略（Pipeline v2 §3.5 screenToHorizon）：
+ * 取远裁面点与相机位置的水平差向量，归一化后乘 maxDist。
+ * 结果仍为**相机相对**坐标。
+ *
+ * @param sx        - 屏幕 x（CSS 像素）
+ * @param sy        - 屏幕 y（CSS 像素）
+ * @param invVP     - 逆 VP 矩阵
+ * @param vpW       - 视口宽度
+ * @param vpH       - 视口高度
+ * @param camRelX   - 相机在相机相对坐标系中的 x（= position[0] − centerPx）
+ * @param camRelY   - 相机在相机相对坐标系中的 y（= position[1] − centerPy）
+ * @param maxDist   - 最远可视地面距离（世界像素），保守上限
+ * @returns 相机相对世界像素坐标 [rx, ry]
+ */
+function screenToHorizonRel(
+  sx: number, sy: number,
+  invVP: Float32Array,
+  vpW: number, vpH: number,
+  camRelX: number, camRelY: number,
+  maxDist: number,
+): [number, number] {
+  const ndcX = (sx / vpW) * 2 - 1;
+  const ndcY = 1 - (sy / vpH) * 2;
+
+  // 远裁面点（Reversed-Z far = ndc_z=0）
+  const fp = mulMat4Vec4(invVP, ndcX, ndcY, 0, 1);
+  const farX = fp[0] / fp[3];
+  const farY = fp[1] / fp[3];
+
+  // 从相机位置到远裁面点的水平方向
+  const dx = farX - camRelX;
+  const dy = farY - camRelY;
+  const hLen = Math.sqrt(dx * dx + dy * dy);
+
+  // 退化情况（射线几乎垂直）：返回相机正下方
+  if (hLen < 1e-6) { return [camRelX, camRelY]; }
+
+  // 沿水平方向延伸到 maxDist（保守覆盖地平线附近瓦片）
+  const scale = maxDist / hLen;
+  return [
+    camRelX + dx * scale,
+    camRelY + dy * scale,
+  ];
+}
+
+/**
+ * 计算当前相机视口覆盖的瓦片列表（Pipeline v2 §4.2 实现）。
+ *
+ * 算法三步：
+ * 1. 在屏幕边缘均匀采样 20+ 个点，通过 inverseVPMatrix 反投影到地面世界像素坐标。
+ *    → 自动处理 bearing 旋转、pitch 透视、正交/透视投影。
+ * 2. 地面点取 axis-aligned BBox → 瓦片坐标范围（旋转后 BBox 天然是扩大的范围）。
+ * 3. 枚举范围内瓦片，按距中心排序，截断到上限。
+ *
+ * 对于 2D（pitch=0, bearing=0, 正交投影），退化为与旧 BBox 方法完全等价的结果。
+ *
+ * @param camera       - 当前相机状态（包含 inverseVPMatrix / center / zoom / position / fov）
+ * @param canvasWidth  - CSS 画布宽度
  * @param canvasHeight - CSS 画布高度
- * @param minZoom - 图层最小缩放级别
- * @param maxZoom - 图层最大缩放级别（数据源最大级别）
- * @returns 需要的瓦片坐标列表，按距离排序
+ * @param minZoom      - 图层最小缩放级别
+ * @param maxZoom      - 图层最大缩放级别（数据源最大级别）
+ * @returns 需要的瓦片坐标列表，按距中心排序
  */
 function computeCoveringTiles(
   camera: CameraState,
@@ -1014,28 +1152,75 @@ function computeCoveringTiles(
   const tileZ = Math.min(Math.max(Math.floor(zoom), minZoom), maxZoom);
   const n = Math.pow(2, tileZ);
 
-  // 计算世界像素尺寸（使用连续 zoom 以精确定位）
+  // 浮点 worldSize（相机连续 zoom 用于精确像素定位）
   const worldSize = TILE_PIXEL_SIZE * Math.pow(2, zoom);
+
+  // 相机中心的绝对世界像素坐标（camera-relative → absolute 转换基准）
   const [cx, cy] = lngLatToWorldPixel(camera.center[0], camera.center[1], worldSize);
 
-  // 视口半宽半高（像素）
-  const halfW = canvasWidth / 2;
-  const halfH = canvasHeight / 2;
+  // 相机自身在相机相对坐标系中的位置
+  // CameraState.position 是绝对世界像素坐标 [camAbsX, camAbsY, altPixels]
+  const camRelX = camera.position[0] - cx;
+  const camRelY = camera.position[1] - cy;
 
-  // 视口边界（世界像素）
-  const vpLeft = cx - halfW;
-  const vpRight = cx + halfW;
-  const vpTop = cy - halfH;
-  const vpBottom = cy + halfH;
+  // 最远可视地面距离（horizon fallback 用）
+  // cameraToCenterDist ≈ vpH / 2 / tan(fov/2)
+  const tanHalfFov = Math.tan(camera.fov / 2);
+  const cameraToCenterDist = (tanHalfFov > 1e-10)
+    ? canvasHeight / 2 / tanHalfFov
+    : canvasHeight * 10;
+  // 保守取 3 倍 cameraToCenterDist——覆盖 pitch≤70° 的 farZ
+  const maxDist = cameraToCenterDist * 3;
 
-  // 瓦片尺寸（当前缩放级别下一个瓦片的世界像素大小）
+  const invVP = camera.inverseVPMatrix;
+  const W = canvasWidth;
+  const H = canvasHeight;
+
+  // ═══ 步骤 1：屏幕边缘 20+ 个采样点 → 地面世界像素（camera-relative → absolute） ═══
+  // 上边缘 5 点 + 下边缘 5 点 + 左边缘 3 点 + 右边缘 3 点 + 中心 = 17 点
+  // 比四角更密采样，避免凹形可视区域（高 pitch + bearing）遗漏瓦片
+  const screenPts: [number, number][] = [];
+  for (let i = 0; i <= 4; i++) { screenPts.push([W * i / 4, 0]); }
+  for (let i = 0; i <= 4; i++) { screenPts.push([W * i / 4, H]); }
+  for (let i = 1; i <= 3; i++) { screenPts.push([0, H * i / 4]); }
+  for (let i = 1; i <= 3; i++) { screenPts.push([W, H * i / 4]); }
+  screenPts.push([W / 2, H / 2]);
+
+  // 每个屏幕点 → 地面绝对世界像素
+  let minAbsX = Infinity, minAbsY = Infinity;
+  let maxAbsX = -Infinity, maxAbsY = -Infinity;
+
+  for (let pi = 0; pi < screenPts.length; pi++) {
+    const sx = screenPts[pi][0];
+    const sy = screenPts[pi][1];
+
+    // 优先尝试射线-地面求交；高 pitch 上部射线不与地面相交时走 horizon
+    let relPt = screenToGroundRel(sx, sy, invVP, W, H);
+    if (relPt === null) {
+      relPt = screenToHorizonRel(sx, sy, invVP, W, H, camRelX, camRelY, maxDist);
+    }
+
+    // camera-relative → absolute world pixel
+    const absX = relPt[0] + cx;
+    const absY = relPt[1] + cy;
+
+    // 直接累积 min/max（旋转后的 axis-aligned BBox 天然比正交 BBox 大，正确行为）
+    if (absX < minAbsX) { minAbsX = absX; }
+    if (absY < minAbsY) { minAbsY = absY; }
+    if (absX > maxAbsX) { maxAbsX = absX; }
+    if (absY > maxAbsY) { maxAbsY = absY; }
+  }
+
+  // ═══ 步骤 2：地面 BBox → tileZ 级别瓦片坐标范围 ═══
   const tileSizePx = worldSize / n;
+  const minTileX = Math.max(0, Math.floor(minAbsX / tileSizePx));
+  const minTileY = Math.max(0, Math.floor(minAbsY / tileSizePx));
+  const maxTileX = Math.min(n - 1, Math.ceil(maxAbsX / tileSizePx));
+  const maxTileY = Math.min(n - 1, Math.ceil(maxAbsY / tileSizePx));
 
-  // 视口覆盖的瓦片范围
-  const minTileX = Math.max(0, Math.floor(vpLeft / tileSizePx));
-  const maxTileX = Math.min(n - 1, Math.floor(vpRight / tileSizePx));
-  const minTileY = Math.max(0, Math.floor(vpTop / tileSizePx));
-  const maxTileY = Math.min(n - 1, Math.floor(vpBottom / tileSizePx));
+  // ═══ 步骤 3：枚举 + 按距中心排序 + 截断 ═══
+  const centerTileX = cx / tileSizePx;
+  const centerTileY = cy / tileSizePx;
 
   const tiles: TileCoord[] = [];
   for (let ty = minTileY; ty <= maxTileY; ty++) {
@@ -1044,16 +1229,14 @@ function computeCoveringTiles(
     }
   }
 
-  // 按距离相机中心排序（优先加载靠近中心的瓦片）
-  const centerTileX = cx / tileSizePx;
-  const centerTileY = cy / tileSizePx;
+  // 按距离相机中心排序（优先加载靠近中心的瓦片，利于 early-Z 与用户感知）
   tiles.sort((a, b) => {
     const da = (a.x + 0.5 - centerTileX) ** 2 + (a.y + 0.5 - centerTileY) ** 2;
     const db = (b.x + 0.5 - centerTileX) ** 2 + (b.y + 0.5 - centerTileY) ** 2;
     return da - db;
   });
 
-  // 瓦片数上限（父级格子）
+  // 瓦片数上限
   if (tiles.length > MAX_COVERING_TILES) {
     tiles.length = MAX_COVERING_TILES;
   }
@@ -1098,9 +1281,44 @@ function computeViewBBox(
 ): [number, number, number, number] {
   const worldSize = TILE_PIXEL_SIZE * Math.pow(2, camera.zoom);
   const [cx, cy] = lngLatToWorldPixel(camera.center[0], camera.center[1], worldSize);
-  const hw = canvasW / 2;
-  const hh = canvasH / 2;
-  return [cx - hw, cy - hh, cx + hw, cy + hh];
+
+  const invVP = camera.inverseVPMatrix;
+
+  // 相机在 camera-relative 坐标系中的位置（horizon fallback 用）
+  const camRelX = camera.position[0] - cx;
+  const camRelY = camera.position[1] - cy;
+  const tanHalfFov = Math.tan(camera.fov / 2);
+  const cameraToCenterDist = (tanHalfFov > 1e-10)
+    ? canvasH / 2 / tanHalfFov
+    : canvasH * 10;
+  const maxDist = cameraToCenterDist * 3;
+
+  // 采样 4 角 + 4 边中点 + 中心 = 9 点（IoU 节流用，不必像 coveringTiles 那样密）
+  const pts: [number, number][] = [
+    [0, 0], [canvasW, 0], [0, canvasH], [canvasW, canvasH],
+    [canvasW / 2, 0], [canvasW / 2, canvasH],
+    [0, canvasH / 2], [canvasW, canvasH / 2],
+    [canvasW / 2, canvasH / 2],
+  ];
+
+  let minX = Infinity, minY = Infinity;
+  let maxX = -Infinity, maxY = -Infinity;
+
+  for (let i = 0; i < pts.length; i++) {
+    let rel = screenToGroundRel(pts[i][0], pts[i][1], invVP, canvasW, canvasH);
+    if (rel === null) {
+      rel = screenToHorizonRel(pts[i][0], pts[i][1], invVP, canvasW, canvasH, camRelX, camRelY, maxDist);
+    }
+    // camera-relative → absolute
+    const ax = rel[0] + cx;
+    const ay = rel[1] + cy;
+    if (ax < minX) { minX = ax; }
+    if (ay < minY) { minY = ay; }
+    if (ax > maxX) { maxX = ax; }
+    if (ay > maxY) { maxY = ay; }
+  }
+
+  return [minX, minY, maxX, maxY];
 }
 
 /**

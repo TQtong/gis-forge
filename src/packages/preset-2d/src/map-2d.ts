@@ -729,8 +729,8 @@ export class Map2D {
     /** 最大缩放。 */
     private readonly _maxZoom: number;
 
-    /** 主画布元素。 */
-    private readonly _canvas: HTMLCanvasElement;
+    /** 主画布元素。子类（Map25D）需访问以计算 Viewport。 */
+    protected readonly _canvas: HTMLCanvasElement;
 
     /** 容器元素。 */
     private readonly _container: HTMLElement;
@@ -1240,10 +1240,11 @@ export class Map2D {
      * 计算 2D 正交投影相机状态。
      * 使用相机相对坐标系——世界坐标减去相机中心，使顶点值趋近 0，
      * 保证 float32 在高缩放级别下的精度。
+     * Map25D 子类覆盖此方法以生成透视投影矩阵。
      *
      * @returns CameraState 快照
      */
-    private _computeCameraState(): CameraState {
+    protected _computeCameraState(): CameraState {
         const rect = this._canvas.getBoundingClientRect();
         const w = Math.max(1, rect.width);
         const h = Math.max(1, rect.height);

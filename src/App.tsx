@@ -5,7 +5,8 @@ import {
     PanelResizeHandle,
     type ImperativePanelHandle,
 } from 'react-resizable-panels';
-import { Map2D, type MapEvent, type MapMouseEvent } from '@/packages/preset-2d/src/map-2d.ts';
+import { Map25D } from '@/packages/preset-25d/src/map-25d.ts';
+import type { MapEvent, MapMouseEvent } from '@/packages/preset-2d/src/map-2d.ts';
 import type { RasterTileLayer } from '@/packages/layer-tile-raster/src/RasterTileLayer.ts';
 import { InitLoading, WebGPUError } from '@/components/loading';
 import { TopToolbar } from '@/components/layout/TopToolbar';
@@ -29,7 +30,7 @@ function createInitialEngineSteps(): Array<{ label: string; done: boolean }> {
 }
 
 /**
- * 应用壳：顶栏 + 可拖拽三栏 + 底栏状态；主区域为 Map2D + OSM 栅格。
+ * 应用壳：顶栏 + 可拖拽三栏 + 底栏状态；主区域为 Map25D + OSM 栅格瓦片。
  */
 export function App(): React.ReactElement {
     const mapContainerRef = React.useRef<HTMLDivElement | null>(null);
@@ -56,7 +57,7 @@ export function App(): React.ReactElement {
         }
 
         const bootStartedAt = performance.now();
-        let map: Map2D | null = null;
+        let map: Map25D | null = null;
         let teardownMapEvents: (() => void) | undefined;
         let progressTimer: ReturnType<typeof setInterval> | null = null;
         let minimumOverlayTimer: ReturnType<typeof setTimeout> | null = null;
@@ -71,11 +72,14 @@ export function App(): React.ReactElement {
         setEngineProgress(12);
 
         try {
-            map = new Map2D({
+            map = new Map25D({
                 container: el,
                 center: [116.3974, 39.9093],
                 zoom: 10,
-                accessibleTitle: 'GeoForge 二维地图',
+                pitch: 45,
+                bearing: 0,
+                maxPitch: 85,
+                accessibleTitle: 'GeoForge 2.5D 地图',
             });
 
             setEngineSteps((prev) => {
@@ -121,7 +125,13 @@ export function App(): React.ReactElement {
                     setCursorLabel(`${me.lngLat[0].toFixed(4)}, ${me.lngLat[1].toFixed(4)}`);
                 };
                 const onViewChange = (): void => {
-                    setZoomLabel(map!.getZoom().toFixed(2));
+                    if (map === null) {
+                        return;
+                    }
+                    const z = map.getZoom().toFixed(2);
+                    const p = map.getPitch().toFixed(1);
+                    const b = map.getBearing().toFixed(1);
+                    setZoomLabel(`Z${z}  P${p}°  B${b}°`);
                 };
 
                 let fpsSecondStart = performance.now();
@@ -170,7 +180,9 @@ export function App(): React.ReactElement {
                 map.on('move', onViewChange);
                 map.on('render', onRender);
                 map.on('click', onMapClick);
-                setZoomLabel(map.getZoom().toFixed(2));
+
+                onViewChange();
+
                 teardownMapEvents = (): void => {
                     map!.off('mousemove', onPointerMove);
                     map!.off('move', onViewChange);
@@ -201,7 +213,7 @@ export function App(): React.ReactElement {
             if (progressTimer !== null) {
                 clearInterval(progressTimer);
             }
-            console.error('[App] Map2D 初始化失败', err);
+            console.error('[App] Map25D 初始化失败', err);
             setEngineProgress(100);
             setEngineStatus('ready');
             return;
