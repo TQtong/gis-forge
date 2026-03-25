@@ -1,11 +1,16 @@
 /**
- * useWebGPUMap — WebGPU-based 2.5D tile renderer for GeoForge.
+ * useWebGPUMap — Unified WebGPU tile renderer for ALL GeoForge view modes.
  *
- * Replaces the Canvas 2D path for 2.5D mode with a real GPU pipeline:
- *   - Perspective camera via {@link computeCamera25D} (from useCamera25D)
+ * Renders 2D, 2.5D, and Globe modes through a single WebGPU pipeline.
+ * The only difference between modes is the camera matrices:
+ *   - **2D**: Orthographic projection (pixel-perfect flat map)
+ *   - **2.5D**: Perspective camera via {@link computeCamera} (pitch = 35°)
+ *   - **Globe**: Perspective camera with pitch = 0 (Mercator placeholder)
+ *
+ * Pipeline stages:
  *   - Frustum-culled, LOD-aware tiles via {@link coveringTiles}
  *   - Batched vertex upload + per-tile texture bind-group switching
- *   - Distance fog to mask the horizon
+ *   - Distance fog to mask the horizon (2.5D) or no fog (2D/globe)
  *
  * The hook owns the full lifecycle: adapter → device → pipeline → frame loop → cleanup.
  *
@@ -18,7 +23,7 @@ import type { RefObject } from 'react';
 import { useMapStore } from '@/stores/mapStore';
 import { useStatusStore } from '@/stores/statusStore';
 import {
-    computeCamera25D,
+    computeCamera,
     coveringTiles,
     TILE_SIZE,
 } from '@/hooks/useCamera25D';
@@ -31,7 +36,7 @@ import tileShaderSource from '@/packages/gpu/src/wgsl/tile-25d.wgsl?raw';
 
 /**
  * Pitch for 2.5D rendering in radians (35° ≈ 0.6109 rad).
- * Matches the value used by the Canvas 2D 2.5D path in useCanvasMap.
+ * Provides a good sense of perspective without extreme foreshortening.
  */
 const PITCH_25D_RAD = 35 * Math.PI / 180;
 
@@ -718,33 +723,31 @@ function destroyResources(res: PipelineResources): void {
 // ═══════════════════════════════════════════════════════════
 
 /**
- * Manages the full WebGPU 2.5D tile rendering pipeline as a React hook.
+ * Manages the unified WebGPU tile rendering pipeline as a React hook.
  *
- * When `active` transitions to `true`:
+ * Always active — renders whichever mode (`2d`, `2.5d`, `globe`) is current
+ * in `mapStore`. On mount:
  *   1. Bootstraps WebGPU (adapter → device → pipeline → buffers)
  *   2. Starts a `requestAnimationFrame` loop that reads mapStore state,
- *      computes the perspective camera, determines visible tiles, uploads
- *      vertex data in one batch, and draws each tile with its texture.
+ *      computes the mode-appropriate camera, determines visible tiles,
+ *      uploads vertex data in one batch, and draws each tile with its texture.
  *   3. Handles container resize (depth texture + context reconfigure).
  *
- * When `active` transitions to `false` or the component unmounts:
- *   All GPU resources are destroyed and the frame loop is cancelled.
+ * On unmount: all GPU resources are destroyed and the frame loop is cancelled.
  *
- * @param canvasRef    - Ref to the dedicated WebGPU `<canvas>` element.
+ * @param canvasRef    - Ref to the single WebGPU `<canvas>` element.
  * @param containerRef - Ref to the container `<div>` (for ResizeObserver).
- * @param active       - `true` only when the view mode is '2.5d'.
  * @returns `{ status, error? }` reflecting the current lifecycle state.
  *
  * @stability experimental
  *
  * @example
- * const webgpuStatus = useWebGPUMap(webgpuCanvasRef, containerRef, mode === '2.5d');
+ * const webgpuStatus = useWebGPUMap(webgpuCanvasRef, containerRef);
  * if (webgpuStatus.status === 'error') console.warn(webgpuStatus.error);
  */
 export function useWebGPUMap(
     canvasRef: RefObject<HTMLCanvasElement | null>,
     containerRef: RefObject<HTMLDivElement | null>,
-    active: boolean,
 ): WebGPUMapStatus {
     const [status, setStatus] = useState<WebGPUMapStatus>({ status: 'unsupported' });
 
@@ -762,17 +765,6 @@ export function useWebGPUMap(
     const vertexScratchRef = useRef(new Float32Array(MAX_TILES_PER_FRAME * VERTS_PER_TILE * FLOATS_PER_VERTEX));
 
     useEffect(() => {
-        /* ── Guard: not active or DOM not ready ── */
-        if (!active) {
-            /* If we were previously initialised, tear down */
-            if (resRef.current) {
-                cancelAnimationFrame(rafIdRef.current);
-                destroyResources(resRef.current);
-                resRef.current = null;
-            }
-            return;
-        }
-
         const canvas = canvasRef.current;
         const container = containerRef.current;
         if (!canvas || !container) return;
@@ -850,17 +842,20 @@ export function useWebGPUMap(
                 rafIdRef.current = requestAnimationFrame(renderFrame);
 
                 /* ── 1. Map state snapshot ── */
-                const { center, zoom, bearing } = useMapStore.getState();
+                const { center, zoom, bearing, mode } = useMapStore.getState();
                 const c = canvasRef.current;
                 if (!c) return;
                 const viewport = { width: c.width, height: c.height };
 
-                /* ── 2. Camera ── */
-                const camera: Camera25DState = computeCamera25D(
+                /* ── 2. Camera (mode-dependent) ── */
+                const pitch = mode === '2.5d' ? PITCH_25D_RAD : 0;
+                const bear = mode === '2.5d' ? (bearing || BEARING_25D) : 0;
+                const camera: Camera25DState = computeCamera(
+                    mode,
                     center,
                     zoom,
-                    PITCH_25D_RAD,
-                    bearing || BEARING_25D,
+                    pitch,
+                    bear,
                     FOV_25D,
                     viewport,
                 );
@@ -1063,7 +1058,7 @@ export function useWebGPUMap(
                 resRef.current = null;
             }
         };
-    }, [active, canvasRef, containerRef]);
+    }, [canvasRef, containerRef]);
 
     return status;
 }

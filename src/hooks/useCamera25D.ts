@@ -806,13 +806,165 @@ function coveringTiles(camera: Camera25DState): TileID[] {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Orthographic projection  (2D mode)
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Orthographic projection matrix mapping Z to [0, 1] (WebGPU convention).
+ *
+ * Column-major layout:
+ * ```
+ * col0         col1         col2         col3
+ * 2/(r-l)       0            0            0
+ *  0          2/(t-b)        0            0
+ *  0            0         -1/(f-n)        0
+ * -(r+l)/(r-l) -(t+b)/(t-b) -n/(f-n)     1
+ * ```
+ *
+ * @param out - Destination Float32Array[16].
+ * @param l   - Left clip plane (world units).
+ * @param r   - Right clip plane (world units).
+ * @param b   - Bottom clip plane (world units).
+ * @param t   - Top clip plane (world units).
+ * @param n   - Near clip distance.
+ * @param f   - Far clip distance (must differ from `n`).
+ * @returns `out` for chaining.
+ *
+ * @example
+ * const m = mat4_orthoZO(new Float32Array(16), -500, 500, -400, 400, -1, 1);
+ */
+function mat4_orthoZO(
+    out: Float32Array,
+    l: number,
+    r: number,
+    b: number,
+    t: number,
+    n: number,
+    f: number,
+): Float32Array {
+    out.fill(0);
+    out[0] = 2 / (r - l);          // col0.x
+    out[5] = 2 / (t - b);          // col1.y
+    out[10] = -1 / (f - n);        // col2.z  (maps Z linearly into [0,1])
+    out[12] = -(r + l) / (r - l);  // col3.x  (translation X)
+    out[13] = -(t + b) / (t - b);  // col3.y  (translation Y)
+    out[14] = -n / (f - n);        // col3.z  (translation Z)
+    out[15] = 1;                    // col3.w
+    return out;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Unified camera  (all modes)
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Compute the camera state appropriate for any view mode.
+ *
+ * Mode behaviour:
+ *   - **'2d'**: Orthographic projection, pitch = 0, bearing = 0.
+ *     The camera looks straight down and the ortho extents are sized
+ *     so that 1 world-pixel = 1 screen-pixel (pixel-perfect tiles).
+ *   - **'2.5d'**: Perspective projection via {@link computeCamera25D}.
+ *   - **'globe'**: Perspective projection via {@link computeCamera25D}
+ *     with pitch = 0 as a Mercator placeholder (full ECEF sphere is future work).
+ *
+ * @param mode     - View mode: `'2d'`, `'2.5d'`, or `'globe'`.
+ * @param center   - [lng, lat] in degrees.
+ * @param zoom     - Fractional zoom level.
+ * @param pitch    - Tilt in radians (ignored for '2d' mode, forced to 0).
+ * @param bearing  - Rotation in radians (ignored for '2d' mode, forced to 0).
+ * @param fov      - Vertical FOV in radians (used by 2.5d/globe perspective).
+ * @param viewport - { width, height } in pixels.
+ * @returns Complete {@link Camera25DState} usable by the render loop.
+ *
+ * @stability experimental
+ *
+ * @example
+ * const cam = computeCamera('2d', [116, 39], 12, 0, 0, 0.6435, { width: 1024, height: 768 });
+ */
+function computeCamera(
+    mode: '2d' | '2.5d' | 'globe',
+    center: [number, number],
+    zoom: number,
+    pitch: number,
+    bearing: number,
+    fov: number,
+    viewport: Viewport,
+): Camera25DState {
+
+    if (mode === '2d') {
+        /* ── Orthographic: pixel-perfect flat map ── */
+        const worldSize = TILE_SIZE * Math.pow(2, zoom);
+        const [centerWX, centerWY] = lngLatToWorld(center[0], center[1], worldSize);
+
+        /* Half viewport extents in world-pixel units */
+        const halfW = viewport.width / 2;
+        const halfH = viewport.height / 2;
+
+        /* Ortho bounds — note: Web Mercator Y increases downward,
+           so "top" (smaller Y) = centerWY - halfH, "bottom" = centerWY + halfH.
+           However the ortho matrix expects top < bottom for upright rendering
+           when the camera looks down the -Z axis with Y-up. Because our world
+           coordinate system has Y-down (Mercator), we flip: top gets the larger
+           worldY and bottom gets the smaller worldY. This produces the correct
+           NDC orientation in the shader without any extra flips. */
+        const left   = centerWX - halfW;
+        const right  = centerWX + halfW;
+        const bottom = centerWY + halfH;
+        const top    = centerWY - halfH;
+
+        const nearZ = -1;
+        const farZ  = 1;
+
+        /* Projection: orthographic */
+        const projMatrix = new Float32Array(16);
+        mat4_orthoZO(projMatrix, left, right, bottom, top, nearZ, farZ);
+
+        /* View: identity — camera is already centered via the ortho extents */
+        const viewMatrix = new Float32Array(16);
+        viewMatrix[0] = 1; viewMatrix[5] = 1; viewMatrix[10] = 1; viewMatrix[15] = 1;
+
+        /* VP = proj × view = proj (since view is identity) */
+        const vpMatrix = new Float32Array(16);
+        vpMatrix.set(projMatrix);
+
+        /* Inverse VP */
+        const inverseVP = new Float32Array(16);
+        mat4_invert(inverseVP, vpMatrix);
+
+        /* Camera position: directly above center at z = 1 (arbitrary, tiles are at z = 0) */
+        const cameraPosition: [number, number, number] = [centerWX, centerWY, 1];
+
+        /* cameraToCenterDist: vertical distance from camera to ground = 1 */
+        const cameraToCenterDist = 1;
+
+        return {
+            projMatrix, viewMatrix, vpMatrix, inverseVP,
+            nearZ, farZ, cameraToCenterDist,
+            cameraPosition, worldSize,
+            center, zoom, pitch: 0, bearing: 0, fov, viewport,
+        };
+    }
+
+    if (mode === 'globe') {
+        /* Globe placeholder: same Mercator pipeline with pitch = 0.
+           Future ECEF sphere model will replace this. */
+        return computeCamera25D(center, zoom, 0, 0, fov, viewport);
+    }
+
+    /* ── 2.5D: full perspective camera ── */
+    return computeCamera25D(center, zoom, pitch, bearing, fov, viewport);
+}
+
+// ═══════════════════════════════════════════════════════════
 // Public exports
 // ═══════════════════════════════════════════════════════════
 
-export type { Camera25DState, TileID };
+export type { Camera25DState, TileID, Viewport };
 
 export {
     TILE_SIZE,
+    computeCamera,
     computeCamera25D,
     coveringTiles,
     screenToWorld,
