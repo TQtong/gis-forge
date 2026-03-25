@@ -5,9 +5,7 @@ import {
     PanelResizeHandle,
     type ImperativePanelHandle,
 } from 'react-resizable-panels';
-import { Map25D } from '@/packages/preset-25d/src/map-25d.ts';
-import type { MapEvent, MapMouseEvent } from '@/packages/preset-2d/src/map-2d.ts';
-import type { RasterTileLayer } from '@/packages/layer-tile-raster/src/RasterTileLayer.ts';
+import { Globe3D } from '@/packages/preset-3d/src/globe-3d.ts';
 import { InitLoading, WebGPUError } from '@/components/loading';
 import { TopToolbar } from '@/components/layout/TopToolbar';
 import { LeftPanel } from '@/components/layout/LeftPanel';
@@ -30,7 +28,7 @@ function createInitialEngineSteps(): Array<{ label: string; done: boolean }> {
 }
 
 /**
- * 应用壳：顶栏 + 可拖拽三栏 + 底栏状态；主区域为 Map25D + OSM 栅格瓦片。
+ * 应用壳：顶栏 + 可拖拽三栏 + 底栏状态；主区域为 Globe3D + OSM 栅格瓦片。
  */
 export function App(): React.ReactElement {
     const mapContainerRef = React.useRef<HTMLDivElement | null>(null);
@@ -57,8 +55,8 @@ export function App(): React.ReactElement {
         }
 
         const bootStartedAt = performance.now();
-        let map: Map25D | null = null;
-        let teardownMapEvents: (() => void) | undefined;
+        let globe: Globe3D | null = null;
+        let teardownGlobeEvents: (() => void) | undefined;
         let progressTimer: ReturnType<typeof setInterval> | null = null;
         let minimumOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -72,14 +70,19 @@ export function App(): React.ReactElement {
         setEngineProgress(12);
 
         try {
-            map = new Map25D({
+            globe = new Globe3D({
                 container: el,
                 center: [116.3974, 39.9093],
-                zoom: 10,
-                pitch: 45,
+                altitude: 2_000_000,
                 bearing: 0,
-                maxPitch: 85,
-                accessibleTitle: 'GeoForge 2.5D 地图',
+                pitch: -30,
+                atmosphere: true,
+                skybox: true,
+                enableRotate: true,
+                enableZoom: true,
+                enableTilt: true,
+                maxPixelRatio: 2,
+                accessibleTitle: 'GeoForge 3D Globe',
             });
 
             setEngineSteps((prev) => {
@@ -91,56 +94,37 @@ export function App(): React.ReactElement {
             });
             setEngineProgress(35);
 
-            map.addSource('osm-raster', {
-                type: 'raster',
-                tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-                tileSize: 256,
-                maxzoom: 19,
-                attribution: '© OpenStreetMap contributors',
-            });
-
-            map.addLayer({
-                id: 'osm-tiles',
-                type: 'raster',
-                source: 'osm-raster',
-                paint: {
-                    'raster-opacity': 1,
-                    'raster-fade-duration': 300,
-                },
+            // 添加 OSM 栅格瓦片底图
+            globe.addImageryLayer({
+                url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                type: 'xyz',
+                alpha: 1,
             });
 
             progressTimer = setInterval(() => {
                 setEngineProgress((p) => (p >= 90 ? p : p + 2));
             }, 150);
 
-            const wireMapEvents = (): void => {
-                if (map === null) {
-                    return;
-                }
-                const onPointerMove = (ev: MapEvent | MapMouseEvent): void => {
-                    if (ev.type !== 'mousemove') {
-                        return;
-                    }
-                    const me = ev as MapMouseEvent;
-                    setCursorLabel(`${me.lngLat[0].toFixed(4)}, ${me.lngLat[1].toFixed(4)}`);
-                };
+            const wireGlobeEvents = (): void => {
+                if (globe === null) { return; }
+
+                // 视图变化时更新状态栏
                 const onViewChange = (): void => {
-                    if (map === null) {
-                        return;
-                    }
-                    const z = map.getZoom().toFixed(2);
-                    const p = map.getPitch().toFixed(1);
-                    const b = map.getBearing().toFixed(1);
-                    setZoomLabel(`Z${z}  P${p}°  B${b}°`);
+                    if (globe === null) { return; }
+                    const z = globe.getZoom().toFixed(2);
+                    const p = globe.getPitch().toFixed(1);
+                    const b = globe.getBearing().toFixed(1);
+                    const pos = globe.getCameraPosition();
+                    const altKm = (pos.alt / 1000).toFixed(0);
+                    setZoomLabel(`Z${z}  P${p}°  B${b}°  Alt${altKm}km`);
                 };
 
+                // FPS 计数
                 let fpsSecondStart = performance.now();
                 let fpsCountInSecond = 0;
 
                 const onRender = (): void => {
-                    if (map === null) {
-                        return;
-                    }
+                    if (globe === null) { return; }
                     const now = performance.now();
                     fpsCountInSecond++;
                     const elapsed = now - fpsSecondStart;
@@ -149,52 +133,22 @@ export function App(): React.ReactElement {
                         fpsCountInSecond = 0;
                         fpsSecondStart = now;
                     }
-
-                    let visibleTiles = 0;
-                    let cacheBytes = 0;
-                    for (const layer of map.scene.layers.values()) {
-                        if (layer.type !== 'raster') {
-                            continue;
-                        }
-                        const rl = layer as RasterTileLayer;
-                        visibleTiles += rl.visibleTiles;
-                        const data =
-                            typeof rl.getData === 'function'
-                                ? (rl.getData() as { cacheBytes?: number })
-                                : {};
-                        cacheBytes += typeof data.cacheBytes === 'number' ? data.cacheBytes : 0;
-                    }
-                    setTileCountLabel(String(visibleTiles));
-                    setMemLabel((cacheBytes / (1024 * 1024)).toFixed(1));
                 };
 
-                const onMapClick = (ev: MapEvent | MapMouseEvent): void => {
-                    if (ev.type !== 'click') {
-                        return;
-                    }
-                    const me = ev as MapMouseEvent;
-                    console.info('[App] map click', me.lngLat[0], me.lngLat[1]);
-                };
+                globe.on('move', onViewChange);
+                globe.on('render', onRender);
 
-                map.on('mousemove', onPointerMove);
-                map.on('move', onViewChange);
-                map.on('render', onRender);
-                map.on('click', onMapClick);
-
+                // 初始更新状态栏
                 onViewChange();
 
-                teardownMapEvents = (): void => {
-                    map!.off('mousemove', onPointerMove);
-                    map!.off('move', onViewChange);
-                    map!.off('render', onRender);
-                    map!.off('click', onMapClick);
+                teardownGlobeEvents = (): void => {
+                    globe!.off('move', onViewChange);
+                    globe!.off('render', onRender);
                 };
             };
 
-            void map.ready().then(() => {
-                if (map === null) {
-                    return;
-                }
+            void globe.ready().then(() => {
+                if (globe === null) { return; }
                 const elapsed = performance.now() - bootStartedAt;
                 const remaining = Math.max(0, MIN_LOADING_SCREEN_MS - elapsed);
                 minimumOverlayTimer = setTimeout(() => {
@@ -206,14 +160,14 @@ export function App(): React.ReactElement {
                     setEngineProgress(100);
                     setEngineSteps((prev) => prev.map((s) => ({ ...s, done: true })));
                     setEngineStatus('ready');
-                    wireMapEvents();
+                    wireGlobeEvents();
                 }, remaining);
             });
         } catch (err) {
             if (progressTimer !== null) {
                 clearInterval(progressTimer);
             }
-            console.error('[App] Map25D 初始化失败', err);
+            console.error('[App] Globe3D 初始化失败', err);
             setEngineProgress(100);
             setEngineStatus('ready');
             return;
@@ -226,13 +180,13 @@ export function App(): React.ReactElement {
             if (minimumOverlayTimer !== null) {
                 clearTimeout(minimumOverlayTimer);
             }
-            teardownMapEvents?.();
+            teardownGlobeEvents?.();
             try {
-                map?.remove();
+                globe?.remove();
             } catch {
                 // ignore
             }
-            map = null;
+            globe = null;
         };
     }, []);
 

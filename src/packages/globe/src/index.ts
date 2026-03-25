@@ -20,3 +20,20 @@ export type { SkyboxRenderer, SkyboxRendererOptions, SkyboxRenderContext } from 
 // --- 太阳位置计算 ---
 export { computeSunPosition } from './sun.ts';
 export type { SunPosition } from './sun.ts';
+
+// --- 3D Globe 瓦片网格 + 覆盖算法 ---
+export {
+    getSegments,
+    tessellateGlobeTile,
+    meshToRTE,
+    screenToGlobe,
+    isTileVisible_Horizon,
+    isTileVisible_Frustum,
+    coveringTilesGlobe,
+    computeMorphFactor,
+    computeMorphVertices,
+    lngToTileX,
+    latToTileY,
+    tileYToLat,
+} from './globe-tile-mesh.ts';
+export type { GlobeTileMesh, GlobeTileID, GlobeCamera } from './globe-tile-mesh.ts';
