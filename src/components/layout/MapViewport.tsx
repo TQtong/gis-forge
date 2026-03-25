@@ -14,6 +14,7 @@ import { SplitViewControl } from '@/components/map-controls/SplitViewControl';
 import { ToolHintBar } from '@/components/toolbar/ToolHintBar';
 import { useCanvasMap } from '@/hooks/useCanvasMap';
 import { useGlobeRenderer } from '@/hooks/useGlobeRenderer';
+import { useWebGPUMap } from '@/hooks/useWebGPUMap';
 import { useMapEvents } from '@/hooks/useMapEvents';
 import { useResponsive } from '@/hooks/useResponsive';
 import { useSelectTool } from '@/hooks/useSelectTool';
@@ -42,6 +43,7 @@ export function MapViewport(): ReactElement {
     const containerRef = useRef<HTMLDivElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const globeCanvasRef = useRef<HTMLCanvasElement>(null);
+    const webgpuCanvasRef = useRef<HTMLCanvasElement>(null);
     const hoveredFeature = useSelectionStore((s) => s.hoveredFeature);
     const zoom = useMapStore((s) => s.zoom);
     const mode = useMapStore((s) => s.mode);
@@ -49,6 +51,7 @@ export function MapViewport(): ReactElement {
 
     useCanvasMap(canvasRef, containerRef);
     useGlobeRenderer(globeCanvasRef, containerRef, mode === 'globe');
+    const webgpuStatus = useWebGPUMap(webgpuCanvasRef, containerRef, mode === '2.5d');
 
     const { pointerClientPos, contextMenuPos, contextMenuLngLat, closeContextMenu } =
         useMapEvents(containerRef);
@@ -59,7 +62,7 @@ export function MapViewport(): ReactElement {
     }, [setStatusZoom, zoom]);
 
     const tileCanvasStyle = useMemo<CSSProperties>(() => canvasTransformStyle(mode), [mode]);
-    const showTileCanvas = mode === '2d' || mode === '2.5d';
+    const showTileCanvas = mode === '2d' || (mode === '2.5d' && webgpuStatus.status === 'unsupported');
 
     return (
         <div
@@ -82,6 +85,13 @@ export function MapViewport(): ReactElement {
                 className="absolute inset-0 z-[2] w-full h-full"
                 style={{ display: mode === 'globe' ? 'block' : 'none' }}
                 aria-label="地球视图"
+            />
+
+            <canvas
+                ref={webgpuCanvasRef}
+                className="absolute inset-0 z-[1] w-full h-full"
+                style={{ display: mode === '2.5d' && webgpuStatus.status !== 'unsupported' ? 'block' : 'none' }}
+                aria-label="2.5D WebGPU 地图"
             />
 
             <SplitViewControl />
