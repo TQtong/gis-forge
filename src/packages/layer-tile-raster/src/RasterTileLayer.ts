@@ -162,6 +162,54 @@ const MAX_RETRY_COUNT = 3;
 /** 重试基础延迟 (ms) */
 const RETRY_BASE_DELAY_MS = 1000;
 
+/**
+ * 栅格图层默认 overzoom 配置。
+ * 允许超出数据源最大 zoom 最多 6 级，使用 'scale' 策略（缩放父级瓦片子区域）。
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §零
+ */
+const DEFAULT_RASTER_OVERZOOM_STRATEGY = 'scale' as const;
+const DEFAULT_RASTER_MAX_OVERZOOM = 6;
+const DEFAULT_RASTER_MAX_UNDERZOOM = 0;
+
+/**
+ * 矢量图层默认 overzoom 配置（保留用于将来的矢量图层支持）。
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §零
+ */
+const DEFAULT_VECTOR_MAX_OVERZOOM = 10;
+
+/**
+ * AncestorProber 最大缓存条目数（missing + exists 之和），超出后粗粒度清理一半。
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §二
+ */
+const ANCESTOR_PROBER_MAX_SIZE = 2000;
+
+/**
+ * 安全最大显示 zoom 上限。
+ * MapLibre 上限 24，此处扩展到 28 以支持极限 overzoom 场景。
+ * 防止 2^z 溢出精度（2^28 ≈ 2.68 亿，远在 float64 安全整数范围内）。
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+ */
+const MAX_DISPLAY_ZOOM_CAP = 28;
+
+/**
+ * AncestorProber.findAncestor 默认最大回溯级数。
+ * 在稀疏金字塔中最多向上搜索 8 级寻找有数据的祖先。
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §二
+ */
+const PROBER_MAX_LEVELS_UP = 8;
+
+/**
+ * Cohen-Sutherland 线段裁剪最大迭代次数——防止极端退化情况下死循环。
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §三
+ */
+const CLIP_MAX_ITERATIONS = 20;
+
+/**
+ * 裁剪连续性判断阈值——两个端点距离小于此值时视为连续。
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §三
+ */
+const CLIP_CONTINUITY_EPSILON = 1e-10;
+
 // ---------------------------------------------------------------------------
 // 内联 WGSL 着色器源码
 // ---------------------------------------------------------------------------
@@ -332,6 +380,101 @@ interface StyleUniformData {
 }
 
 // ---------------------------------------------------------------------------
+// Overzoom 类型定义
+// ---------------------------------------------------------------------------
+
+/**
+ * 数据源的 zoom 范围。
+ * minNativeZoom 和 maxNativeZoom 表示数据源实际提供瓦片的级别范围。
+ * 超出此范围的 zoom 需要 overzoom（向上缩放）或 underzoom（向下缩放）处理。
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §零
+ */
+interface TileSourceZoomRange {
+  /** 数据源最小原生 zoom，默认 0。有些数据源不提供低 zoom 级别的瓦片。 */
+  readonly minNativeZoom: number;
+  /** 数据源最大原生 zoom，默认 22。这是数据源实际能返回瓦片的最高级别。 */
+  readonly maxNativeZoom: number;
+}
+
+/**
+ * 图层 overzoom 配置（只读，不可变）。
+ * 控制当相机 zoom 超出数据源原生范围时的行为。
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §零
+ */
+interface OverzoomConfig {
+  /**
+   * overzoom 策略：
+   * - 'scale': 缩放显示父级瓦片的子区域（默认，栅格地图最常用）
+   * - 'transparent': 超出范围显示透明（适合叠加图层）
+   * - 'none': 完全不处理 overzoom（适合聚类层等不允许跨 zoom 的场景）
+   */
+  readonly overzoomStrategy: 'scale' | 'transparent' | 'none';
+  /** 最大允许的 overzoom 级数（栅格默认 6，矢量默认 10） */
+  readonly maxOverzoom: number;
+  /** 最大允许的 underzoom 级数（默认 0，即不允许 underzoom） */
+  readonly maxUnderzoom: number;
+}
+
+/**
+ * Overzoom 解析结果——将"显示需要的瓦片"映射为"实际请求的瓦片 + UV 子区域"。
+ * 当 displayZ > maxNativeZoom 时，requestZ 被 clamp 到 maxNativeZoom，
+ * uvOffset/uvScale 指示从该请求瓦片中取哪个子区域来渲染 display 位置。
+ *
+ * @example
+ * // 数据源 maxNativeZoom=14，相机 zoom=18，瓦片 x=200003 y=150001
+ * // shift=4, requestZ=14, requestX=12500, requestY=9375
+ * // uvOffset=[3/16, 1/16], uvScale=[1/16, 1/16]
+ * // → 请求 14/12500/9375，渲染第 4 列第 2 行的 1/16 子区域
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+ */
+interface ResolvedTile {
+  /** 实际请求的瓦片 zoom（≤ maxNativeZoom） */
+  readonly requestZ: number;
+  /** 实际请求的瓦片列号 */
+  readonly requestX: number;
+  /** 实际请求的瓦片行号 */
+  readonly requestY: number;
+  /** 实际请求的瓦片键 "z/x/y"——用于缓存查找和请求调度 */
+  readonly requestKey: string;
+  /** 目标显示位置 zoom（可能 > maxNativeZoom，是用户看到的 zoom） */
+  readonly displayZ: number;
+  /** 目标显示位置列号 */
+  readonly displayX: number;
+  /** 目标显示位置行号 */
+  readonly displayY: number;
+  /** 目标显示位置键 "z/x/y"——用于可见性去重 */
+  readonly displayKey: string;
+  /** UV 子区域偏移 [0,0]=完整瓦片（非 overzoom 时） */
+  readonly uvOffset: [number, number];
+  /** UV 子区域缩放 [1,1]=完整瓦片（非 overzoom 时） */
+  readonly uvScale: [number, number];
+  /** 是否处于 overzoom 状态（displayZ ≠ requestZ） */
+  readonly isOverzoomed: boolean;
+  /** overzoom 级数 = |displayZ - requestZ|，0 = 正常模式 */
+  readonly overzoomLevels: number;
+}
+
+/**
+ * 矢量瓦片特征（用于矢量瓦片 overzoom 几何裁剪）。
+ * 坐标归一化到 [0, 1] 范围（瓦片内部坐标系）。
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §三
+ */
+interface VectorFeature {
+  /** 几何类型——Point / LineString / Polygon */
+  readonly type: 'Point' | 'LineString' | 'Polygon';
+  /** 坐标数组，Point: [[x,y]], Line: [[x,y],...], Polygon: [[x,y],...] */
+  readonly geometry: number[][];
+  /** 属性键值对 */
+  readonly properties: Record<string, unknown>;
+  /** 所属矢量图层名 */
+  readonly layer: string;
+}
+
+// ---------------------------------------------------------------------------
 // RasterTileLayerOptions（外部配置接口）
 // ---------------------------------------------------------------------------
 
@@ -368,6 +511,37 @@ export interface RasterTileLayerOptions {
   readonly fadeDuration?: number;
   /** 投影标识，默认 'mercator' */
   readonly projection?: string;
+  /**
+   * 数据源最小原生 zoom（有些源不提供低 zoom 瓦片），默认等于 minzoom。
+   * 当 camera.zoom < minNativeZoom 时触发 underzoom（缩小显示 minNativeZoom 瓦片）。
+   * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+   */
+  readonly minNativeZoom?: number;
+  /**
+   * 数据源最大原生 zoom（源实际提供瓦片的最高级别），默认等于 maxzoom。
+   * 当 camera.zoom > maxNativeZoom 时触发 overzoom（放大显示子区域）。
+   * 注意与 maxzoom 不同：maxzoom 控制图层最大可见级别，maxNativeZoom 控制数据源边界。
+   * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+   */
+  readonly maxNativeZoom?: number;
+  /**
+   * Overzoom 配置，控制超出数据源 zoom 范围时的行为。
+   * 部分字段可省略，未指定的字段使用默认值 { strategy:'scale', maxOverzoom:6, maxUnderzoom:0 }。
+   * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+   */
+  readonly overzoom?: Partial<OverzoomConfig>;
+  /**
+   * Zoom fade-in 范围——图层在 [start, end] 范围内从透明渐变为不透明。
+   * 用于多图层平滑切换（如位图→矢量过渡）。
+   * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §四
+   */
+  readonly fadeInZoom?: { readonly start: number; readonly end: number };
+  /**
+   * Zoom fade-out 范围——图层在 [start, end] 范围内从不透明渐变为透明。
+   * 用于多图层平滑切换。
+   * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §四
+   */
+  readonly fadeOutZoom?: { readonly start: number; readonly end: number };
   /** paint 属性 */
   readonly paint?: Record<string, unknown>;
   /** layout 属性 */
@@ -392,6 +566,10 @@ export interface RasterTileLayer extends Layer {
   readonly loadingTiles: number;
   /** 缓存总瓦片数 */
   readonly cachedTileCount: number;
+  /** 当前是否处于 overzoom 状态（camera.zoom > maxNativeZoom） */
+  readonly isOverzoomed: boolean;
+  /** 当前 overzoom 级数（0 = 正常，>0 = overzoom 中） */
+  readonly currentOverzoomLevels: number;
 
   setBrightness(value: number): void;
   getBrightness(): number;
@@ -620,6 +798,138 @@ class TileCache {
       }
       cursor = next;
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AncestorProber——动态稀疏金字塔探测器
+// ---------------------------------------------------------------------------
+
+/**
+ * 动态记录哪些瓦片有数据、哪些缺失，在请求失败时自动向上查找有数据的祖先。
+ *
+ * 与 findAncestor 的职责分离：
+ *   - findAncestor = 在 **缓存** 中搜索最近的就绪祖先（基于 TileCache 内容）
+ *   - AncestorProber = 基于 **实际 HTTP 响应** 记录哪些坐标有数据/缺失，
+ *     在请求失败时跳过已知缺失的祖先，减少无效请求
+ *
+ * 典型场景（MapLibre #111/#5692）：
+ *   稀疏数据源只在部分区域有高 zoom 瓦片，其他区域 404。
+ *   AncestorProber 记住 404 的位置，下次直接跳到有数据的祖先。
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §二
+ */
+class AncestorProber {
+  /** 已知缺失的瓦片坐标键集合 */
+  private readonly missing = new Set<string>();
+  /** 已知存在的瓦片坐标键集合 */
+  private readonly exists = new Set<string>();
+  /** 两个集合大小之和的上限，超出后触发粗粒度清理 */
+  private readonly maxCacheSize: number;
+
+  /**
+   * @param maxCacheSize - 最大缓存条目数，默认 ANCESTOR_PROBER_MAX_SIZE
+   */
+  constructor(maxCacheSize = ANCESTOR_PROBER_MAX_SIZE) {
+    this.maxCacheSize = maxCacheSize;
+  }
+
+  /**
+   * 标记瓦片有数据（HTTP 200 + 非空响应体）。
+   * 同时从 missing 中移除（状态可能从缺失变为存在，如稀疏数据源更新）。
+   *
+   * @param z - zoom 级别
+   * @param x - 列号
+   * @param y - 行号
+   */
+  markExists(z: number, x: number, y: number): void {
+    const key = `${z}/${x}/${y}`;
+    this.exists.add(key);
+    this.missing.delete(key);
+    this.trimIfNeeded();
+  }
+
+  /**
+   * 标记瓦片缺失（HTTP 404 / 204 / 空响应 / 永久错误）。
+   * 同时从 exists 中移除。
+   *
+   * @param z - zoom 级别
+   * @param x - 列号
+   * @param y - 行号
+   */
+  markMissing(z: number, x: number, y: number): void {
+    const key = `${z}/${x}/${y}`;
+    this.missing.add(key);
+    this.exists.delete(key);
+    this.trimIfNeeded();
+  }
+
+  /**
+   * 查找最近的有数据祖先，跳过已知缺失的级别。
+   * 返回 ResolvedTile（含 UV 子区域映射），或 null（所有祖先均缺失或超出搜索深度）。
+   *
+   * 搜索逻辑：
+   *   - 已知 missing → 跳过，继续向上
+   *   - 已知 exists → 返回该祖先（带 UV 子区域）
+   *   - 未知（不在 missing 也不在 exists）→ 返回该祖先（需要请求验证）
+   *
+   * @param z - 起始 zoom
+   * @param x - 起始列号
+   * @param y - 起始行号
+   * @param maxLevelsUp - 最大向上搜索级数，默认 PROBER_MAX_LEVELS_UP
+   * @returns ResolvedTile 或 null
+   */
+  findAncestor(z: number, x: number, y: number, maxLevelsUp = PROBER_MAX_LEVELS_UP): ResolvedTile | null {
+    let pz = z - 1;
+    let px = x >> 1;
+    let py = y >> 1;
+
+    while (pz >= 0 && (z - pz) <= maxLevelsUp) {
+      const pKey = `${pz}/${px}/${py}`;
+
+      if (this.missing.has(pKey)) {
+        // 已知缺失，跳过继续向上
+        pz--;
+        px >>= 1;
+        py >>= 1;
+        continue;
+      }
+
+      // 已知存在 或 未知（需要请求验证）→ 返回这个祖先
+      return makeResolvedTileWithUV(z, x, y, pz, px, py, z - pz);
+    }
+
+    return null;
+  }
+
+  /**
+   * 防止无限增长——当 missing + exists 总数超过 maxCacheSize 时，
+   * 各清理一半条目。简单粗暴但足够有效（Set 遍历顺序近似插入顺序）。
+   */
+  private trimIfNeeded(): void {
+    const total = this.missing.size + this.exists.size;
+    if (total <= this.maxCacheSize) {
+      return;
+    }
+    const half = this.maxCacheSize >> 1;
+    let count = 0;
+    for (const k of this.missing) {
+      if (count++ >= half) { break; }
+      this.missing.delete(k);
+    }
+    count = 0;
+    for (const k of this.exists) {
+      if (count++ >= half) { break; }
+      this.exists.delete(k);
+    }
+  }
+
+  /**
+   * 销毁探测器，清空所有记录。
+   */
+  destroy(): void {
+    this.missing.clear();
+    this.exists.clear();
   }
 }
 
@@ -969,6 +1279,700 @@ function classifyError(err: unknown): 'transient' | 'permanent' | 'ignore' {
 }
 
 // ---------------------------------------------------------------------------
+// Overzoom 纯函数
+// ---------------------------------------------------------------------------
+
+/**
+ * 校验并返回规范化后的 overzoom 配置。不修改输入对象。
+ * 修复 Leaflet #3004（maxNativeZoom=0 作为 falsy 被忽略）和
+ * Leaflet #5644（min > max 自动交换）等边界情况。
+ *
+ * @param source - 数据源 zoom 范围
+ * @param config - 用户 overzoom 配置（可能含非法值）
+ * @returns 规范化后的 { source, config }
+ *
+ * @example
+ * normalizeOverzoomConfig(
+ *   { minNativeZoom: 0, maxNativeZoom: 18 },
+ *   { overzoomStrategy: 'scale', maxOverzoom: 6, maxUnderzoom: 0 },
+ * );
+ * // → { source: { minNativeZoom: 0, maxNativeZoom: 18 },
+ * //     config: { overzoomStrategy: 'scale', maxOverzoom: 6, maxUnderzoom: 0 } }
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+ */
+function normalizeOverzoomConfig(
+  source: TileSourceZoomRange,
+  config: OverzoomConfig,
+): { source: TileSourceZoomRange; config: OverzoomConfig } {
+  let minZ = source.minNativeZoom;
+  let maxZ = source.maxNativeZoom;
+
+  // Leaflet #3004：用 typeof 检查而非 truthiness（maxNativeZoom=0 是合法值）
+  if (typeof minZ !== 'number' || isNaN(minZ)) { minZ = 0; }
+  if (typeof maxZ !== 'number' || isNaN(maxZ)) { maxZ = DEFAULT_MAX_ZOOM; }
+
+  // Leaflet #5644：min > max 自动交换
+  if (minZ > maxZ) {
+    const tmp = minZ;
+    minZ = maxZ;
+    maxZ = tmp;
+  }
+
+  // MapLibre #4055：zoom 安全上限——clamp 到 MAX_DISPLAY_ZOOM_CAP
+  let maxOZ = config.maxOverzoom;
+  if (!Number.isFinite(maxOZ)) {
+    maxOZ = Math.max(0, MAX_DISPLAY_ZOOM_CAP - maxZ);
+  }
+  maxOZ = Math.max(0, Math.floor(maxOZ));
+
+  let maxUZ = config.maxUnderzoom;
+  if (!Number.isFinite(maxUZ)) { maxUZ = 0; }
+  maxUZ = Math.max(0, Math.floor(maxUZ));
+
+  return {
+    source: { minNativeZoom: minZ, maxNativeZoom: maxZ },
+    config: {
+      overzoomStrategy: config.overzoomStrategy,
+      maxOverzoom: maxOZ,
+      maxUnderzoom: maxUZ,
+    },
+  };
+}
+
+/**
+ * 构建无 UV 偏移的 ResolvedTile（display 和 request 是同一瓦片或 underzoom 全瓦片渲染）。
+ *
+ * @param dz - display zoom
+ * @param dx - display 列号
+ * @param dy - display 行号
+ * @param rz - request zoom
+ * @param rx - request 列号
+ * @param ry - request 行号
+ * @returns ResolvedTile，uvOffset=[0,0]，uvScale=[1,1]
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+ */
+function makeResolvedTile(
+  dz: number, dx: number, dy: number,
+  rz: number, rx: number, ry: number,
+): ResolvedTile {
+  return {
+    displayZ: dz, displayX: dx, displayY: dy,
+    displayKey: `${dz}/${dx}/${dy}`,
+    requestZ: rz, requestX: rx, requestY: ry,
+    requestKey: `${rz}/${rx}/${ry}`,
+    uvOffset: [0, 0],
+    uvScale: [1, 1],
+    isOverzoomed: dz !== rz,
+    overzoomLevels: Math.abs(dz - rz),
+  };
+}
+
+/**
+ * 构建带 UV 子区域的 ResolvedTile（overzoom 专用）。
+ * 当 displayZ > maxNativeZoom 时，从 requestZ 级别的瓦片中取 1/(2^shift) 的子区域。
+ *
+ * UV 计算原理：
+ *   shift = displayZ - requestZ
+ *   n = 2^shift（一个 request 瓦片包含 n×n 个 display 瓦片）
+ *   subX = displayX - (requestX << shift)（display 瓦片在 request 瓦片中的列偏移）
+ *   subY = displayY - (requestY << shift)（display 瓦片在 request 瓦片中的行偏移）
+ *   uvOffset = [subX/n, subY/n]，uvScale = [1/n, 1/n]
+ *
+ * @param dz - display zoom
+ * @param dx - display 列号
+ * @param dy - display 行号
+ * @param rz - request zoom
+ * @param rx - request 列号
+ * @param ry - request 行号
+ * @param shift - zoom 级差 = dz - rz
+ * @returns ResolvedTile 含 UV 子区域
+ *
+ * @example
+ * // source.maxNativeZoom=14, display z=18, x=200003, y=150001
+ * // shift=4, n=16, subX=3, subY=1
+ * // uvOffset=[3/16, 1/16], uvScale=[1/16, 1/16]
+ * makeResolvedTileWithUV(18, 200003, 150001, 14, 12500, 9375, 4);
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+ */
+function makeResolvedTileWithUV(
+  dz: number, dx: number, dy: number,
+  rz: number, rx: number, ry: number,
+  shift: number,
+): ResolvedTile {
+  // n = 一个 request 瓦片在 display zoom 下被分成 n×n 格
+  const n = 1 << shift;
+  // display 瓦片在 request 瓦片内部的 x/y 偏移
+  const subX = dx - (rx << shift);
+  const subY = dy - (ry << shift);
+  return {
+    displayZ: dz, displayX: dx, displayY: dy,
+    displayKey: `${dz}/${dx}/${dy}`,
+    requestZ: rz, requestX: rx, requestY: ry,
+    requestKey: `${rz}/${rx}/${ry}`,
+    uvOffset: [subX / n, subY / n],
+    uvScale: [1 / n, 1 / n],
+    isOverzoomed: true,
+    overzoomLevels: shift,
+  };
+}
+
+/**
+ * 将"显示需要的瓦片"转换为"实际请求的瓦片 + UV 映射"。
+ * 纯函数，无副作用。
+ *
+ * 三种情况：
+ *   1. 正常范围（minZ ≤ displayZ ≤ maxZ）→ 直接请求 display 坐标
+ *   2. Overzoom（displayZ > maxZ）→ 请求 maxZ 瓦片，UV 取子区域
+ *   3. Underzoom（displayZ < minZ）→ 请求 minZ 瓦片中心对齐，UV 全部
+ *
+ * @param displayZ - 显示需要的 zoom
+ * @param displayX - 显示需要的列号
+ * @param displayY - 显示需要的行号
+ * @param source - 数据源 zoom 范围（已规范化）
+ * @param config - overzoom 配置（已规范化）
+ * @returns ResolvedTile 或 null（策略为 none/transparent 或超出允许范围）
+ *
+ * @example
+ * // Overzoom: source.maxNativeZoom=14, display z=18
+ * resolveTile(18, 200003, 150001, { minNativeZoom:0, maxNativeZoom:14 },
+ *   { overzoomStrategy:'scale', maxOverzoom:6, maxUnderzoom:0 });
+ * // → { requestZ:14, requestX:12500, requestY:9375,
+ * //     uvOffset:[0.1875, 0.0625], uvScale:[0.0625, 0.0625] }
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+ */
+function resolveTile(
+  displayZ: number, displayX: number, displayY: number,
+  source: TileSourceZoomRange,
+  config: OverzoomConfig,
+): ResolvedTile | null {
+  const { minNativeZoom: minZ, maxNativeZoom: maxZ } = source;
+
+  // ═══ 正常范围：直接请求，无 UV 偏移 ═══
+  if (displayZ >= minZ && displayZ <= maxZ) {
+    return makeResolvedTile(displayZ, displayX, displayY, displayZ, displayX, displayY);
+  }
+
+  // ═══ Overzoom（displayZ > maxZ）═══
+  if (displayZ > maxZ) {
+    // 策略为 none 或 transparent 时不做 overzoom
+    if (config.overzoomStrategy === 'none' || config.overzoomStrategy === 'transparent') {
+      return null;
+    }
+    const levels = displayZ - maxZ;
+    // 超出允许的最大 overzoom 级数
+    if (levels > config.maxOverzoom) {
+      return null;
+    }
+
+    // 计算 request 坐标：右移 shift 位将 display 坐标映射到 maxZ 级别
+    const shift = levels;
+    const rz = maxZ;
+    const rx = displayX >> shift;
+    const ry = displayY >> shift;
+    return makeResolvedTileWithUV(displayZ, displayX, displayY, rz, rx, ry, shift);
+  }
+
+  // ═══ Underzoom（displayZ < minZ）═══
+  if (displayZ < minZ) {
+    const levels = minZ - displayZ;
+    if (levels > config.maxUnderzoom) {
+      return null;
+    }
+
+    // Underzoom：请求 minZ 级别的瓦片，但只渲染覆盖 display 范围的那一块。
+    // 一个 displayZ 瓦片 = minZ 级别中多个瓦片的合并区域。
+    // 简化处理：请求 display 区域中心对应的 minZ 瓦片，UV 渲染该瓦片的全部。
+    // 效果：display 瓦片显示的是 minZ 瓦片缩小后的样子。
+    const shift = levels;
+    const rz = minZ;
+    // display(z=3, x=2, y=1) 对应 minZ(z=5) 中 x=8..11, y=4..7 的区域
+    // 请求中心瓦片 (8+11)/2=9, (4+7)/2=5
+    const centerX = (displayX << shift) + ((1 << shift) >> 1);
+    const centerY = (displayY << shift) + ((1 << shift) >> 1);
+    // clamp 到合法坐标范围
+    const rx = Math.min(centerX, (1 << rz) - 1);
+    const ry = Math.min(centerY, (1 << rz) - 1);
+    // UV 保持完整（整个瓦片渲染，由顶点缩放来适配 display 位置）
+    return makeResolvedTile(displayZ, displayX, displayY, rz, rx, ry);
+  }
+
+  return null;
+}
+
+/**
+ * 计算视口覆盖瓦片并应用 overzoom 映射——方案一的集成入口。
+ * 先按 displayZoom 计算覆盖瓦片，再逐个通过 resolveTile 映射到 requestKey + UV。
+ *
+ * @param camera - 相机状态
+ * @param canvasWidth - 画布宽度
+ * @param canvasHeight - 画布高度
+ * @param minZoom - 图层最小可见 zoom
+ * @param maxDisplayZoom - 允许的最大显示 zoom（= maxNativeZoom + maxOverzoom）
+ * @param source - 数据源 zoom 范围（已规范化）
+ * @param config - overzoom 配置（已规范化）
+ * @returns 去重后的 ResolvedTile[]（按 displayKey 去重）
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §一
+ */
+function coveringTilesWithOverzoom(
+  camera: CameraState,
+  canvasWidth: number,
+  canvasHeight: number,
+  minZoom: number,
+  maxDisplayZoom: number,
+  source: TileSourceZoomRange,
+  config: OverzoomConfig,
+): ResolvedTile[] {
+  // 计算 display zoom 下的覆盖瓦片（允许超过 maxNativeZoom）
+  const displayTiles = computeCoveringTiles(camera, canvasWidth, canvasHeight, minZoom, maxDisplayZoom);
+  const resolved: ResolvedTile[] = [];
+  // 按 displayKey 去重——同一个显示位置不重复
+  const seen = new Set<string>();
+
+  for (const dt of displayTiles) {
+    const r = resolveTile(dt.z, dt.x, dt.y, source, config);
+    if (r === null) { continue; }
+    if (seen.has(r.displayKey)) { continue; }
+    seen.add(r.displayKey);
+    resolved.push(r);
+  }
+
+  return resolved;
+}
+
+/**
+ * 计算图层的 zoom-based alpha（用于多图层平滑切换）。
+ * 在 fadeIn / fadeOut 范围内线性插值，范围外为 0 或 1。
+ *
+ * @param zoom - 当前相机 zoom
+ * @param fadeIn - fade-in 范围 { start, end }（zoom < start → 0，zoom > end → 1）
+ * @param fadeOut - fade-out 范围 { start, end }（zoom < start → 1，zoom > end → 0）
+ * @returns alpha ∈ [0, 1]
+ *
+ * @example
+ * // 位图→矢量切换：位图 fade out at 13.5~14，矢量 fade in at 14~14.5
+ * computeLayerAlpha(13.7, undefined, { start: 13.5, end: 14 }); // → 0.4
+ * computeLayerAlpha(14.2, { start: 14, end: 14.5 }, undefined); // → 0.4
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §四
+ */
+function computeLayerAlpha(
+  zoom: number,
+  fadeIn?: { start: number; end: number },
+  fadeOut?: { start: number; end: number },
+): number {
+  let a = 1;
+
+  if (fadeIn !== undefined) {
+    if (zoom < fadeIn.start) { return 0; }
+    if (zoom < fadeIn.end) {
+      // 线性插值：start→0, end→1
+      const range = fadeIn.end - fadeIn.start;
+      a = range > 0 ? (zoom - fadeIn.start) / range : 1;
+    }
+  }
+
+  if (fadeOut !== undefined) {
+    if (zoom > fadeOut.end) { return 0; }
+    if (zoom > fadeOut.start) {
+      // 线性插值：start→1, end→0
+      const range = fadeOut.end - fadeOut.start;
+      const fadeOutAlpha = range > 0 ? 1 - (zoom - fadeOut.start) / range : 0;
+      a *= fadeOutAlpha;
+    }
+  }
+
+  return a;
+}
+
+/**
+ * 从 ResolvedTile[] 构建 VisibleTile[]——统一 overzoom UV 子区域与
+ * Tile Solutions §方案一的父瓦片占位/子瓦片拼合机制。
+ *
+ * 优先级：
+ *   ① request 瓦片已缓存就绪 → 使用 resolved 的 UV 子区域渲染
+ *   ② 非 overzoom 模式下尝试 zoom-out 子瓦片逐格拼合（已有子瓦片 + 缺失子格用祖先）
+ *   ③ 在缓存中搜索 display 坐标的最近祖先（兜底）
+ *
+ * @param resolved - resolveTile 映射后的 ResolvedTile 列表
+ * @param cache - 瓦片缓存
+ * @param maxSourceZoom - 数据源最大原生 zoom（用于限制子瓦片拼合搜索深度）
+ * @returns 可渲染的 VisibleTile 列表
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §五
+ */
+function resolveVisibleTilesFromResolved(
+  resolved: ResolvedTile[],
+  cache: TileCache,
+  maxSourceZoom: number,
+): VisibleTile[] {
+  const result: VisibleTile[] = [];
+
+  for (const r of resolved) {
+    // ① request 瓦片已缓存就绪——直接用 resolved 的 UV 子区域
+    const entry = cache.get(r.requestKey);
+    if (entry !== undefined && entry.state === 'ready' && entry.texture !== null) {
+      result.push({
+        targetCoord: { z: r.displayZ, x: r.displayX, y: r.displayY },
+        entry,
+        uvOffset: r.uvOffset,
+        uvScale: r.uvScale,
+      });
+      continue;
+    }
+
+    // ② 非 overzoom 时尝试子瓦片逐格拼合（zoom-out 场景：父格缺失但子格可用）
+    if (!r.isOverzoomed) {
+      const composite = resolveChildrenOrAncestors(
+        { z: r.displayZ, x: r.displayX, y: r.displayY },
+        cache,
+        maxSourceZoom,
+      );
+      if (composite !== null) {
+        result.push(...composite);
+        continue;
+      }
+    }
+
+    // ③ 在缓存中搜索 display 坐标的最近祖先（兜底——overzoom 时也能找到 maxNativeZoom 瓦片）
+    // 注意：对于 overzoom 场景（如 display z=20, request z=18），如果 z=18 瓦片未缓存，
+    // findAncestor 从 z=19 向下搜索会依次经过 z=18（即 request 瓦片），自然覆盖 overzoom。
+    const ancestor = findAncestor(
+      { z: r.displayZ, x: r.displayX, y: r.displayY },
+      cache,
+    );
+    if (ancestor !== null) {
+      result.push(ancestor);
+    }
+    // 无可用纹理 → 该位置显示背景色（仅在冷启动极短窗口可能发生）
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// 矢量瓦片 Overzoom 几何裁剪
+// ---------------------------------------------------------------------------
+
+/**
+ * 从父矢量瓦片裁剪出子瓦片范围的特征。
+ * 坐标归一化到 [0, 1] 范围（子瓦片内部坐标）。
+ *
+ * 使用场景：矢量瓦片 overzoom 时，从低 zoom 的父瓦片中裁剪出高 zoom 子区域的特征，
+ * 避免重新请求或丢失精度。
+ *
+ * @param features - 父瓦片中的矢量特征数组
+ * @param parentZ - 父瓦片 zoom
+ * @param parentX - 父瓦片列号
+ * @param parentY - 父瓦片行号
+ * @param childZ - 子瓦片 zoom（display zoom）
+ * @param childX - 子瓦片列号
+ * @param childY - 子瓦片行号
+ * @returns 裁剪后的特征数组（坐标已归一化到子瓦片 [0,1] 范围）
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §三
+ */
+function clipVectorTileForOverzoom(
+  features: VectorFeature[],
+  parentZ: number, parentX: number, parentY: number,
+  childZ: number, childX: number, childY: number,
+): VectorFeature[] {
+  const shift = childZ - parentZ;
+  // 子瓦片数量 per 轴
+  const n = 1 << shift;
+  // 子瓦片在父瓦片中的偏移
+  const subX = childX - (parentX << shift);
+  const subY = childY - (parentY << shift);
+  // 裁剪窗口（父瓦片归一化坐标 [0,1]）
+  const cMinX = subX / n;
+  const cMinY = subY / n;
+  const cMaxX = (subX + 1) / n;
+  const cMaxY = (subY + 1) / n;
+  // 子区域宽高（用于归一化到子瓦片坐标）
+  const cW = cMaxX - cMinX;
+  const cH = cMaxY - cMinY;
+
+  const result: VectorFeature[] = [];
+
+  for (const f of features) {
+    const clipped = clipFeature(f, cMinX, cMinY, cMaxX, cMaxY, cW, cH);
+    if (clipped !== null) {
+      result.push(clipped);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 裁剪单个矢量特征到指定矩形范围，并归一化坐标。
+ *
+ * @param f - 输入特征
+ * @param minX - 裁剪窗口左边界（父瓦片归一化坐标）
+ * @param minY - 裁剪窗口上边界
+ * @param maxX - 裁剪窗口右边界
+ * @param maxY - 裁剪窗口下边界
+ * @param w - 裁剪窗口宽度（用于归一化）
+ * @param h - 裁剪窗口高度（用于归一化）
+ * @returns 裁剪后的特征或 null（特征完全在窗口外）
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §三
+ */
+function clipFeature(
+  f: VectorFeature,
+  minX: number, minY: number, maxX: number, maxY: number,
+  w: number, h: number,
+): VectorFeature | null {
+  const { type, geometry } = f;
+
+  if (type === 'Point') {
+    // 点裁剪：简单边界检查
+    if (geometry.length === 0) { return null; }
+    const [x, y] = geometry[0];
+    if (x < minX || x > maxX || y < minY || y > maxY) { return null; }
+    // 归一化到子瓦片 [0,1] 坐标
+    return { ...f, geometry: [[(x - minX) / w, (y - minY) / h]] };
+  }
+
+  if (type === 'LineString') {
+    // 折线裁剪：Cohen-Sutherland 逐段裁剪保持连续性
+    const clipped = clipPolyline(geometry, minX, minY, maxX, maxY);
+    if (clipped.length < 2) { return null; }
+    // 归一化坐标
+    const norm = clipped.map(([x, y]) => [(x - minX) / w, (y - minY) / h]);
+    return { ...f, geometry: norm };
+  }
+
+  if (type === 'Polygon') {
+    // 多边形裁剪：Sutherland-Hodgman 四边依次裁剪
+    let ring = [...geometry];
+    ring = clipRingByEdge(ring, minX, 'left');
+    ring = clipRingByEdge(ring, maxX, 'right');
+    ring = clipRingByEdge(ring, minY, 'bottom');
+    ring = clipRingByEdge(ring, maxY, 'top');
+    if (ring.length < 3) { return null; }
+    // 归一化坐标
+    const norm = ring.map(([x, y]) => [(x - minX) / w, (y - minY) / h]);
+    return { ...f, geometry: norm };
+  }
+
+  return null;
+}
+
+/**
+ * Cohen-Sutherland 折线裁剪——保持输出折线的连续性。
+ * 与简单的逐段裁剪不同，此实现合并连续的已裁剪段。
+ *
+ * @param line - 输入折线坐标数组
+ * @param minX - 裁剪窗口左边界
+ * @param minY - 裁剪窗口上边界
+ * @param maxX - 裁剪窗口右边界
+ * @param maxY - 裁剪窗口下边界
+ * @returns 裁剪后的连续折线坐标数组
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §三
+ */
+function clipPolyline(
+  line: number[][], minX: number, minY: number, maxX: number, maxY: number,
+): number[][] {
+  const result: number[][] = [];
+
+  for (let i = 0; i < line.length - 1; i++) {
+    const seg = clipOneSegment(
+      line[i][0], line[i][1], line[i + 1][0], line[i + 1][1],
+      minX, minY, maxX, maxY,
+    );
+    if (seg === null) {
+      // 线段完全在窗口外 → 断开连续性
+      continue;
+    }
+    const [ax, ay, bx, by] = seg;
+    if (result.length === 0) {
+      // 第一个有效段——push 起点
+      result.push([ax, ay]);
+    } else {
+      // 检查是否与上一个端点连续
+      const last = result[result.length - 1];
+      if (
+        Math.abs(last[0] - ax) > CLIP_CONTINUITY_EPSILON ||
+        Math.abs(last[1] - ay) > CLIP_CONTINUITY_EPSILON
+      ) {
+        // 不连续 → push 当前段起点（裁剪后折线本身可能断开）
+        result.push([ax, ay]);
+      }
+    }
+    result.push([bx, by]);
+  }
+
+  return result;
+}
+
+/**
+ * Cohen-Sutherland 单线段裁剪。
+ * 修复 v1 的 `code0 || code1` bug（改为 `c0 !== 0 ? c0 : c1`）。
+ *
+ * @param x0 - 线段起点 X
+ * @param y0 - 线段起点 Y
+ * @param x1 - 线段终点 X
+ * @param y1 - 线段终点 Y
+ * @param minX - 裁剪窗口左边界
+ * @param minY - 裁剪窗口上边界
+ * @param maxX - 裁剪窗口右边界
+ * @param maxY - 裁剪窗口下边界
+ * @returns [裁剪后 x0, y0, x1, y1] 或 null（完全在窗口外）
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §三
+ */
+function clipOneSegment(
+  x0: number, y0: number, x1: number, y1: number,
+  minX: number, minY: number, maxX: number, maxY: number,
+): [number, number, number, number] | null {
+  let c0 = regionCode(x0, y0, minX, minY, maxX, maxY);
+  let c1 = regionCode(x1, y1, minX, minY, maxX, maxY);
+
+  for (let iter = 0; iter < CLIP_MAX_ITERATIONS; iter++) {
+    // 两点都在窗口内 → 完全接受
+    if (!(c0 | c1)) { return [x0, y0, x1, y1]; }
+    // 两点在窗口同一侧 → 完全拒绝
+    if (c0 & c1) { return null; }
+
+    // 选择在窗口外部的点（修复 v1 的 || bug）
+    const c = c0 !== 0 ? c0 : c1;
+    let x: number;
+    let y: number;
+
+    // 按优先级裁剪到窗口边界
+    if (c & 8) {
+      // 上方（y > maxY）
+      x = x0 + (x1 - x0) * (maxY - y0) / (y1 - y0);
+      y = maxY;
+    } else if (c & 4) {
+      // 下方（y < minY）
+      x = x0 + (x1 - x0) * (minY - y0) / (y1 - y0);
+      y = minY;
+    } else if (c & 2) {
+      // 右方（x > maxX）
+      y = y0 + (y1 - y0) * (maxX - x0) / (x1 - x0);
+      x = maxX;
+    } else {
+      // 左方（x < minX）
+      y = y0 + (y1 - y0) * (minX - x0) / (x1 - x0);
+      x = minX;
+    }
+
+    // 更新被裁剪的点
+    if (c === c0) {
+      x0 = x; y0 = y;
+      c0 = regionCode(x0, y0, minX, minY, maxX, maxY);
+    } else {
+      x1 = x; y1 = y;
+      c1 = regionCode(x1, y1, minX, minY, maxX, maxY);
+    }
+  }
+
+  // 超过最大迭代次数（极端退化情况）→ 安全拒绝
+  return null;
+}
+
+/**
+ * Cohen-Sutherland 区域码：4 位标记点相对裁剪窗口的位置。
+ * bit 0 (1): 左方, bit 1 (2): 右方, bit 2 (4): 下方, bit 3 (8): 上方。
+ *
+ * @param x - 点 X 坐标
+ * @param y - 点 Y 坐标
+ * @param minX - 窗口左边界
+ * @param minY - 窗口下边界
+ * @param maxX - 窗口右边界
+ * @param maxY - 窗口上边界
+ * @returns 4 位区域码
+ */
+function regionCode(x: number, y: number, minX: number, minY: number, maxX: number, maxY: number): number {
+  return (x < minX ? 1 : 0) | (x > maxX ? 2 : 0) | (y < minY ? 4 : 0) | (y > maxY ? 8 : 0);
+}
+
+/**
+ * Sutherland-Hodgman 单边裁剪——将多边形环裁剪到指定边界。
+ * 四次调用（left/right/bottom/top）完成矩形裁剪。
+ *
+ * @param ring - 输入多边形环（坐标数组，最后一点不必等于第一点，算法自动闭合）
+ * @param value - 裁剪边界值
+ * @param edge - 裁剪方向：'left'/'right'/'bottom'/'top'
+ * @returns 裁剪后的多边形环
+ *
+ * @see doc/architecture/GeoForge_Tile_Overzoom_Solutions.md §三
+ */
+function clipRingByEdge(ring: number[][], value: number, edge: 'left' | 'right' | 'top' | 'bottom'): number[][] {
+  if (ring.length === 0) { return ring; }
+  const out: number[][] = [];
+  const n = ring.length;
+
+  for (let i = 0; i < n; i++) {
+    const curr = ring[i];
+    const next = ring[(i + 1) % n];
+    const cIn = ptInside(curr, value, edge);
+    const nIn = ptInside(next, value, edge);
+
+    if (cIn && nIn) {
+      // 两点都在内部 → 输出 next
+      out.push(next);
+    } else if (cIn && !nIn) {
+      // 从内到外 → 输出交点
+      out.push(edgeIntersect(curr, next, value, edge));
+    } else if (!cIn && nIn) {
+      // 从外到内 → 输出交点和 next
+      out.push(edgeIntersect(curr, next, value, edge));
+      out.push(next);
+    }
+    // 两点都在外部 → 不输出
+  }
+
+  return out;
+}
+
+/**
+ * 判断点是否在裁剪边界内部。
+ *
+ * @param p - 点坐标 [x, y]
+ * @param val - 边界值
+ * @param edge - 边界方向
+ * @returns 是否在内部
+ */
+function ptInside(p: number[], val: number, edge: string): boolean {
+  if (edge === 'left') { return p[0] >= val; }
+  if (edge === 'right') { return p[0] <= val; }
+  if (edge === 'bottom') { return p[1] >= val; }
+  // top
+  return p[1] <= val;
+}
+
+/**
+ * 计算线段与裁剪边界的交点。
+ *
+ * @param a - 线段起点 [x, y]
+ * @param b - 线段终点 [x, y]
+ * @param val - 边界值
+ * @param edge - 边界方向
+ * @returns 交点 [x, y]
+ */
+function edgeIntersect(a: number[], b: number[], val: number, edge: string): number[] {
+  if (edge === 'left' || edge === 'right') {
+    // 垂直边界：x = val，插值 y
+    const dx = b[0] - a[0];
+    // 防除零（两点 x 相同时 t 无意义，但此情况不应出现因为一内一外）
+    const t = dx !== 0 ? (val - a[0]) / dx : 0;
+    return [val, a[1] + t * (b[1] - a[1])];
+  }
+  // 水平边界：y = val，插值 x
+  const dy = b[1] - a[1];
+  const t = dy !== 0 ? (val - a[1]) / dy : 0;
+  return [a[0] + t * (b[0] - a[0]), val];
+}
+
+// ---------------------------------------------------------------------------
 // 选项校验
 // ---------------------------------------------------------------------------
 
@@ -982,6 +1986,10 @@ function validateOptions(opts: RasterTileLayerOptions): {
   id: string; source: string; tiles: string[];
   tileSize: number; opacity: number; minzoom: number;
   maxzoom: number; fadeDuration: number; projection: string;
+  minNativeZoom: number; maxNativeZoom: number;
+  overzoom: OverzoomConfig;
+  fadeInZoom?: { start: number; end: number };
+  fadeOutZoom?: { start: number; end: number };
   paint?: Record<string, unknown>; layout?: Record<string, unknown>;
 } {
   if (typeof opts.id !== 'string' || opts.id.trim().length === 0) {
@@ -1006,9 +2014,32 @@ function validateOptions(opts: RasterTileLayerOptions): {
   }
   const projection = (opts.projection ?? 'mercator').trim() || 'mercator';
   const tiles = opts.tiles ?? [];
+
+  // ── Overzoom 配置解析 ──
+  // minNativeZoom / maxNativeZoom 默认与 minzoom / maxzoom 一致
+  const rawMinNative = opts.minNativeZoom ?? minzoom;
+  const rawMaxNative = opts.maxNativeZoom ?? maxzoom;
+  // 合并用户 overzoom 配置与默认值
+  const rawOZ = opts.overzoom ?? {};
+  const mergedOZ: OverzoomConfig = {
+    overzoomStrategy: rawOZ.overzoomStrategy ?? DEFAULT_RASTER_OVERZOOM_STRATEGY,
+    maxOverzoom: rawOZ.maxOverzoom ?? DEFAULT_RASTER_MAX_OVERZOOM,
+    maxUnderzoom: rawOZ.maxUnderzoom ?? DEFAULT_RASTER_MAX_UNDERZOOM,
+  };
+  // 用 normalizeOverzoomConfig 校验边界并规范化
+  const normalized = normalizeOverzoomConfig(
+    { minNativeZoom: rawMinNative, maxNativeZoom: rawMaxNative },
+    mergedOZ,
+  );
+
   return {
     id: opts.id.trim(), source: opts.source.trim(), tiles,
     tileSize, opacity, minzoom, maxzoom, fadeDuration, projection,
+    minNativeZoom: normalized.source.minNativeZoom,
+    maxNativeZoom: normalized.source.maxNativeZoom,
+    overzoom: normalized.config,
+    fadeInZoom: opts.fadeInZoom,
+    fadeOutZoom: opts.fadeOutZoom,
     paint: opts.paint, layout: opts.layout,
   };
 }
@@ -1078,6 +2109,27 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
   // 瓦片 URL 模板（运行时可从 source 更新）
   let urlTemplates: string[] = [...cfg.tiles];
 
+  // ── Overzoom 状态 ──
+  /** 数据源 zoom 范围（已规范化） */
+  const sourceZoomRange: TileSourceZoomRange = {
+    minNativeZoom: cfg.minNativeZoom,
+    maxNativeZoom: cfg.maxNativeZoom,
+  };
+  /** Overzoom 配置（已规范化） */
+  const overzoomConfig: OverzoomConfig = cfg.overzoom;
+  /** 最大允许的显示 zoom = maxNativeZoom + maxOverzoom，上限 MAX_DISPLAY_ZOOM_CAP */
+  const maxDisplayZoom = Math.min(
+    sourceZoomRange.maxNativeZoom + overzoomConfig.maxOverzoom,
+    MAX_DISPLAY_ZOOM_CAP,
+  );
+  /** zoom fade 配置 */
+  const fadeInZoomCfg = cfg.fadeInZoom;
+  const fadeOutZoomCfg = cfg.fadeOutZoom;
+  /** 稀疏金字塔探测器——记录哪些瓦片坐标实际有数据/缺失 */
+  const prober = new AncestorProber();
+  /** 当前帧的 overzoom 级数（0 = 正常，>0 = overzoom 中） */
+  let currentOverzoomLevels = 0;
+
   // 请求管理
   const inflightRequests = new Map<string, AbortController>();
   let concurrentCount = 0;
@@ -1092,8 +2144,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
   let schedLastTileZ = -1;
   /** 上次计算时的世界像素视口 AABB */
   let schedLastBBox: [number, number, number, number] | null = null;
-  /** 上次计算得到的 coveringTiles 缓存（节流期内复用） */
-  let schedCachedTiles: TileCoord[] = [];
+  /** 上次 coveringTilesWithOverzoom 的缓存（节流期内复用） */
+  let schedCachedResolved: ResolvedTile[] = [];
   /** 节流计帧器——即使视口几乎不变也每 N 帧强制刷新 */
   let schedFrameCount = 0;
 
@@ -1359,6 +2411,9 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       const bindGroup = createTileBindGroup(texture);
       cache.setReady(key, texture, bindGroup, tileByteSize);
 
+      // ── Overzoom §二：标记瓦片有数据 ──
+      prober.markExists(z, x, y);
+
     } catch (err: unknown) {
       // 错误分类与处理
       const errType = classifyError(err);
@@ -1370,6 +2425,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       if (entry !== undefined) {
         if (errType === 'permanent') {
           entry.state = 'error-permanent';
+          // ── Overzoom §二：标记瓦片缺失（永久错误） ──
+          prober.markMissing(z, x, y);
         } else {
           entry.errorCount++;
           entry.state = 'error-transient';
@@ -1533,6 +2590,14 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       return cache.size;
     },
 
+    get isOverzoomed(): boolean {
+      return currentOverzoomLevels > 0;
+    },
+
+    get currentOverzoomLevels(): number {
+      return currentOverzoomLevels;
+    },
+
     // ══════ 生命周期 ══════
 
     onAdd(context: LayerContext): void {
@@ -1581,6 +2646,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     onRemove(): void {
       cancelAllRequests();
       cache.destroy();
+      prober.destroy();
       destroyGPUResources();
       currentVisibleTiles = [];
       retainedVisibleTiles = [];
@@ -1588,8 +2654,9 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       featureStateMap.clear();
       schedLastTileZ = -1;
       schedLastBBox = null;
-      schedCachedTiles = [];
+      schedCachedResolved = [];
       schedFrameCount = 0;
+      currentOverzoomLevels = 0;
       idleDestroyed = true;
       if (idleTimerId !== null) {
         clearTimeout(idleTimerId);
@@ -1606,18 +2673,30 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         return;
       }
 
-      // 缩放可见性判断
-      if (camera.zoom < cfg.minzoom || camera.zoom > cfg.maxzoom + 1) {
+      // ════════════════════════════════════════════════════
+      // Overzoom §四：Zoom fade——alpha=0 的图层直接跳过全部逻辑
+      // ════════════════════════════════════════════════════
+      const layerAlpha = computeLayerAlpha(camera.zoom, fadeInZoomCfg, fadeOutZoomCfg);
+      if (layerAlpha <= 0) {
         currentVisibleTiles = [];
         return;
       }
 
+      // 缩放可见性判断——扩展到 maxDisplayZoom（而非 cfg.maxzoom）以支持 overzoom
+      if (camera.zoom < cfg.minzoom || camera.zoom > maxDisplayZoom + 1) {
+        currentVisibleTiles = [];
+        return;
+      }
+
+      // 记录当前 overzoom 级数
+      currentOverzoomLevels = Math.max(0, Math.floor(camera.zoom) - sourceZoomRange.maxNativeZoom);
+
       // ════════════════════════════════════════════════════
-      // 方案五：IoU 节流——视口几乎不变时复用上帧 coveringTiles
+      // 方案五：IoU 节流——视口几乎不变时复用上帧 coveringTilesWithOverzoom
       // ════════════════════════════════════════════════════
       const idealTileZ = Math.min(
         Math.max(Math.floor(camera.zoom), cfg.minzoom),
-        cfg.maxzoom,
+        maxDisplayZoom,
       );
       const viewBBox = computeViewBBox(camera, canvasWidth, canvasHeight);
       schedFrameCount++;
@@ -1629,56 +2708,63 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         schedFrameCount >= SCHEDULE_MAX_SKIP_FRAMES;
 
       if (shouldRecalc) {
-        schedCachedTiles = computeCoveringTiles(
-          camera, canvasWidth, canvasHeight, cfg.minzoom, cfg.maxzoom,
+        // ── Overzoom §一 + §五统一：按 maxDisplayZoom 计算覆盖瓦片，然后 resolveTile ──
+        schedCachedResolved = coveringTilesWithOverzoom(
+          camera, canvasWidth, canvasHeight, cfg.minzoom, maxDisplayZoom,
+          sourceZoomRange, overzoomConfig,
         );
         schedLastTileZ = idealTileZ;
         schedLastBBox = viewBBox;
         schedFrameCount = 0;
       }
 
-      const neededTiles = schedCachedTiles;
+      const resolved = schedCachedResolved;
 
       // ════════════════════════════════════════════════════
-      // 方案一/二：构建扩展 neededKeys——不止当前 z，还包括
-      //   · z+1 子瓦片（zoom-out 拼合）
-      //   · 上一帧 retainedVisibleTiles 使用的纹理（旧帧保持）
-      //   · 预加载祖先瓦片
+      // 构建扩展 neededKeys（requestKey 维度）——
+      //   · resolved 列表的 requestKeys（实际需要的瓦片）
+      //   · 非 overzoom 瓦片的 z+1 子瓦片（zoom-out 拼合辅助）
+      //   · 上一帧 retainedVisibleTiles 使用的纹理键（旧帧保持）
+      //   · 预加载祖先瓦片 z=0~2
       // 三者合并后再 cancelStale，保证过渡期纹理不被误杀。
       // ════════════════════════════════════════════════════
-      const loadTileList: TileCoord[] = [...neededTiles];
+      const loadRequestList: Array<{ key: string; z: number; x: number; y: number }> = [];
+      for (const r of resolved) {
+        loadRequestList.push({ key: r.requestKey, z: r.requestZ, x: r.requestX, y: r.requestY });
+      }
 
-      for (const t of neededTiles) {
-        const pk = tileKey(t.z, t.x, t.y);
-        const pe = cache.get(pk);
+      // 非 overzoom 瓦片：如果 request 瓦片未就绪，添加 z+1 子瓦片辅助加载（zoom-out 拼合）
+      for (const r of resolved) {
+        if (r.isOverzoomed) { continue; }
+        const pe = cache.get(r.requestKey);
         const parentReady = pe !== undefined && pe.state === 'ready' && pe.texture !== null;
-        if (!parentReady && t.z < cfg.maxzoom) {
-          const cz = t.z + 1;
-          const x0 = t.x * 2;
-          const y0 = t.y * 2;
-          loadTileList.push(
-            { z: cz, x: x0,     y: y0 },
-            { z: cz, x: x0 + 1, y: y0 },
-            { z: cz, x: x0,     y: y0 + 1 },
-            { z: cz, x: x0 + 1, y: y0 + 1 },
+        if (!parentReady && r.requestZ < sourceZoomRange.maxNativeZoom) {
+          const cz = r.requestZ + 1;
+          const x0 = r.requestX * 2;
+          const y0 = r.requestY * 2;
+          loadRequestList.push(
+            { key: tileKey(cz, x0,     y0),     z: cz, x: x0,     y: y0 },
+            { key: tileKey(cz, x0 + 1, y0),     z: cz, x: x0 + 1, y: y0 },
+            { key: tileKey(cz, x0,     y0 + 1), z: cz, x: x0,     y: y0 + 1 },
+            { key: tileKey(cz, x0 + 1, y0 + 1), z: cz, x: x0 + 1, y: y0 + 1 },
           );
         }
       }
 
       const neededKeys = new Set<string>();
-      for (const t of loadTileList) {
-        neededKeys.add(tileKey(t.z, t.x, t.y));
+      for (const lr of loadRequestList) {
+        neededKeys.add(lr.key);
       }
       // 保留旧帧正在使用的纹理键——避免 cancelStale 杀死仍在渲染的占位纹理
       for (const vt of retainedVisibleTiles) {
         neededKeys.add(vt.entry.key);
       }
       // 预加载 z=0~2 瓦片始终保留——不被 cancelStale 杀死
-      const maxPreZ2 = Math.min(PRELOAD_ANCESTOR_MAX_ZOOM, cfg.maxzoom);
+      const maxPreZ2 = Math.min(PRELOAD_ANCESTOR_MAX_ZOOM, sourceZoomRange.maxNativeZoom);
       for (let pz = 0; pz <= maxPreZ2; pz++) {
-        const n = 1 << pz;
-        for (let py = 0; py < n; py++) {
-          for (let px = 0; px < n; px++) {
+        const pn = 1 << pz;
+        for (let py = 0; py < pn; py++) {
+          for (let px = 0; px < pn; px++) {
             neededKeys.add(tileKey(pz, px, py));
           }
         }
@@ -1692,9 +2778,9 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       // ════════════════════════════════════════════════════
       if (urlTemplates.length > 0) {
         for (let pz = 0; pz <= maxPreZ2; pz++) {
-          const n = 1 << pz;
-          for (let py = 0; py < n; py++) {
-            for (let px = 0; px < n; px++) {
+          const pn = 1 << pz;
+          for (let py = 0; py < pn; py++) {
+            for (let px = 0; px < pn; px++) {
               const pk = tileKey(pz, px, py);
               const pe = cache.get(pk);
               if (pe === undefined) {
@@ -1711,24 +2797,23 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       }
 
       // ════════════════════════════════════════════════════
-      // 方案二：对缺失瓦片调度加载（去重 + 优先级）
+      // 瓦片加载调度（去重 + 优先级，按 requestKey 维度）
+      // overzoom 瓦片优先级 = 'normal'，正常瓦片按距离排序
       // ════════════════════════════════════════════════════
       const seenLoad = new Set<string>();
-      for (const t of loadTileList) {
-        const key = tileKey(t.z, t.x, t.y);
-        if (seenLoad.has(key)) {
-          continue;
-        }
-        seenLoad.add(key);
+      for (let i = 0; i < loadRequestList.length; i++) {
+        const lr = loadRequestList[i];
+        if (seenLoad.has(lr.key)) { continue; }
+        seenLoad.add(lr.key);
 
-        const idxInParent = neededTiles.indexOf(t);
-        const priority = idxInParent >= 0 ? MAX_COVERING_TILES - idxInParent : 0;
+        // 在 resolved 列表中的瓦片优先级更高（按顺序递减）
+        const priority = i < resolved.length ? MAX_COVERING_TILES - i : 0;
 
-        const entry = cache.get(key);
+        const entry = cache.get(lr.key);
         if (entry === undefined) {
-          cache.getOrCreate(key, t);
+          cache.getOrCreate(lr.key, { z: lr.z, x: lr.x, y: lr.y });
           if (urlTemplates.length > 0) {
-            scheduleTileLoad(key, t.z, t.x, t.y, priority);
+            scheduleTileLoad(lr.key, lr.z, lr.x, lr.y, priority);
           }
         } else if (
           entry.state !== 'ready' &&
@@ -1736,18 +2821,47 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
           entry.state !== 'loading'
         ) {
           if (urlTemplates.length > 0) {
-            scheduleTileLoad(key, t.z, t.x, t.y, priority);
+            scheduleTileLoad(lr.key, lr.z, lr.x, lr.y, priority);
           }
         }
       }
 
       // ════════════════════════════════════════════════════
-      // 方案一：可见性仲裁 + 旧帧保持
+      // Overzoom §二：AncestorProber 辅助加载——
+      // 对于 prober 已知缺失的 request 瓦片，尝试向上查找有数据的祖先并触发加载
       // ════════════════════════════════════════════════════
-      const newVisible = resolveVisibleTiles(neededTiles, cache, cfg.maxzoom);
+      if (urlTemplates.length > 0) {
+        for (const r of resolved) {
+          const ce = cache.get(r.requestKey);
+          // 只对 error-permanent（已知 404/缺失）的瓦片触发祖先探查
+          if (ce !== undefined && ce.state === 'error-permanent') {
+            const ancestor = prober.findAncestor(r.requestZ, r.requestX, r.requestY);
+            if (ancestor !== null && !cache.has(ancestor.requestKey)) {
+              cache.getOrCreate(ancestor.requestKey, {
+                z: ancestor.requestZ, x: ancestor.requestX, y: ancestor.requestY,
+              });
+              scheduleTileLoad(
+                ancestor.requestKey,
+                ancestor.requestZ, ancestor.requestX, ancestor.requestY,
+                MAX_COVERING_TILES,
+              );
+            }
+          }
+        }
+      }
 
-      // 统计新帧能覆盖多少需要的格子。
-      // targetCoord 可能在 z（精确）或 z+1（子瓦片拼合），两种都要检查。
+      // ════════════════════════════════════════════════════
+      // Overzoom §五：统一可见性仲裁——
+      // resolveVisibleTilesFromResolved 统一处理:
+      //   ① request 瓦片已缓存 → 使用 overzoom UV 子区域
+      //   ② 非 overzoom → 尝试 zoom-out 子瓦片拼合
+      //   ③ 兜底 → 在缓存中搜索 display 坐标的最近祖先
+      // ════════════════════════════════════════════════════
+      const newVisible = resolveVisibleTilesFromResolved(
+        resolved, cache, sourceZoomRange.maxNativeZoom,
+      );
+
+      // 统计新帧覆盖情况（按 displayKey 维度）
       const coveredPositions = new Set<string>();
       for (const vt of newVisible) {
         coveredPositions.add(
@@ -1755,22 +2869,24 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         );
       }
       let gapCount = 0;
-      for (const t of neededTiles) {
-        // ① 精确匹配或祖先（targetCoord == needed coord）
-        if (coveredPositions.has(tileKey(t.z, t.x, t.y))) {
+      for (const r of resolved) {
+        // ① 精确匹配或祖先（targetCoord == display coord）
+        if (coveredPositions.has(r.displayKey)) {
           continue;
         }
-        // ② 子瓦片拼合路径——targetCoord 在 z+1，检查 4 个子格是否全部在结果中
-        const cz = t.z + 1;
-        const cx = t.x * 2;
-        const cy = t.y * 2;
-        if (
-          coveredPositions.has(tileKey(cz, cx,     cy)) &&
-          coveredPositions.has(tileKey(cz, cx + 1, cy)) &&
-          coveredPositions.has(tileKey(cz, cx,     cy + 1)) &&
-          coveredPositions.has(tileKey(cz, cx + 1, cy + 1))
-        ) {
-          continue;
+        // ② 子瓦片拼合路径——targetCoord 在 displayZ+1（仅非 overzoom）
+        if (!r.isOverzoomed) {
+          const cz = r.displayZ + 1;
+          const cx = r.displayX * 2;
+          const cy = r.displayY * 2;
+          if (
+            coveredPositions.has(tileKey(cz, cx,     cy)) &&
+            coveredPositions.has(tileKey(cz, cx + 1, cy)) &&
+            coveredPositions.has(tileKey(cz, cx,     cy + 1)) &&
+            coveredPositions.has(tileKey(cz, cx + 1, cy + 1))
+          ) {
+            continue;
+          }
         }
         gapCount++;
       }
@@ -1783,18 +2899,18 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       }
 
       // ════════════════════════════════════════════════════
-      // 方案三：Pin 当前帧 + retained + 预加载祖先（防 LRU 淘汰）
+      // Pin 当前帧 + retained + 预加载祖先（防 LRU 淘汰）
       // ════════════════════════════════════════════════════
       const pinKeys: string[] = [];
       for (const vt of currentVisibleTiles) {
         pinKeys.push(vt.entry.key);
       }
-      // 永久 pin z=0~2 预加载瓦片——它们是全局兜底祖先，被淘汰后 findAncestor 会失效
-      const maxPreZ = Math.min(PRELOAD_ANCESTOR_MAX_ZOOM, cfg.maxzoom);
+      // 永久 pin z=0~2 预加载瓦片——它们是全局兜底祖先
+      const maxPreZ = Math.min(PRELOAD_ANCESTOR_MAX_ZOOM, sourceZoomRange.maxNativeZoom);
       for (let pz = 0; pz <= maxPreZ; pz++) {
-        const n = 1 << pz;
-        for (let py = 0; py < n; py++) {
-          for (let px = 0; px < n; px++) {
+        const pn = 1 << pz;
+        for (let py = 0; py < pn; py++) {
+          for (let px = 0; px < pn; px++) {
             pinKeys.push(tileKey(pz, px, py));
           }
         }
