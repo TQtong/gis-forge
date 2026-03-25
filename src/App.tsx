@@ -13,13 +13,15 @@ import {
     MousePointer,
     SquareDashed,
 } from 'lucide-react';
-import { MapFull } from '@/packages/preset-full/src/map-full.ts';
+import { Map2D, type MapEvent, type MapMouseEvent } from '@/packages/preset-2d/src/map-2d.ts';
 
 /**
- * 应用壳：侧栏与顶栏为静态布局；主区域挂载 GeoForge MapFull（当前固定为 2D 模式）。
+ * 应用壳：侧栏与顶栏为静态布局；主区域挂载 GeoForge Map2D 并加载 OSM 栅格瓦片。
  */
 export function App(): React.ReactElement {
     const mapContainerRef = React.useRef<HTMLDivElement | null>(null);
+    const [cursorLabel, setCursorLabel] = React.useState<string>('—');
+    const [zoomLabel, setZoomLabel] = React.useState<string>('—');
 
     React.useEffect(() => {
         const el = mapContainerRef.current;
@@ -27,23 +29,76 @@ export function App(): React.ReactElement {
             return;
         }
 
-        let map: MapFull | null = null;
+        let map: Map2D | null = null;
+        let teardownMapEvents: (() => void) | undefined;
         try {
-            map = new MapFull({
+            map = new Map2D({
                 container: el,
-                mode: '2d',
                 center: [116.3974, 39.9093],
                 zoom: 10,
-                pitch: 0,
-                bearing: 0,
                 accessibleTitle: 'GeoForge 二维地图',
             });
+
+            // 添加 OpenStreetMap 栅格瓦片数据源
+            map.addSource('osm-raster', {
+                type: 'raster',
+                tiles: [
+                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                ],
+                tileSize: 256,
+                maxzoom: 19,
+                attribution: '© OpenStreetMap contributors',
+            });
+
+            // 添加栅格瓦片图层
+            map.addLayer({
+                id: 'osm-tiles',
+                type: 'raster',
+                source: 'osm-raster',
+                paint: {
+                    'raster-opacity': 1,
+                    'raster-fade-duration': 300,
+                },
+            });
+
+            void map.ready().then(() => {
+                if (map === null) {
+                    return;
+                }
+                const onPointerMove = (ev: MapEvent | MapMouseEvent): void => {
+                    if (ev.type !== 'mousemove') {
+                        return;
+                    }
+                    const me = ev as MapMouseEvent;
+                    setCursorLabel(`${me.lngLat[0].toFixed(4)}, ${me.lngLat[1].toFixed(4)}`);
+                };
+                const onViewChange = (): void => {
+                    setZoomLabel(map!.getZoom().toFixed(2));
+                };
+                const onMapClick = (ev: MapEvent | MapMouseEvent): void => {
+                    if (ev.type !== 'click') {
+                        return;
+                    }
+                    const me = ev as MapMouseEvent;
+                    console.info('[App] map click', me.lngLat[0], me.lngLat[1]);
+                };
+                map.on('mousemove', onPointerMove);
+                map.on('move', onViewChange);
+                map.on('click', onMapClick);
+                setZoomLabel(map.getZoom().toFixed(2));
+                teardownMapEvents = (): void => {
+                    map!.off('mousemove', onPointerMove);
+                    map!.off('move', onViewChange);
+                    map!.off('click', onMapClick);
+                };
+            });
         } catch (err) {
-            console.error('[App] MapFull 初始化失败', err);
+            console.error('[App] Map2D 初始化失败', err);
             return;
         }
 
         return () => {
+            teardownMapEvents?.();
             try {
                 map?.remove();
             } catch {
@@ -165,7 +220,7 @@ export function App(): React.ReactElement {
                         </span>
                     </nav>
                     <div className="flex-1 flex flex-col min-h-0 px-3 py-6 text-sm text-[var(--text-secondary)] text-center leading-relaxed">
-                        未选择要素。静态预览，无地图交互。
+                        未选择要素。地图支持拖拽平移、滚轮缩放；移动鼠标时状态栏显示经纬度。
                     </div>
                 </aside>
             </div>
@@ -173,11 +228,13 @@ export function App(): React.ReactElement {
                 className="h-7 flex items-center px-3 gap-0 text-xs bg-[var(--bg-panel)] border-t border-[var(--border)] text-[var(--text-secondary)] shrink-0 overflow-x-auto"
                 role="contentinfo"
             >
-                <span className="whitespace-nowrap">📍 —° —′ —″ , —° —′ —″</span>
+                <span className="whitespace-nowrap" title="鼠标位置（经度, 纬度）">
+                    📍 {cursorLabel}
+                </span>
                 <span className="text-[var(--text-secondary)] opacity-30 px-1 select-none" aria-hidden>
                     │
                 </span>
-                <span className="whitespace-nowrap">z: —</span>
+                <span className="whitespace-nowrap">z: {zoomLabel}</span>
                 <span className="text-[var(--text-secondary)] opacity-30 px-1 select-none" aria-hidden>
                     │
                 </span>

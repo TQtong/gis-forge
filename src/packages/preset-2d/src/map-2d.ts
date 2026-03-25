@@ -7,7 +7,10 @@
 import type { BBox2D } from '../../core/src/math/bbox.ts';
 import type { Feature } from '../../core/src/types/feature.ts';
 import type { FilterExpression, StyleSpec } from '../../core/src/types/style-spec.ts';
-import type { PickResult } from '../../core/src/types/viewport.ts';
+import type { PickResult, CameraState } from '../../core/src/types/viewport.ts';
+import type { Layer } from '../../scene/src/scene-graph.ts';
+import type { RasterTileLayer } from '../../layer-tile-raster/src/RasterTileLayer.ts';
+import { createRasterTileLayer } from '../../layer-tile-raster/src/RasterTileLayer.ts';
 
 // ===================== 常量（避免魔法数字）=====================
 
@@ -53,6 +56,32 @@ function devError(...args: unknown[]): void {
         // eslint-disable-next-line no-console
         console.error(...args);
     }
+}
+
+/**
+ * 按优先级请求 WebGPU 适配器：高性能 → 低功耗 → 默认选项。
+ * 远程桌面、省电策略或未装驱动时，仅某一档可能返回非 null。
+ *
+ * @param gpu - `navigator.gpu`
+ * @returns 适配器；均失败时为 null
+ */
+async function requestGpuAdapterWithFallback(gpu: GPU): Promise<GPUAdapter | null> {
+    const optionSets: GPURequestAdapterOptions[] = [
+        { powerPreference: 'high-performance' },
+        { powerPreference: 'low-power' },
+        {},
+    ];
+    for (const opts of optionSets) {
+        try {
+            const adapter = await gpu.requestAdapter(opts);
+            if (adapter !== null) {
+                return adapter;
+            }
+        } catch {
+            // 个别环境下 requestAdapter 可能抛错，继续尝试下一档
+        }
+    }
+    return null;
 }
 
 // ===================== 结构化错误（对齐 GeoForge 约定）=====================
@@ -220,8 +249,8 @@ export interface MapMouseEvent extends MapEvent {
     readonly point: [number, number];
     /** 异步拾取结果（MVP 通常为空数组）。 */
     readonly features?: PickResult[];
-    /** 底层 DOM 指针事件。 */
-    readonly originalEvent: MouseEvent;
+    /** 底层 DOM 指针事件（滚轮为 WheelEvent）。 */
+    readonly originalEvent: MouseEvent | WheelEvent;
 
     /**
      * 阻止默认浏览器行为（委托给 originalEvent）。
@@ -739,6 +768,41 @@ export class Map2D {
     /** 构造选项副本（只读字段快照）。 */
     private readonly _options: Readonly<Map2DOptions>;
 
+    // ═══ WebGPU 运行时状态 ═══
+
+    /** WebGPU 设备实例（初始化成功后非 null） */
+    private _device: GPUDevice | null = null;
+
+    /** WebGPU Canvas 上下文 */
+    private _gpuContext: GPUCanvasContext | null = null;
+
+    /** 首选纹理格式 */
+    private _preferredFormat: GPUTextureFormat = 'bgra8unorm';
+
+    /** 深度纹理（2D 模式可选，用于图层排序） */
+    private _depthTexture: GPUTexture | null = null;
+
+    /** 帧循环 rAF ID */
+    private _frameLoopId: number | null = null;
+
+    /** 上一帧时间戳 (performance.now()) */
+    private _lastFrameTime = 0;
+
+    /** 当前帧相机状态快照 */
+    private _cameraState: CameraState | null = null;
+
+    /** 实际 Layer 实例（由 addLayer 时根据类型创建） */
+    private readonly _layerInstances: Map<string, Layer> = new Map();
+
+    /** 左键拖拽平移进行中。 */
+    private _dragPanActive = false;
+
+    /** 拖拽上一帧指针位置（画布 CSS 像素）。 */
+    private _lastDragPoint: [number, number] | null = null;
+
+    /** 解绑画布/窗口交互监听（remove 时调用）。 */
+    private _interactionCleanup: (() => void) | null = null;
+
     /**
      * 创建 Map2D：挂载 canvas、解析视图参数并启动异步初始化。
      *
@@ -790,22 +854,525 @@ export class Map2D {
         }
         this._resizeCanvasInternal(maxPR);
         this._ready = this._bootstrapAsync();
+        void this._ready.then(() => {
+            if (!this._destroyed) {
+                this._installInteractionHandlers();
+            }
+        });
     }
 
     /**
-     * 异步初始化：MVP 仅微任务解析，不触碰 WebGPU。
+     * 异步初始化：请求 WebGPU 设备、配置渲染表面、启动帧循环。
+     * 如果浏览器不支持 WebGPU，则降级为无渲染模式（保留 API 但不绘制）。
      *
      * @returns 初始化完成的 Promise
      */
     private async _bootstrapAsync(): Promise<void> {
-        await Promise.resolve();
         if (this._destroyed) {
             return;
         }
-        this._initialized = true;
-        this._loaded = true;
-        this._emitBase('load', { type: 'load', target: this });
-        this._emitBase('idle', { type: 'idle', target: this });
+
+        // 检测 WebGPU 支持
+        const gpu = typeof navigator !== 'undefined' ? navigator.gpu : undefined;
+        if (gpu === undefined || gpu === null) {
+            this._initialized = true;
+            this._loaded = true;
+            this._emitBase('load', { type: 'load', target: this });
+            this._emitBase('idle', { type: 'idle', target: this });
+            return;
+        }
+
+        try {
+            // 请求 GPU 适配器（多档回退，避免仅 high-performance 返回 null）
+            const adapter = await requestGpuAdapterWithFallback(gpu);
+            if (adapter === null || this._destroyed) {
+                this._initialized = true;
+                this._loaded = true;
+                this._emitBase('load', { type: 'load', target: this });
+                this._emitBase('idle', { type: 'idle', target: this });
+                return;
+            }
+
+            // 请求 GPU 设备
+            this._device = await adapter.requestDevice();
+            if (this._destroyed) {
+                this._device.destroy();
+                this._device = null;
+                return;
+            }
+
+            // 监听设备丢失
+            this._device.lost.then((info) => {
+                devError('[Map2D] GPU device lost:', info.message);
+                this._device = null;
+                this._gpuContext = null;
+            });
+
+            // 配置 Canvas 上下文
+            this._gpuContext = this._canvas.getContext('webgpu') as GPUCanvasContext | null;
+            if (this._gpuContext === null) {
+                devError('[Map2D] Failed to get WebGPU canvas context');
+                this._initialized = true;
+                this._loaded = true;
+                this._emitBase('load', { type: 'load', target: this });
+                this._emitBase('idle', { type: 'idle', target: this });
+                return;
+            }
+
+            this._preferredFormat = gpu.getPreferredCanvasFormat();
+            this._gpuContext.configure({
+                device: this._device,
+                format: this._preferredFormat,
+                alphaMode: 'premultiplied',
+            });
+
+            // 为已添加的图层注入 GPU 上下文
+            this._initializeExistingLayers();
+
+            // 标记初始化完成
+            this._initialized = true;
+            this._loaded = true;
+
+            // 启动渲染帧循环
+            this._lastFrameTime = performance.now();
+            this._startFrameLoop();
+
+            this._emitBase('load', { type: 'load', target: this });
+            this._emitBase('idle', { type: 'idle', target: this });
+
+        } catch (err) {
+            devError('[Map2D] WebGPU initialization failed:', err);
+            this._initialized = true;
+            this._loaded = true;
+            this._emitBase('load', { type: 'load', target: this });
+        }
+    }
+
+    /**
+     * 为已添加（在 WebGPU 初始化前创建的）图层注入 GPU 设备。
+     */
+    private _initializeExistingLayers(): void {
+        for (const [id, layerInstance] of this._layerInstances) {
+            const ctx = this._buildLayerContext(id);
+            layerInstance.onAdd(ctx);
+        }
+    }
+
+    /**
+     * 构建 LayerContext——向图层注入引擎能力。
+     *
+     * @param layerId - 图层 ID
+     * @returns LayerContext
+     */
+    private _buildLayerContext(layerId: string): {
+        gpuDevice: GPUDevice | null;
+        canvasSize: readonly [number, number];
+        services: Record<string, unknown>;
+        map: Map2D;
+    } {
+        const rect = this._canvas.getBoundingClientRect();
+        const sourceId = this._layers.get(layerId)?.base.source;
+        const sourceSpec = typeof sourceId === 'string' ? this._sources.get(sourceId) : undefined;
+        const tiles = sourceSpec?.tiles ?? [];
+        return {
+            gpuDevice: this._device,
+            canvasSize: [Math.max(1, rect.width), Math.max(1, rect.height)] as const,
+            services: { tiles },
+            map: this,
+        };
+    }
+
+    /**
+     * 启动渲染帧循环。每帧：更新相机→更新图层→编码渲染命令→提交 GPU。
+     */
+    private _startFrameLoop(): void {
+        if (this._frameLoopId !== null) {
+            return;
+        }
+        const loop = () => {
+            if (this._destroyed) {
+                return;
+            }
+            this._frameLoopId = requestAnimationFrame(loop);
+            this._renderFrame();
+        };
+        this._frameLoopId = requestAnimationFrame(loop);
+    }
+
+    /**
+     * 停止渲染帧循环。
+     */
+    private _stopFrameLoop(): void {
+        if (this._frameLoopId !== null) {
+            cancelAnimationFrame(this._frameLoopId);
+            this._frameLoopId = null;
+        }
+    }
+
+    /**
+     * 将指针事件的 client 坐标转为相对主画布左上角的 CSS 像素（与 {@link Map2D.unproject} 一致）。
+     *
+     * @param ev - 鼠标或滚轮事件
+     * @returns [x, y]
+     */
+    private _getPointerCanvasPoint(ev: MouseEvent | WheelEvent): [number, number] {
+        const rect = this._canvas.getBoundingClientRect();
+        return [ev.clientX - rect.left, ev.clientY - rect.top];
+    }
+
+    /**
+     * 构造并派发 {@link MapMouseEvent}（不经过图层复合键）。
+     *
+     * @param type - 事件名
+     * @param ev - 底层 DOM 事件
+     */
+    private _emitPointerEvent(type: MapEventType, ev: MouseEvent | WheelEvent): void {
+        if (this._destroyed) {
+            return;
+        }
+        const point = this._getPointerCanvasPoint(ev);
+        const lngLat = this.unproject(point);
+        const mouseEv: MapMouseEvent = {
+            type,
+            target: this,
+            lngLat,
+            point,
+            originalEvent: ev,
+            preventDefault: () => ev.preventDefault(),
+        };
+        this._emitter.emit(type, mouseEv);
+    }
+
+    /**
+     * 绑定画布与窗口上的指针/滚轮监听：拖拽平移、滚轮缩放、双击放大，并派发 MapMouseEvent。
+     * 受 {@link Map2DOptions.interactive} / dragPan / scrollZoom / doubleClickZoom 控制。
+     */
+    private _installInteractionHandlers(): void {
+        if (this._interactionCleanup !== null) {
+            return;
+        }
+        const opts = this._options;
+        if (opts.interactive === false) {
+            return;
+        }
+
+        const canvas = this._canvas;
+        const dragPan = opts.dragPan !== false;
+        const scrollZoom = opts.scrollZoom !== false;
+        const doubleClickZoom = opts.doubleClickZoom !== false;
+
+        canvas.style.touchAction = 'none';
+
+        const onWindowMouseMove = (e: MouseEvent): void => {
+            if (!this._dragPanActive || this._lastDragPoint === null || this._destroyed) {
+                return;
+            }
+            const p = this._getPointerCanvasPoint(e);
+            const ll = this.unproject(p);
+            const ll0 = this.unproject(this._lastDragPoint);
+            this._center = [this._center[0] - (ll[0] - ll0[0]), this._center[1] - (ll[1] - ll0[1])];
+            this._lastDragPoint = p;
+            this._emitBase('move', { type: 'move', target: this });
+            this._emitPointerEvent('mousemove', e);
+        };
+
+        const onWindowMouseUp = (e: MouseEvent): void => {
+            window.removeEventListener('mousemove', onWindowMouseMove);
+            window.removeEventListener('mouseup', onWindowMouseUp);
+            if (this._destroyed) {
+                return;
+            }
+            if (this._dragPanActive) {
+                this._emitPointerEvent('mouseup', e);
+            }
+            this._dragPanActive = false;
+            this._lastDragPoint = null;
+        };
+
+        const onCanvasMouseDown = (e: MouseEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            if (e.button !== 0) {
+                return;
+            }
+            if (dragPan) {
+                this._dragPanActive = true;
+                this._lastDragPoint = this._getPointerCanvasPoint(e);
+                window.addEventListener('mousemove', onWindowMouseMove);
+                window.addEventListener('mouseup', onWindowMouseUp);
+            }
+            this._emitPointerEvent('mousedown', e);
+        };
+
+        const onCanvasMouseMove = (e: MouseEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            if (this._dragPanActive) {
+                return;
+            }
+            this._emitPointerEvent('mousemove', e);
+        };
+
+        const onCanvasMouseUp = (e: MouseEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            if (this._dragPanActive) {
+                return;
+            }
+            this._emitPointerEvent('mouseup', e);
+        };
+
+        const onCanvasClick = (e: MouseEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            this._emitPointerEvent('click', e);
+        };
+
+        const onCanvasDblClick = (e: MouseEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            this._emitPointerEvent('dblclick', e);
+            if (!doubleClickZoom) {
+                return;
+            }
+            e.preventDefault();
+            const p = this._getPointerCanvasPoint(e);
+            const ll = this.unproject(p);
+            const newZoom = clampZoom(this._zoom + 1, this._minZoom, this._maxZoom);
+            if (newZoom === this._zoom) {
+                return;
+            }
+            this._zoom = newZoom;
+            const after = this.unproject(p);
+            this._center = [this._center[0] + ll[0] - after[0], this._center[1] + ll[1] - after[1]];
+            this._emitZoomEvents();
+        };
+
+        const wheelOpts: AddEventListenerOptions = { passive: false };
+        const onWheel = (e: WheelEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            if (scrollZoom) {
+                e.preventDefault();
+                const z = this._zoom;
+                const delta = -e.deltaY * 0.001;
+                const newZoom = clampZoom(z + delta, this._minZoom, this._maxZoom);
+                if (newZoom !== z) {
+                    const p = this._getPointerCanvasPoint(e);
+                    const ll = this.unproject(p);
+                    this._zoom = newZoom;
+                    const after = this.unproject(p);
+                    this._center = [this._center[0] + ll[0] - after[0], this._center[1] + ll[1] - after[1]];
+                    this._emitZoomEvents();
+                }
+            }
+            this._emitPointerEvent('wheel', e);
+        };
+
+        const onContextMenu = (e: MouseEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            this._emitPointerEvent('contextmenu', e);
+        };
+
+        const onMouseEnter = (e: MouseEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            this._emitPointerEvent('mouseenter', e);
+        };
+
+        const onMouseLeave = (e: MouseEvent): void => {
+            if (this._destroyed) {
+                return;
+            }
+            if (this._dragPanActive) {
+                return;
+            }
+            this._emitPointerEvent('mouseleave', e);
+        };
+
+        canvas.addEventListener('mousedown', onCanvasMouseDown);
+        canvas.addEventListener('mousemove', onCanvasMouseMove);
+        canvas.addEventListener('mouseup', onCanvasMouseUp);
+        canvas.addEventListener('click', onCanvasClick);
+        canvas.addEventListener('dblclick', onCanvasDblClick);
+        canvas.addEventListener('wheel', onWheel, wheelOpts);
+        canvas.addEventListener('contextmenu', onContextMenu);
+        canvas.addEventListener('mouseenter', onMouseEnter);
+        canvas.addEventListener('mouseleave', onMouseLeave);
+
+        this._interactionCleanup = (): void => {
+            canvas.removeEventListener('mousedown', onCanvasMouseDown);
+            canvas.removeEventListener('mousemove', onCanvasMouseMove);
+            canvas.removeEventListener('mouseup', onCanvasMouseUp);
+            canvas.removeEventListener('click', onCanvasClick);
+            canvas.removeEventListener('dblclick', onCanvasDblClick);
+            canvas.removeEventListener('wheel', onWheel, wheelOpts);
+            canvas.removeEventListener('contextmenu', onContextMenu);
+            canvas.removeEventListener('mouseenter', onMouseEnter);
+            canvas.removeEventListener('mouseleave', onMouseLeave);
+            window.removeEventListener('mousemove', onWindowMouseMove);
+            window.removeEventListener('mouseup', onWindowMouseUp);
+            this._dragPanActive = false;
+            this._lastDragPoint = null;
+        };
+    }
+
+    /**
+     * 解绑交互监听（在 {@link Map2D.remove} 中调用）。
+     */
+    private _teardownInteractionHandlers(): void {
+        if (this._interactionCleanup !== null) {
+            this._interactionCleanup();
+            this._interactionCleanup = null;
+        }
+    }
+
+    /**
+     * 计算 2D 正交投影相机状态。
+     * 使用相机相对坐标系——世界坐标减去相机中心，使顶点值趋近 0，
+     * 保证 float32 在高缩放级别下的精度。
+     *
+     * @returns CameraState 快照
+     */
+    private _computeCameraState(): CameraState {
+        const rect = this._canvas.getBoundingClientRect();
+        const w = Math.max(1, rect.width);
+        const h = Math.max(1, rect.height);
+
+        // 正交投影矩阵（相机相对坐标系）
+        // X: [-w/2, w/2] → [-1, 1]
+        // Y: [-h/2, h/2] → [1, -1]（Y 轴翻转：世界像素 Y↓，裁剪空间 Y↑）
+        // Z: 常量 0.5（2D 无深度变化）
+        const vpMatrix = new Float32Array(16);
+        vpMatrix[0] = 2 / w;        // column 0, row 0
+        vpMatrix[5] = -2 / h;       // column 1, row 1
+        vpMatrix[10] = 0.5;         // column 2, row 2 (Z scale)
+        vpMatrix[14] = 0.5;         // column 3, row 2 (Z translate)
+        vpMatrix[15] = 1;           // column 3, row 3
+
+        // 投影矩阵（与 vpMatrix 相同，因为视图矩阵是单位阵）
+        const projectionMatrix = new Float32Array(vpMatrix);
+
+        // 视图矩阵 = 单位矩阵（相机相对坐标系下相机在原点）
+        const viewMatrix = new Float32Array(16);
+        viewMatrix[0] = 1; viewMatrix[5] = 1; viewMatrix[10] = 1; viewMatrix[15] = 1;
+
+        // 逆 VP 矩阵
+        const inverseVPMatrix = new Float32Array(16);
+        inverseVPMatrix[0] = w / 2;
+        inverseVPMatrix[5] = -h / 2;
+        inverseVPMatrix[10] = 2;
+        inverseVPMatrix[14] = -1;
+        inverseVPMatrix[15] = 1;
+
+        // 相机位置（世界像素坐标——用于 LOD / fog 等）
+        const worldSize = 512 * Math.pow(2, this._zoom);
+        const cLat = Math.max(-85.05, Math.min(85.05, this._center[1]));
+        const latRad = cLat * Math.PI / 180;
+        const cpx = ((this._center[0] + 180) / 360) * worldSize;
+        const cpy = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * worldSize;
+
+        const position = new Float32Array([cpx, cpy, 0]);
+
+        return {
+            center: [this._center[0], this._center[1]],
+            zoom: this._zoom,
+            bearing: this._bearing,
+            pitch: this._pitch,
+            viewMatrix,
+            projectionMatrix,
+            vpMatrix,
+            inverseVPMatrix,
+            position,
+            altitude: 40075016.686 / (Math.pow(2, this._zoom) * 512),
+            fov: Math.PI / 4,
+            roll: 0,
+        };
+    }
+
+    /**
+     * 单帧渲染：计算相机→更新图层→创建渲染通道→编码绘制命令→提交 GPU。
+     */
+    private _renderFrame(): void {
+        if (this._device === null || this._gpuContext === null || this._destroyed) {
+            return;
+        }
+
+        // 计算帧间隔
+        const now = performance.now();
+        const deltaTime = Math.min((now - this._lastFrameTime) / 1000, 0.1);
+        this._lastFrameTime = now;
+
+        // 更新画布尺寸
+        const maxPR = this._options.maxPixelRatio ?? 2;
+        this._resizeCanvasInternal(maxPR);
+
+        // 重新配置 context（尺寸可能变了）
+        const cw = this._canvas.width;
+        const ch = this._canvas.height;
+        if (cw === 0 || ch === 0) {
+            return;
+        }
+
+        // 计算相机状态
+        this._cameraState = this._computeCameraState();
+
+        this._emitBase('prerender', { type: 'prerender', target: this });
+
+        // 更新所有图层
+        for (const layerInstance of this._layerInstances.values()) {
+            if (layerInstance.visible) {
+                layerInstance.onUpdate(deltaTime, this._cameraState);
+            }
+        }
+
+        // 获取当前帧的 swap chain 纹理
+        let currentTexture: GPUTexture;
+        try {
+            currentTexture = this._gpuContext.getCurrentTexture();
+        } catch {
+            return;
+        }
+        const textureView = currentTexture.createView();
+
+        // 创建命令编码器
+        const encoder = this._device.createCommandEncoder();
+
+        // 开始渲染通道（清除为深色背景）
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: textureView,
+                loadOp: 'clear',
+                storeOp: 'store',
+                clearValue: { r: 0.06, g: 0.08, b: 0.12, a: 1.0 },
+            }],
+        });
+
+        // 编码所有可见图层的绘制命令
+        for (const id of this._layerOrder) {
+            const layerInstance = this._layerInstances.get(id);
+            const layerEntry = this._layers.get(id);
+            if (layerInstance !== undefined && layerEntry !== undefined && layerEntry.visible) {
+                layerInstance.encode(pass, this._cameraState);
+            }
+        }
+
+        pass.end();
+
+        // 提交 GPU 命令
+        this._device.queue.submit([encoder.finish()]);
+
+        this._emitBase('postrender', { type: 'postrender', target: this });
+        this._emitBase('render', { type: 'render', target: this });
     }
 
     /**
@@ -1361,6 +1928,17 @@ export class Map2D {
             );
         }
         this._sources.set(id, source);
+
+        // 如果有图层已引用此 source，注入 URL 模板
+        for (const [layerId, entry] of this._layers) {
+            if (entry.base.source === id) {
+                const inst = this._layerInstances.get(layerId);
+                if (inst !== undefined && typeof inst.setData === 'function') {
+                    inst.setData({ tiles: source.tiles ?? [] });
+                }
+            }
+        }
+
         this._emitBase('data', { type: 'data', target: this });
         return this;
     }
@@ -1466,6 +2044,10 @@ export class Map2D {
         } else {
             this._layerOrder.push(id);
         }
+
+        // 创建实际 Layer 实例
+        this._createLayerInstance(layer);
+
         this._emitBase('data', { type: 'data', target: this });
         return this;
     }
@@ -1485,6 +2067,13 @@ export class Map2D {
                 { id },
             );
         }
+        // 清理 Layer 实例
+        const layerInst = this._layerInstances.get(id);
+        if (layerInst !== undefined) {
+            layerInst.onRemove();
+            this._layerInstances.delete(id);
+        }
+
         this._layers.delete(id);
         const ix = this._layerOrder.indexOf(id);
         if (ix >= 0) {
@@ -1528,6 +2117,43 @@ export class Map2D {
             paint: { ...e.paint },
             beforeId: b.beforeId,
         };
+    }
+
+    /**
+     * 根据 LayerSpec 创建实际的 Layer 实例。
+     * 当前支持 type='raster'，其余类型待后续 Sprint 实现。
+     *
+     * @param spec - 图层规格
+     */
+    private _createLayerInstance(spec: LayerSpec): void {
+        if (spec.type === 'raster') {
+            // 获取 source 的 tile URL 模板
+            const sourceId = typeof spec.source === 'string' ? spec.source : undefined;
+            const sourceSpec = sourceId !== undefined ? this._sources.get(sourceId) : undefined;
+            const tiles = sourceSpec?.tiles ?? [];
+
+            const rasterLayer = createRasterTileLayer({
+                id: spec.id,
+                source: sourceId ?? '',
+                tiles,
+                tileSize: sourceSpec?.tileSize ?? 256,
+                opacity: (spec.paint?.['raster-opacity'] as number | undefined) ?? 1,
+                minzoom: spec.minzoom ?? 0,
+                maxzoom: sourceSpec?.maxzoom ?? spec.maxzoom ?? 22,
+                fadeDuration: (spec.paint?.['raster-fade-duration'] as number | undefined) ?? 300,
+                projection: 'mercator',
+                paint: spec.paint,
+                layout: spec.layout,
+            });
+
+            this._layerInstances.set(spec.id, rasterLayer);
+
+            // 如果 GPU 已初始化，立即 onAdd
+            if (this._device !== null) {
+                const ctx = this._buildLayerContext(spec.id);
+                rasterLayer.onAdd(ctx);
+            }
+        }
     }
 
     /**
@@ -1601,6 +2227,11 @@ export class Map2D {
             );
         }
         e.layout[name] = value;
+        // 同步到 Layer 实例
+        const layerInst = this._layerInstances.get(layerId);
+        if (layerInst !== undefined) {
+            layerInst.setLayoutProperty(name, value);
+        }
         this.triggerRepaint();
         return this;
     }
@@ -1624,6 +2255,11 @@ export class Map2D {
             );
         }
         e.paint[name] = value;
+        // 同步到 Layer 实例
+        const layerInst = this._layerInstances.get(layerId);
+        if (layerInst !== undefined) {
+            layerInst.setPaintProperty(name, value);
+        }
         this.triggerRepaint();
         return this;
     }
@@ -1930,25 +2566,67 @@ export class Map2D {
     }
 
     /**
-     * 经纬度 → 屏幕像素（MVP 占位返回 [0,0]）。
+     * 经纬度 → 屏幕 CSS 像素坐标（相对容器左上角）。
+     * 使用 Web Mercator 投影将经纬度映射到当前视口的像素位置。
      *
-     * @param _lngLat - 经纬度
-     * @returns 像素坐标
+     * @param lngLat - [longitude, latitude]（度）
+     * @returns [x, y] CSS 像素坐标
      */
-    public project(_lngLat: [number, number]): [number, number] {
+    public project(lngLat: [number, number]): [number, number] {
         this._ensureAlive();
-        return [0, 0];
+        const rect = this._canvas.getBoundingClientRect();
+        const w = Math.max(1, rect.width);
+        const h = Math.max(1, rect.height);
+        const worldSize = 512 * Math.pow(2, this._zoom);
+
+        // 目标点的世界像素坐标
+        const lng = lngLat[0];
+        const cLat = Math.max(-85.05, Math.min(85.05, lngLat[1]));
+        const latRad = cLat * Math.PI / 180;
+        const px = ((lng + 180) / 360) * worldSize;
+        const py = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * worldSize;
+
+        // 相机中心的世界像素坐标
+        const cCLat = Math.max(-85.05, Math.min(85.05, this._center[1]));
+        const cLatRad = cCLat * Math.PI / 180;
+        const cx = ((this._center[0] + 180) / 360) * worldSize;
+        const cy = (1 - Math.log(Math.tan(cLatRad) + 1 / Math.cos(cLatRad)) / Math.PI) / 2 * worldSize;
+
+        // 相对偏移 → 屏幕坐标
+        const screenX = (px - cx) + w / 2;
+        const screenY = (py - cy) + h / 2;
+        return [screenX, screenY];
     }
 
     /**
-     * 屏幕像素 → 经纬度（MVP 占位返回 [0,0]）。
+     * 屏幕 CSS 像素坐标 → 经纬度。
+     * 将屏幕位置反投影到 Web Mercator 地理坐标。
      *
-     * @param _point - 像素坐标
-     * @returns 经纬度
+     * @param point - [x, y] CSS 像素坐标（相对容器左上角）
+     * @returns [longitude, latitude]（度）
      */
-    public unproject(_point: [number, number]): [number, number] {
+    public unproject(point: [number, number]): [number, number] {
         this._ensureAlive();
-        return [0, 0];
+        const rect = this._canvas.getBoundingClientRect();
+        const w = Math.max(1, rect.width);
+        const h = Math.max(1, rect.height);
+        const worldSize = 512 * Math.pow(2, this._zoom);
+
+        // 相机中心世界像素
+        const cCLat = Math.max(-85.05, Math.min(85.05, this._center[1]));
+        const cLatRad = cCLat * Math.PI / 180;
+        const cx = ((this._center[0] + 180) / 360) * worldSize;
+        const cy = (1 - Math.log(Math.tan(cLatRad) + 1 / Math.cos(cLatRad)) / Math.PI) / 2 * worldSize;
+
+        // 屏幕偏移 → 世界像素
+        const worldPx = cx + (point[0] - w / 2);
+        const worldPy = cy + (point[1] - h / 2);
+
+        // 世界像素 → 经纬度
+        const lng = (worldPx / worldSize) * 360 - 180;
+        const yNorm = 1 - (2 * worldPy) / worldSize;
+        const lat = Math.atan(Math.sinh(Math.PI * yNorm)) * (180 / Math.PI);
+        return [lng, lat];
     }
 
     /**
@@ -1980,6 +2658,16 @@ export class Map2D {
         this._ensureAlive();
         const maxPR = this._options.maxPixelRatio ?? 2;
         this._resizeCanvasInternal(maxPR);
+
+        // 重新配置 GPU 上下文以匹配新尺寸
+        if (this._device !== null && this._gpuContext !== null) {
+            this._gpuContext.configure({
+                device: this._device,
+                format: this._preferredFormat,
+                alphaMode: 'premultiplied',
+            });
+        }
+
         this._emitBase('resize', { type: 'resize', target: this });
         return this;
     }
@@ -2004,6 +2692,23 @@ export class Map2D {
         this._removing = true;
         try {
             this._cancelAnimations();
+            this._stopFrameLoop();
+
+            // 清理所有 Layer 实例
+            for (const inst of this._layerInstances.values()) {
+                try { inst.onRemove(); } catch (e) { devError('[Map2D] layer onRemove error', e); }
+            }
+            this._layerInstances.clear();
+
+            // 销毁 GPU 资源
+            this._depthTexture?.destroy();
+            this._depthTexture = null;
+            this._device?.destroy();
+            this._device = null;
+            this._gpuContext = null;
+
+            this._teardownInteractionHandlers();
+
             this._emitBase('remove', { type: 'remove', target: this });
             for (const c of this._controls.keys()) {
                 const rec = this._controls.get(c);
@@ -2064,33 +2769,41 @@ export class Map2D {
     }
 
     /**
-     * 渲染子系统逃生舱（MVP 空对象）。
+     * 渲染子系统逃生舱口——暴露 GPU 设备和上下文供高级用户直接操作。
+     *
+     * @returns 包含 GPU 设备和上下文的对象
      */
-    public get renderer(): Record<string, never> {
+    public get renderer(): { device: GPUDevice | null; context: GPUCanvasContext | null; format: GPUTextureFormat } {
         this._ensureAlive();
-        return {};
+        return {
+            device: this._device,
+            context: this._gpuContext,
+            format: this._preferredFormat,
+        };
     }
 
     /**
-     * 场景子系统逃生舱（MVP 空对象）。
+     * 场景子系统逃生舱口——暴露 Layer 实例供高级用户直接操作。
+     *
+     * @returns 图层实例映射的只读视图
      */
-    public get scene(): Record<string, never> {
+    public get scene(): { layers: ReadonlyMap<string, Layer> } {
         this._ensureAlive();
-        return {};
+        return { layers: this._layerInstances };
     }
 
     /**
-     * 调度子系统逃生舱（MVP 空对象）。
+     * 调度子系统逃生舱口（当前暴露帧循环控制）。
      */
-    public get scheduler(): Record<string, never> {
+    public get scheduler(): { isRunning: boolean } {
         this._ensureAlive();
-        return {};
+        return { isRunning: this._frameLoopId !== null };
     }
 
     /**
-     * 扩展子系统逃生舱（MVP 空对象）。
+     * 扩展子系统逃生舱口（预留）。
      */
-    public get extensions(): Record<string, never> {
+    public get extensions(): Record<string, unknown> {
         this._ensureAlive();
         return {};
     }
