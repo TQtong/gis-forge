@@ -1,27 +1,53 @@
 import * as React from 'react';
 import {
-    Hand,
-    Columns2,
-    History,
-    Layers,
-    Map,
-    Mountain,
-    PenLine,
-    Ruler,
-    Search,
-    Settings,
-    MousePointer,
-    SquareDashed,
-} from 'lucide-react';
+    Panel,
+    PanelGroup,
+    PanelResizeHandle,
+    type ImperativePanelHandle,
+} from 'react-resizable-panels';
 import { Map2D, type MapEvent, type MapMouseEvent } from '@/packages/preset-2d/src/map-2d.ts';
+import type { RasterTileLayer } from '@/packages/layer-tile-raster/src/RasterTileLayer.ts';
+import { InitLoading, WebGPUError } from '@/components/loading';
+import { TopToolbar } from '@/components/layout/TopToolbar';
+import { LeftPanel } from '@/components/layout/LeftPanel';
+import { RightPanel } from '@/components/layout/RightPanel';
+import { MapViewport } from '@/components/layout/MapViewport';
+import { StatusBar } from '@/components/layout/StatusBar';
 
 /**
- * 应用壳：侧栏与顶栏为静态布局；主区域挂载 GeoForge Map2D 并加载 OSM 栅格瓦片。
+ * 加载页最短展示时间（毫秒）。
+ * 引擎 `ready()` 往往远小于 500ms 就完成，不设下限时界面会「闪一下」就消失。
+ */
+const MIN_LOADING_SCREEN_MS = 2500;
+
+function createInitialEngineSteps(): Array<{ label: string; done: boolean }> {
+    return [
+        { label: '检测 WebGPU 环境', done: false },
+        { label: '初始化 GPU 设备与画布', done: false },
+        { label: '加载底图与瓦片图层', done: false },
+    ];
+}
+
+/**
+ * 应用壳：顶栏 + 可拖拽三栏 + 底栏状态；主区域为 Map2D + OSM 栅格。
  */
 export function App(): React.ReactElement {
     const mapContainerRef = React.useRef<HTMLDivElement | null>(null);
+    const leftPanelRef = React.useRef<ImperativePanelHandle>(null);
+    const rightPanelRef = React.useRef<ImperativePanelHandle>(null);
+
+    const [engineStatus, setEngineStatus] = React.useState<'loading' | 'ready'>('loading');
+    const [engineProgress, setEngineProgress] = React.useState(0);
+    const [engineSteps, setEngineSteps] = React.useState(createInitialEngineSteps);
+
     const [cursorLabel, setCursorLabel] = React.useState<string>('—');
     const [zoomLabel, setZoomLabel] = React.useState<string>('—');
+    const [tileCountLabel, setTileCountLabel] = React.useState<string>('—');
+    const [fpsLabel, setFpsLabel] = React.useState<string>('—');
+    const [memLabel, setMemLabel] = React.useState<string>('—');
+
+    const canUseWebGPU =
+        typeof navigator !== 'undefined' && navigator.gpu !== undefined && navigator.gpu !== null;
 
     React.useEffect(() => {
         const el = mapContainerRef.current;
@@ -29,8 +55,21 @@ export function App(): React.ReactElement {
             return;
         }
 
+        const bootStartedAt = performance.now();
         let map: Map2D | null = null;
         let teardownMapEvents: (() => void) | undefined;
+        let progressTimer: ReturnType<typeof setInterval> | null = null;
+        let minimumOverlayTimer: ReturnType<typeof setTimeout> | null = null;
+
+        setEngineSteps((prev) => {
+            const next = [...prev];
+            if (next[0]) {
+                next[0] = { ...next[0], done: true };
+            }
+            return next;
+        });
+        setEngineProgress(12);
+
         try {
             map = new Map2D({
                 container: el,
@@ -39,18 +78,23 @@ export function App(): React.ReactElement {
                 accessibleTitle: 'GeoForge 二维地图',
             });
 
-            // 添加 OpenStreetMap 栅格瓦片数据源
+            setEngineSteps((prev) => {
+                const next = [...prev];
+                if (next[1]) {
+                    next[1] = { ...next[1], done: true };
+                }
+                return next;
+            });
+            setEngineProgress(35);
+
             map.addSource('osm-raster', {
                 type: 'raster',
-                tiles: [
-                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                ],
+                tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
                 tileSize: 256,
                 maxzoom: 19,
                 attribution: '© OpenStreetMap contributors',
             });
 
-            // 添加栅格瓦片图层
             map.addLayer({
                 id: 'osm-tiles',
                 type: 'raster',
@@ -61,7 +105,11 @@ export function App(): React.ReactElement {
                 },
             });
 
-            void map.ready().then(() => {
+            progressTimer = setInterval(() => {
+                setEngineProgress((p) => (p >= 90 ? p : p + 2));
+            }, 150);
+
+            const wireMapEvents = (): void => {
                 if (map === null) {
                     return;
                 }
@@ -75,6 +123,41 @@ export function App(): React.ReactElement {
                 const onViewChange = (): void => {
                     setZoomLabel(map!.getZoom().toFixed(2));
                 };
+
+                let fpsSecondStart = performance.now();
+                let fpsCountInSecond = 0;
+
+                const onRender = (): void => {
+                    if (map === null) {
+                        return;
+                    }
+                    const now = performance.now();
+                    fpsCountInSecond++;
+                    const elapsed = now - fpsSecondStart;
+                    if (elapsed >= 1000) {
+                        setFpsLabel(String(Math.round((fpsCountInSecond * 1000) / elapsed)));
+                        fpsCountInSecond = 0;
+                        fpsSecondStart = now;
+                    }
+
+                    let visibleTiles = 0;
+                    let cacheBytes = 0;
+                    for (const layer of map.scene.layers.values()) {
+                        if (layer.type !== 'raster') {
+                            continue;
+                        }
+                        const rl = layer as RasterTileLayer;
+                        visibleTiles += rl.visibleTiles;
+                        const data =
+                            typeof rl.getData === 'function'
+                                ? (rl.getData() as { cacheBytes?: number })
+                                : {};
+                        cacheBytes += typeof data.cacheBytes === 'number' ? data.cacheBytes : 0;
+                    }
+                    setTileCountLabel(String(visibleTiles));
+                    setMemLabel((cacheBytes / (1024 * 1024)).toFixed(1));
+                };
+
                 const onMapClick = (ev: MapEvent | MapMouseEvent): void => {
                     if (ev.type !== 'click') {
                         return;
@@ -82,171 +165,109 @@ export function App(): React.ReactElement {
                     const me = ev as MapMouseEvent;
                     console.info('[App] map click', me.lngLat[0], me.lngLat[1]);
                 };
+
                 map.on('mousemove', onPointerMove);
                 map.on('move', onViewChange);
+                map.on('render', onRender);
                 map.on('click', onMapClick);
                 setZoomLabel(map.getZoom().toFixed(2));
                 teardownMapEvents = (): void => {
                     map!.off('mousemove', onPointerMove);
                     map!.off('move', onViewChange);
+                    map!.off('render', onRender);
                     map!.off('click', onMapClick);
                 };
+            };
+
+            void map.ready().then(() => {
+                if (map === null) {
+                    return;
+                }
+                const elapsed = performance.now() - bootStartedAt;
+                const remaining = Math.max(0, MIN_LOADING_SCREEN_MS - elapsed);
+                minimumOverlayTimer = setTimeout(() => {
+                    minimumOverlayTimer = null;
+                    if (progressTimer !== null) {
+                        clearInterval(progressTimer);
+                        progressTimer = null;
+                    }
+                    setEngineProgress(100);
+                    setEngineSteps((prev) => prev.map((s) => ({ ...s, done: true })));
+                    setEngineStatus('ready');
+                    wireMapEvents();
+                }, remaining);
             });
         } catch (err) {
+            if (progressTimer !== null) {
+                clearInterval(progressTimer);
+            }
             console.error('[App] Map2D 初始化失败', err);
+            setEngineProgress(100);
+            setEngineStatus('ready');
             return;
         }
 
         return () => {
+            if (progressTimer !== null) {
+                clearInterval(progressTimer);
+            }
+            if (minimumOverlayTimer !== null) {
+                clearTimeout(minimumOverlayTimer);
+            }
             teardownMapEvents?.();
             try {
                 map?.remove();
             } catch {
-                // 重复销毁或容器已脱离文档时忽略
+                // ignore
             }
             map = null;
         };
     }, []);
 
+    if (!canUseWebGPU) {
+        return <WebGPUError />;
+    }
+
     return (
-        <div className="h-screen w-screen overflow-hidden flex flex-col bg-[var(--bg-primary)]">
-<header
-                className="h-12 flex items-center px-3 gap-2 bg-[var(--bg-panel)] border-b border-[var(--border)] shrink-0"
-                role="banner"
-            >
-                <div className="flex items-center gap-3 min-w-0 shrink-0">
-                    <div className="flex items-center gap-2">
-                        <Map aria-hidden className="text-[var(--accent)]" strokeWidth={2} size={20} />
-                        <span className="text-base font-semibold text-[var(--text-primary)] whitespace-nowrap">
-                            GeoForge
-                        </span>
-                    </div>
-                    <div
-                        className="flex rounded-md border border-[var(--border)] bg-[var(--bg-input)] p-0.5 text-xs"
-                        role="group"
-                        aria-label="视图模式（静态）"
+        <>
+            <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg-primary)]">
+                <TopToolbar />
+                <PanelGroup direction="horizontal" className="min-h-0 flex-1">
+                    <Panel
+                        ref={leftPanelRef}
+                        defaultSize={18}
+                        minSize={0}
+                        collapsible
+                        className="min-w-0"
                     >
-                        <span className="px-2 py-1 rounded bg-[var(--accent)] text-white">2D</span>
-                        <span className="px-2 py-1 rounded text-[var(--text-secondary)]">2.5D</span>
-                        <span className="px-2 py-1 rounded text-[var(--text-secondary)]">3D</span>
-                    </div>
-                </div>
-                <div className="flex-1 flex justify-center px-2 min-w-0">
-                    <div className="flex w-full max-w-md items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--bg-input)] px-2 py-1.5">
-                        <Search className="size-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
-                        <span className="text-sm text-[var(--text-muted)] truncate">搜索地点（静态预览）</span>
-                    </div>
-                </div>
-                <div className="flex items-center gap-1 shrink-0 text-[var(--text-secondary)]">
-                    <span className="p-2 rounded-md" title="平移" aria-hidden>
-                        <Hand className="size-5" strokeWidth={2} />
-                    </span>
-                    <span className="p-2 rounded-md" title="选择" aria-hidden>
-                        <MousePointer className="size-5" strokeWidth={2} />
-                    </span>
-                    <span className="p-2 rounded-md" title="框选" aria-hidden>
-                        <SquareDashed className="size-5" strokeWidth={2} />
-                    </span>
-                    <span className="p-2 rounded-md" title="绘制" aria-hidden>
-                        <PenLine className="size-5" strokeWidth={2} />
-                    </span>
-                    <span className="p-2 rounded-md" title="测量" aria-hidden>
-                        <Ruler className="size-5" strokeWidth={2} />
-                    </span>
-                    <span className="p-2 rounded-md" title="分析" aria-hidden>
-                        <Mountain className="size-5" strokeWidth={2} />
-                    </span>
-                    <span className="p-2 rounded-md" title="操作历史" aria-hidden>
-                        <History className="size-5" strokeWidth={2} />
-                    </span>
-                    <span className="p-2 rounded-md" title="分屏对比" aria-hidden>
-                        <Columns2 className="size-5" strokeWidth={2} />
-                    </span>
-                    <span className="p-2 rounded-md" title="设置" aria-hidden>
-                        <Settings className="size-5" strokeWidth={2} />
-                    </span>
-                </div>
-            </header>
-            <div className="flex flex-1 min-h-0">
-                <aside
-                    className="w-[18%] min-w-[200px] max-w-[280px] flex flex-col overflow-hidden bg-[var(--bg-panel)] border-r border-[var(--border)]"
-                    aria-label="图层面板（静态）"
-                >
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] shrink-0">
-                        <span className="text-sm font-medium text-[var(--text-primary)] flex items-center gap-2">
-                            <Layers className="size-4 text-[var(--accent)]" aria-hidden />
-                            图层
-                        </span>
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                        <div className="rounded border border-[var(--border)] bg-[var(--bg-input)] px-2 py-2 text-xs text-[var(--text-secondary)]">
-                            底图 · 示例
-                        </div>
-                        <div className="rounded border border-[var(--border)] bg-[var(--bg-input)] px-2 py-2 text-xs text-[var(--text-secondary)]">
-                            矢量 · 示例
-                        </div>
-                    </div>
-                    <div className="shrink-0 border-t border-[var(--border)] p-2 text-xs text-[var(--text-muted)]">
-                        地形 / 书签 / 标注（静态占位）
-                    </div>
-                </aside>
-                <main className="flex-1 min-w-0 relative flex flex-col bg-[var(--bg-primary)]">
-                    <div
-                        ref={mapContainerRef}
-                        className="flex-1 m-2 min-h-0 rounded-lg border border-[var(--border)] overflow-hidden bg-[var(--bg-panel)]"
-                        aria-label="地图视图"
-                    />
-                    <div className="h-8 shrink-0 flex items-center justify-center border-t border-[var(--border)] bg-[var(--bg-panel)]/80 text-[10px] text-[var(--text-muted)]">
-                        工具提示栏（静态占位）
-                    </div>
-                </main>
-                <aside
-                    className="w-[20%] min-w-[220px] max-w-[320px] flex flex-col bg-[var(--bg-panel)] border-l border-[var(--border)] overflow-y-auto"
-                    aria-label="属性与样式（静态）"
-                >
-                    <nav
-                        className="flex shrink-0 border-b border-[var(--border)] px-1"
-                        role="tablist"
-                        aria-label="右侧面板"
+                        <LeftPanel />
+                    </Panel>
+                    <PanelResizeHandle className="w-px shrink-0 bg-[var(--border)] transition-colors hover:bg-[var(--accent)]" />
+                    <Panel defaultSize={62} minSize={30} className="min-w-0">
+                        <MapViewport mapContainerRef={mapContainerRef} />
+                    </Panel>
+                    <PanelResizeHandle className="w-px shrink-0 bg-[var(--border)] transition-colors hover:bg-[var(--accent)]" />
+                    <Panel
+                        ref={rightPanelRef}
+                        defaultSize={20}
+                        minSize={0}
+                        collapsible
+                        className="min-w-0"
                     >
-                        <span className="flex-1 px-2 py-2 text-xs font-medium text-center border-b-2 border-[var(--accent)] text-[var(--accent)]">
-                            属性
-                        </span>
-                        <span className="flex-1 px-2 py-2 text-xs font-medium text-center border-b-2 border-transparent text-[var(--text-secondary)]">
-                            样式
-                        </span>
-                        <span className="flex-1 px-2 py-2 text-xs font-medium text-center border-b-2 border-transparent text-[var(--text-secondary)]">
-                            图例
-                        </span>
-                    </nav>
-                    <div className="flex-1 flex flex-col min-h-0 px-3 py-6 text-sm text-[var(--text-secondary)] text-center leading-relaxed">
-                        未选择要素。地图支持拖拽平移、滚轮缩放；移动鼠标时状态栏显示经纬度。
-                    </div>
-                </aside>
+                        <RightPanel />
+                    </Panel>
+                </PanelGroup>
+                <StatusBar
+                    cursorLabel={cursorLabel}
+                    zoomLabel={zoomLabel}
+                    tileCountLabel={tileCountLabel}
+                    fpsLabel={fpsLabel}
+                    memLabel={memLabel}
+                />
             </div>
-            <footer
-                className="h-7 flex items-center px-3 gap-0 text-xs bg-[var(--bg-panel)] border-t border-[var(--border)] text-[var(--text-secondary)] shrink-0 overflow-x-auto"
-                role="contentinfo"
-            >
-                <span className="whitespace-nowrap" title="鼠标位置（经度, 纬度）">
-                    📍 {cursorLabel}
-                </span>
-                <span className="text-[var(--text-secondary)] opacity-30 px-1 select-none" aria-hidden>
-                    │
-                </span>
-                <span className="whitespace-nowrap">z: {zoomLabel}</span>
-                <span className="text-[var(--text-secondary)] opacity-30 px-1 select-none" aria-hidden>
-                    │
-                </span>
-                <span className="whitespace-nowrap">⬡ —</span>
-                <span className="text-[var(--text-secondary)] opacity-30 px-1 select-none" aria-hidden>
-                    │
-                </span>
-                <span className="whitespace-nowrap">— fps</span>
-                <span className="text-[var(--text-secondary)] opacity-30 px-1 select-none" aria-hidden>
-                    │
-                </span>
-                <span className="whitespace-nowrap">— MB</span>
-            </footer>
-        </div>
-    );  }
+            {engineStatus === 'loading' && (
+                <InitLoading progress={engineProgress} steps={engineSteps} />
+            )}
+        </>
+    );
+}
