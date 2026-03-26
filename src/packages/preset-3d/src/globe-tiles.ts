@@ -11,9 +11,52 @@ import {
     getSegments,
     tessellateGlobeTile,
 } from '../../globe/src/globe-tile-mesh.ts';
-import { MAX_TILE_CACHE_SIZE } from './globe-constants.ts';
+import {
+    MAX_CONCURRENT_TILE_FETCHES,
+    MAX_MESH_CACHE_SIZE,
+    MAX_TILE_CACHE_SIZE,
+} from './globe-constants.ts';
 import type { CachedMesh, CachedTile, GlobeGPURefs, TileManagerState } from './globe-types.ts';
 import { devWarn } from './globe-utils.ts';
+
+/** 当前进行中的瓦片 fetch 数（含 decode） */
+let _tileFetchInFlight = 0;
+
+/** 等待槽位的加载任务（与 {@link MAX_CONCURRENT_TILE_FETCHES} 配合） */
+const _tileFetchWaitQueue: Array<() => void> = [];
+
+/**
+ * 有可用槽位时从队首启动任务，直至达到并发上限（单任务结束时也应调用以填补空位）。
+ */
+function pumpTileFetchQueue(): void {
+    while (
+        _tileFetchInFlight < MAX_CONCURRENT_TILE_FETCHES
+        && _tileFetchWaitQueue.length > 0
+    ) {
+        const next = _tileFetchWaitQueue.shift();
+        if (next) { next(); }
+    }
+}
+
+/**
+ * 在全局并发上限内执行异步任务；完成后释放槽位并泵队列。
+ *
+ * @param run - 返回 Promise 的加载过程（fetch + GPU 上传）；用 `Promise.resolve` 包裹，避免未返回 Promise 时槽位泄漏。
+ */
+function scheduleTileFetch(run: () => Promise<void>): void {
+    const start = (): void => {
+        _tileFetchInFlight++;
+        void Promise.resolve(run()).finally(() => {
+            _tileFetchInFlight--;
+            pumpTileFetchQueue();
+        });
+    };
+    if (_tileFetchInFlight < MAX_CONCURRENT_TILE_FETCHES) {
+        start();
+    } else {
+        _tileFetchWaitQueue.push(start);
+    }
+}
 
 /**
  * 为键 `z/x/y` 发起异步影像加载；若不存在缓存项则先插入占位 `CachedTile`。
@@ -41,6 +84,7 @@ export function loadTileTexture(
         texture: null,
         bindGroup: null,
         loading: true,
+        loadError: false,
         textureReady: false,
         demReady: false,
         demData: null,
@@ -54,53 +98,59 @@ export function loadTileTexture(
         .replace('{x}', String(x))
         .replace('{y}', String(y));
 
-    fetchTileImage(url)
-        .then((bitmap) => {
-            if (isDestroyed() || !tileState.tileCache.has(key)) {
+    scheduleTileFetch(() =>
+        fetchTileImage(url)
+            .then((bitmap) => {
+                if (isDestroyed() || !tileState.tileCache.has(key)) {
+                    bitmap.close();
+                    return;
+                }
+
+                const texture = device.createTexture({
+                    size: { width: bitmap.width, height: bitmap.height },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING
+                        | GPUTextureUsage.COPY_DST
+                        | GPUTextureUsage.RENDER_ATTACHMENT,
+                    label: `Globe3D:tileTex:${key}`,
+                });
+
+                device.queue.copyExternalImageToTexture(
+                    { source: bitmap },
+                    { texture },
+                    { width: bitmap.width, height: bitmap.height },
+                );
+
                 bitmap.close();
-                return;
-            }
 
-            const texture = device.createTexture({
-                size: { width: bitmap.width, height: bitmap.height },
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING
-                    | GPUTextureUsage.COPY_DST
-                    | GPUTextureUsage.RENDER_ATTACHMENT,
-                label: `Globe3D:tileTex:${key}`,
-            });
+                const bindGroup = device.createBindGroup({
+                    layout: refs.tileBindGroupLayout!,
+                    entries: [
+                        { binding: 0, resource: refs.sampler! },
+                        { binding: 1, resource: texture.createView() },
+                    ],
+                    label: `Globe3D:tileBG:${key}`,
+                });
 
-            device.queue.copyExternalImageToTexture(
-                { source: bitmap },
-                { texture },
-                { width: bitmap.width, height: bitmap.height },
-            );
-
-            bitmap.close();
-
-            const bindGroup = device.createBindGroup({
-                layout: refs.tileBindGroupLayout!,
-                entries: [
-                    { binding: 0, resource: refs.sampler! },
-                    { binding: 1, resource: texture.createView() },
-                ],
-                label: `Globe3D:tileBG:${key}`,
-            });
-
-            const cached = tileState.tileCache.get(key);
-            if (cached) {
-                cached.texture = texture;
-                cached.bindGroup = bindGroup;
-                cached.loading = false;
-                cached.textureReady = true;
-            }
-        })
-        .catch((err) => {
-            devWarn(`[Globe3D] Failed to load tile ${key}:`, err);
-            tileState.tileCache.delete(key);
-            const idx = tileState.tileLRU.indexOf(key);
-            if (idx >= 0) { tileState.tileLRU.splice(idx, 1); }
-        });
+                const cached = tileState.tileCache.get(key);
+                if (cached) {
+                    cached.texture = texture;
+                    cached.bindGroup = bindGroup;
+                    cached.loading = false;
+                    cached.loadError = false;
+                    cached.textureReady = true;
+                }
+            })
+            .catch((err) => {
+                devWarn(`[Globe3D] Failed to load tile ${key}:`, err);
+                const cached = tileState.tileCache.get(key);
+                if (cached) {
+                    cached.loading = false;
+                    cached.loadError = true;
+                }
+                // 保留 cache 项，避免下一帧再次 loadTileTexture → 无限重试与连接耗尽
+            }),
+    );
 }
 
 /**
@@ -140,7 +190,7 @@ export async function fetchTileImage(url: string): Promise<ImageBitmap> {
 }
 
 /**
- * 按 `z/x/y` 键缓存 `GlobeTileMesh` 与对应 `indexBuffer`（GPU 常驻）。
+ * 按 `z/x/y` 键缓存 `GlobeTileMesh` 与对应索引/顶点 `GPUBuffer`（常驻显存，顶点缓冲每帧 CPU 写回 RTE）。
  *
  * @param meshCache - `Globe3D` 的 `_tileState.meshCache`
  * @returns 新建或已存在的 {@link CachedMesh}
@@ -157,6 +207,18 @@ export function getOrCreateTileMesh(
     const existing = meshCache.get(key);
     if (existing) { return existing; }
 
+    // 条目数有上限：缩放会遍历大量不同 `z/x/y`，FIFO 淘汰最旧项，避免 meshCache 与 GPU 缓冲无限增长
+    while (meshCache.size >= MAX_MESH_CACHE_SIZE) {
+        const oldestKey = meshCache.keys().next().value as string | undefined;
+        if (oldestKey === undefined) { break; }
+        const evicted = meshCache.get(oldestKey);
+        if (evicted) {
+            evicted.indexBuffer.destroy();
+            evicted.vertexBuffer.destroy();
+        }
+        meshCache.delete(oldestKey);
+    }
+
     const segments = getSegments(z);
     const mesh = tessellateGlobeTile(z, x, y, segments);
 
@@ -167,7 +229,14 @@ export function getOrCreateTileMesh(
     });
     device.queue.writeBuffer(indexBuffer, 0, mesh.indices.buffer as ArrayBuffer, mesh.indices.byteOffset, mesh.indices.byteLength);
 
-    const entry: CachedMesh = { mesh, indexBuffer };
+    const vertexByteLength = mesh.vertexCount * 8 * 4;
+    const vertexBuffer = device.createBuffer({
+        size: vertexByteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        label: `Globe3D:vertBuf:${key}`,
+    });
+
+    const entry: CachedMesh = { mesh, indexBuffer, vertexBuffer };
     meshCache.set(key, entry);
 
     return entry;
@@ -229,6 +298,7 @@ export function clearTileCache(tileState: TileManagerState): void {
 export function clearMeshCache(meshCache: Map<string, CachedMesh>): void {
     for (const entry of meshCache.values()) {
         entry.indexBuffer.destroy();
+        entry.vertexBuffer.destroy();
     }
     meshCache.clear();
 }

@@ -38,6 +38,19 @@ export const TILE_URL_TEMPLATE_DEFAULT = 'https://tile.openstreetmap.org/{z}/{x}
 export const MAX_TILE_CACHE_SIZE = 200;
 
 /**
+ * 同时对同一瓦片服务发起的 `fetch` 上限（见 `globe-tiles` 中 `scheduleTileFetch`）。
+ * 浏览器对单主机 HTTP/1.1 并发连接通常约 6；一帧对可见集无限制 `fetch` 会触发 `ERR_INSUFFICIENT_RESOURCES`。
+ * 默认取 4，为扩展页内其它请求留出余量。
+ */
+export const MAX_CONCURRENT_TILE_FETCHES = 4;
+
+/**
+ * CPU 侧 `GlobeTileMesh` + 索引/顶点 GPU 缓冲的条目上限。
+ * 缩放会不断出现新 `z/x/y`；无上限时 Map 与 GPU 缓冲持续增长。
+ */
+export const MAX_MESH_CACHE_SIZE = 300;
+
+/**
  * `zoom` 与相机高度换算常数：`altitude = ZOOM_ALTITUDE_C / 2^zoom`。
  * 取 WGS84 赤道半径，使 zoom=0 时约等于「地球半径」量级高度。
  */
@@ -201,8 +214,12 @@ export const MAX_DEFAULT_PIXEL_RATIO = 2.0;
 /** Canvas 最小 CSS 边长（像素），防止 0 尺寸 */
 export const MIN_CANVAS_DIM = 1;
 
-/** 滚轮 `deltaY` → 缩放增量的灵敏度 */
-export const ZOOM_SENSITIVITY = 0.01;
+/**
+ * 滚轮 `deltaY` → 传给 {@link Camera3D.handleZoom} 的增量系数。
+ * `handleZoom` 内部使用 `alt *= pow(1.002, -delta)`；原值 0.01 时每格滚轮约 0.2% 高度变化，
+ * 在地球尺度下需滚动过久；提高到 0.05 约为每格 ~1%（体感约 5 倍）。
+ */
+export const ZOOM_SENSITIVITY = 0.05;
 
 /** 鼠标像素位移 → bearing/pitch 弧度的灵敏度（中键拖拽） */
 export const ROTATE_SENSITIVITY = 0.003;

@@ -27,6 +27,7 @@ export {
     tessellateGlobeTile,
     tessellateGlobePolarCap,
     meshToRTE,
+    meshToRTEInto,
     meshToRTE_HighLow,
     screenToGlobe,
     isTileVisible_Horizon,

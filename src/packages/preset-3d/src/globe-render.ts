@@ -8,10 +8,13 @@
  */
 
 import type { GlobeTileID, GlobeCamera } from '../../globe/src/globe-tile-mesh.ts';
-import { meshToRTE } from '../../globe/src/globe-tile-mesh.ts';
+import { meshToRTE, meshToRTEInto } from '../../globe/src/globe-tile-mesh.ts';
 import { _skyUniformData, _tileParamsData } from './globe-buffers.ts';
 import type { GlobeGPURefs, TileManagerState } from './globe-types.ts';
 import { loadTileTexture, getOrCreateTileMesh, touchTileLRU } from './globe-tiles.ts';
+
+/** 每帧复用，避免每瓦片 `new Float32Array`；按需扩容以覆盖最大细分顶点数 */
+let _rteScratch = new Float32Array(4096 * 8);
 
 /**
  * 绘制全屏天穹：上传 `inverseVP_RTE` 与海拔，每帧新建 sky bind group（layout 来自 pipeline）。
@@ -64,7 +67,7 @@ export function renderSkyDome(
  * @returns 统计本遍绘制的瓦片数与 draw call 增量
  *
  * @remarks
- * 每瓦片临时创建 vertex buffer（生产环境可换缓冲池）。
+ * 顶点缓冲来自 {@link CachedMesh.vertexBuffer}，每帧仅 `writeBuffer` 更新 RTE。
  */
 export function renderGlobeTiles(
     device: GPUDevice,
@@ -110,14 +113,20 @@ export function renderGlobeTiles(
         const meshData = getOrCreateTileMesh(device, tile.z, tile.x, tile.y, tileState.meshCache);
         if (!meshData) { continue; }
 
-        const rteVerts = meshToRTE(meshData.mesh, gc.cameraECEF);
-
-        const vertBuf = device.createBuffer({
-            size: rteVerts.byteLength,
-            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-            label: `Globe3D:vertBuf:${strKey}`,
-        });
-        device.queue.writeBuffer(vertBuf, 0, rteVerts.buffer as ArrayBuffer, rteVerts.byteOffset, rteVerts.byteLength);
+        const vCount = meshData.mesh.vertexCount;
+        const rteFloats = vCount * 8;
+        if (_rteScratch.length < rteFloats) {
+            _rteScratch = new Float32Array(rteFloats);
+        }
+        meshToRTEInto(_rteScratch, meshData.mesh, gc.cameraECEF);
+        const rteBytes = rteFloats * 4;
+        device.queue.writeBuffer(
+            meshData.vertexBuffer,
+            0,
+            _rteScratch.buffer as ArrayBuffer,
+            _rteScratch.byteOffset,
+            rteBytes,
+        );
 
         _tileParamsData[0] = 0;
         _tileParamsData[1] = 0;
@@ -127,7 +136,7 @@ export function renderGlobeTiles(
 
         pass.setBindGroup(1, tileBG);
 
-        pass.setVertexBuffer(0, vertBuf);
+        pass.setVertexBuffer(0, meshData.vertexBuffer);
         pass.setIndexBuffer(meshData.indexBuffer, 'uint32');
         pass.drawIndexed(meshData.mesh.indexCount);
 

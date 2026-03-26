@@ -259,6 +259,51 @@ const _normalBuf = new Float64Array(3) as Vec3d;
 const _tmpVec3 = new Float64Array(3) as Vec3d;
 
 // ════════════════════════════════════════════════════════════════
+// Mercator UV 辅助函数
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * Mercator Y 投影值（代数优化版）。
+ *
+ * 标准公式：`ln(tan(φ) + sec(φ))`
+ * 等价变换：`tan(φ) + sec(φ) = sin(φ)/cos(φ) + 1/cos(φ) = (sin(φ)+1)/cos(φ)`
+ * 最终：`ln((sin(φ)+1) / cos(φ))`
+ *
+ * 优化点：当 sinLat / cosLat 已在调用方计算时（法线计算需要 sin/cos），
+ * 直接传入避免重复 trig 调用。标准 `tan+sec` 需 4 次运算（tan+cos+div+log），
+ * 此版本仅需 1 次加法 + 1 次除法 + 1 次 log = 3 次运算，且 sin/cos 复用后
+ * 实际只有 1 次除法 + 1 次 log 的增量开销。
+ *
+ * 边界保护：
+ * - cosLat → 0（lat → ±90°）时，(sin+1)/cos 趋向 +∞ 或 0/0。
+ *   北极（sinLat≈+1）：(1+1)/0 → +∞ → log(+∞) = +∞。
+ *   南极（sinLat≈-1）：(−1+1)/0 = 0/0 → NaN。
+ * - 返回有限大哨兵值（±30.0），确保后续 clamp 到 [0,1] 正确工作。
+ *   参考：mercatorY(85.051°) ≈ 3.13，±30.0 远超有效范围。
+ *
+ * @param sinLat - sin(纬度弧度)
+ * @param cosLat - cos(纬度弧度)，正常情况下 > 0（纬度 ∈ (-90°, 90°)）
+ * @returns Mercator Y 值，赤道处 = 0，北极方向增大，南极方向减小
+ *
+ * @example
+ * // 赤道：sin(0)=0, cos(0)=1 → ln(1/1) = 0
+ * mercatorY(0, 1); // 0
+ *
+ * @example
+ * // 45°N：sin(45°)≈0.707, cos(45°)≈0.707 → ln(1.707/0.707) ≈ 0.881
+ * mercatorY(Math.sin(Math.PI/4), Math.cos(Math.PI/4)); // ≈ 0.881
+ */
+function mercatorY(sinLat: number, cosLat: number): number {
+    // cosLat ≈ 0 时 (sin+1)/cos 退化为 +∞（北极）或 0/0=NaN（南极）
+    // 返回有限哨兵值，后续 rawTextureV × invMercRange → 远大/远小于 [0,1] → clamp 正确
+    if (cosLat < 1e-10) {
+        return sinLat >= 0 ? 30.0 : -30.0;
+    }
+    // (sin(φ)+1) / cos(φ) 总是 > 0（对 lat ∈ (-90°, 90°)），log 安全
+    return Math.log((sinLat + 1.0) / cosLat);
+}
+
+// ════════════════════════════════════════════════════════════════
 // 椭球体参数化本地辅助函数
 // ════════════════════════════════════════════════════════════════
 
@@ -444,8 +489,41 @@ export function tessellateGlobeTile(
     const latMax = isNorthPole ? POLE_LAT_NORTH : mercatorLatMax;
     const latMin = isSouthPole ? POLE_LAT_SOUTH : mercatorLatMin;
 
-    // 纬度跨度（度），用于 UV v 的归一化
-    const mercatorLatSpan = mercatorLatMin - mercatorLatMax;
+    // ═══ Mercator UV 预计算 ═══
+    //
+    // WebMercator 瓦片纹理 V 坐标按 Mercator Y = ln(tan(φ)+sec(φ)) 分布：
+    //   v = (mercY(lat) - mercY(north)) / (mercY(south) - mercY(north))
+    // Geographic 瓦片纹理 V 坐标按地理纬度线性分布：
+    //   v = row / segments
+    //
+    // 布尔判断在循环外计算一次，循环内零分支。
+    // invMercRange = 1/range 预计算，循环内乘法替代除法（每行节省 1 次除法）。
+
+    /** WebMercator 方案 ID = 0，该方案的纹理需要非线性 UV */
+    const useMercatorUV = (scheme.id === 0);
+    /** Mercator Y 值在瓦片北边缘（用于 UV 归一化的起点） */
+    let mercNorth = 0;
+    /** 1 / (mercSouth - mercNorth)，预计算替代循环内除法 */
+    let invMercRange = 0;
+
+    if (useMercatorUV) {
+        // 使用 Mercator 原始纬度范围（不含极地 ±90° 延伸部分）
+        // 防御性 clamp 到 ±85.051°：WebMercator yLat() 不超此值，
+        // 但极端数值输入可能越界——85.051° 处 cos(φ)≈0.0872，mercatorY 完全有限
+        const northRad = Math.min(mercatorLatMax, 85.051) * DEG2RAD;
+        const southRad = Math.max(mercatorLatMin, -85.051) * DEG2RAD;
+
+        // 北边缘 Mercator Y（较大值，Mercator Y 向北增大）
+        mercNorth = mercatorY(Math.sin(northRad), Math.cos(northRad));
+        // 南边缘 Mercator Y（较小值）
+        const mercSouth = mercatorY(Math.sin(southRad), Math.cos(southRad));
+
+        // range = mercSouth - mercNorth（负值，因为南 < 北）
+        // UV V 从 0（北边缘）到 1（南边缘）递增
+        const range = mercSouth - mercNorth;
+        // |range| < 1e-10 → 退化瓦片（实际不会发生：zoom=24 最小瓦片 lat 跨度 > 0.00001°）
+        invMercRange = Math.abs(range) > 1e-10 ? 1.0 / range : 0.0;
+    }
 
     // 网格维度
     const n1 = segments + 1;
@@ -480,12 +558,24 @@ export function tessellateGlobeTile(
         const latDeg = latMax + (latMin - latMax) * v;
         const latRad = latDeg * DEG2RAD;
 
-        // UV v 坐标：映射到 Mercator 原始纬度范围 [mercatorLatMax, mercatorLatMin]，
-        // 并 clamp 到 [0,1]。对于极地延伸区域（latDeg 超出 Mercator 范围），
-        // uvV 被钳位到 0（北极延伸）或 1（南极延伸），
-        // GPU 采样器的 clamp-to-edge 确保采样到纹理边缘像素——与相邻瓦片无缝衔接。
-        const rawUvV = (latDeg - mercatorLatMax) / mercatorLatSpan;
-        const uvV = Math.max(0, Math.min(1, rawUvV));
+        // ★ 外层循环预算 sinLat / cosLat（法线 + Mercator UV 共用）
+        // 同行所有列共享纬度——提升到外层避免 (segments+1) 倍重复 sin/cos 调用
+        const sinLat = Math.sin(latRad);
+        const cosLat = Math.cos(latRad);
+
+        // ★ Mercator UV V 每行计算一次（同行所有列 V 值相同——纬度恒定）
+        //
+        // WebMercator 纹理像素按 Mercator Y 均匀分布，线性 v 在高纬度偏差 >5%：
+        //   正确公式：v = (mercY(lat) - mercY(north)) / (mercY(south) - mercY(north))
+        // Geographic 纹理像素按地理纬度线性分布，直接使用 v = row/segments。
+        //
+        // 极地延伸区域（latDeg 超出 Mercator 原始范围 [mercatorLatMin, mercatorLatMax]）：
+        //   mercatorY 产生超范围值 → rawTextureV 落在 [0,1] 之外 → clamp 归位。
+        //   clamp 到 0（北极延伸）或 1（南极延伸），GPU clamp-to-edge 采样纹理边缘像素。
+        const rawTextureV = useMercatorUV
+            ? (mercatorY(sinLat, cosLat) - mercNorth) * invMercRange
+            : v;
+        const textureV = Math.max(0, Math.min(1, rawTextureV));
 
         for (let col = 0; col <= segments; col++) {
             const u = col / segments;
@@ -501,15 +591,27 @@ export function tessellateGlobeTile(
             positions[idx * 3 + 1] = _ecefBuf[1];
             positions[idx * 3 + 2] = _ecefBuf[2];
 
-            // 椭球面法线（球面近似，Float32 足够）
-            surfaceNormal(_normalBuf, lngRad, latRad);
-            normals[idx * 3] = _normalBuf[0];
-            normals[idx * 3 + 1] = _normalBuf[1];
-            normals[idx * 3 + 2] = _normalBuf[2];
+            // ★ 法线：复用外层 sinLat / cosLat，消除内层重复 trig 调用
+            // 球面近似法线 = normalized(cosLat·cosLon, cosLat·sinLon, sinLat)
+            // 证明：(cosLat·cosLon)² + (cosLat·sinLon)² + sinLat²
+            //      = cosLat²(cosLon²+sinLon²) + sinLat² = cosLat²+sinLat² = 1
+            // 但浮点舍入可能微偏，显式归一化保证安全
+            const sinLon = Math.sin(lngRad);
+            const cosLon = Math.cos(lngRad);
+            const nx = cosLat * cosLon;
+            const ny = cosLat * sinLon;
+            const nz = sinLat;
+            const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+            // nLen ≈ 1.0（理论严格 = 1），容错处理 NaN 极端场景
+            const invN = nLen > 1e-10 ? 1.0 / nLen : 0.0;
 
-            // UV 纹理坐标：u 沿经度线性，v 沿纬度映射到 Mercator 范围
-            uvs[idx * 2] = u;
-            uvs[idx * 2 + 1] = uvV;
+            normals[idx * 3]     = nx * invN;
+            normals[idx * 3 + 1] = ny * invN;
+            normals[idx * 3 + 2] = nz * invN;
+
+            // UV：U 线性（经度均匀），V 已在外层循环预算（Mercator 非线性或线性）
+            uvs[idx * 2]     = u;
+            uvs[idx * 2 + 1] = textureV;
         }
     }
 
@@ -1053,13 +1155,24 @@ export function tessellateGlobePolarCap(
  * const rte = meshToRTE(mesh, camera.cameraECEF);
  * device.queue.writeBuffer(vertexBuffer, 0, rte);
  */
-export function meshToRTE(
+/**
+ * 将 RTE 顶点数据写入已有 `Float32Array`（无堆分配），供每帧批量上传 GPU 时复用 scratch。
+ * 要求 `out.length >= mesh.vertexCount * 8`。
+ *
+ * @param out - 预分配缓冲，长度至少 vertexCount×8
+ * @param mesh - 瓦片网格
+ * @param camECEF - 相机 ECEF（米）
+ */
+export function meshToRTEInto(
+    out: Float32Array,
     mesh: GlobeTileMesh,
     camECEF: [number, number, number],
-): Float32Array {
+): void {
     const n = mesh.vertexCount;
-    // 8 floats/vertex: relXYZ(3) + normal(3) + uv(2)
-    const out = new Float32Array(n * 8);
+    const need = n * 8;
+    if (out.length < need) {
+        throw new RangeError(`meshToRTEInto: out.length ${out.length} < required ${need}`);
+    }
     const cx = camECEF[0], cy = camECEF[1], cz = camECEF[2];
 
     for (let i = 0; i < n; i++) {
@@ -1067,22 +1180,26 @@ export function meshToRTE(
         const i8 = i * 8;
         const i2 = i * 2;
 
-        // Float64 减法（JS number = Float64）→ Float32 存储
-        // 这保证了高精度的相对坐标（即使绝对坐标 > 6,000,000m）
         out[i8] = mesh.positions[i3] - cx;
         out[i8 + 1] = mesh.positions[i3 + 1] - cy;
         out[i8 + 2] = mesh.positions[i3 + 2] - cz;
 
-        // 法线直接拷贝（已是 Float32）
         out[i8 + 3] = mesh.normals[i3];
         out[i8 + 4] = mesh.normals[i3 + 1];
         out[i8 + 5] = mesh.normals[i3 + 2];
 
-        // UV 直接拷贝
         out[i8 + 6] = mesh.uvs[i2];
         out[i8 + 7] = mesh.uvs[i2 + 1];
     }
+}
 
+export function meshToRTE(
+    mesh: GlobeTileMesh,
+    camECEF: [number, number, number],
+): Float32Array {
+    const n = mesh.vertexCount;
+    const out = new Float32Array(n * 8);
+    meshToRTEInto(out, mesh, camECEF);
     return out;
 }
 
@@ -1677,6 +1794,12 @@ export function computeMorphFactor(zoom: number): number {
  * 输出交错格式（每顶点 11 个 Float32）：
  *   [flatRelX, flatRelY, flatRelZ, globeRelX, globeRelY, globeRelZ, nx, ny, nz, u, v]
  *
+ * v3 变更：
+ * - 新增 `scheme` 参数（默认 WebMercator，保持向后兼容）
+ * - UV V 使用 Mercator Y 非线性映射（WebMercator 方案）或线性映射（Geographic 方案）
+ * - sinLat/cosLat 提升到外层循环——同行所有列共享纬度，消除内层重复 trig
+ * - 法线改为内联球面近似计算，复用外层 sinLat/cosLat
+ *
  * @param tileZ - 瓦片 zoom
  * @param tileX - 瓦片列号
  * @param tileY - 瓦片行号
@@ -1685,6 +1808,7 @@ export function computeMorphFactor(zoom: number): number {
  * @param centerWorld2D - 2.5D 相机中心世界像素坐标 [cx, cy]
  * @param camECEF - 相机 ECEF 位置
  * @param ellipsoid - 椭球体参数，默认 WGS84。影响 3D 球面坐标的 ECEF 计算
+ * @param scheme - 瓦片方案，默认 WebMercator。影响 UV V 坐标的映射方式
  * @returns Float32Array 交错顶点数据
  *
  * @example
@@ -1698,15 +1822,37 @@ export function computeMorphVertices(
     centerWorld2D: [number, number],
     camECEF: [number, number, number],
     ellipsoid: Ellipsoid = WGS84_ELLIPSOID,
+    scheme: TilingScheme = WebMercator,
 ): Float32Array {
     const numTiles = 1 << tileZ;
     const n1 = segments + 1;
 
-    // 瓦片经纬度范围
+    // 瓦片经纬度范围（Mercator 公式——morph 过渡仅用于 WebMercator 瓦片源）
     const lngMin = (tileX / numTiles) * 360 - 180;
     const lngMax = ((tileX + 1) / numTiles) * 360 - 180;
     const latMax = tileYToLat(tileY, tileZ);
     const latMin = tileYToLat(tileY + 1, tileZ);
+
+    // ═══ Mercator UV 预计算（与 tessellateGlobeTile 逻辑对齐）═══
+    /** WebMercator 方案 ID = 0 */
+    const useMercatorUV = (scheme.id === 0);
+    /** 北边缘 Mercator Y 值 */
+    let mercNorth = 0;
+    /** 1 / (mercSouth - mercNorth) 预计算 */
+    let invMercRange = 0;
+
+    if (useMercatorUV) {
+        // latMax/latMin 来自 tileYToLat（WebMercator），不超过 ±85.051°
+        // 防御性 clamp 确保 mercatorY 输入安全
+        const northRad = Math.min(latMax, 85.051) * DEG2RAD;
+        const southRad = Math.max(latMin, -85.051) * DEG2RAD;
+
+        mercNorth = mercatorY(Math.sin(northRad), Math.cos(northRad));
+        const mercSouth = mercatorY(Math.sin(southRad), Math.cos(southRad));
+
+        const range = mercSouth - mercNorth;
+        invMercRange = Math.abs(range) > 1e-10 ? 1.0 / range : 0.0;
+    }
 
     // 11 floats/vertex: flatRel(3) + globeRel(3) + normal(3) + uv(2)
     const out = new Float32Array(n1 * n1 * 11);
@@ -1716,6 +1862,20 @@ export function computeMorphVertices(
         const latDeg = latMax + (latMin - latMax) * v;
         const latRad = latDeg * DEG2RAD;
 
+        // ★ 外层循环预算 sinLat / cosLat
+        // 同行所有列共享纬度——消除内层 (segments+1) 倍重复 sin/cos 调用
+        // sinLat 还被 2.5D Mercator Y 投影公式复用
+        const sinLat = Math.sin(latRad);
+        const cosLat = Math.cos(latRad);
+
+        // ★ Mercator UV V 每行计算一次
+        // morph 函数不做极地延伸（latMax/latMin 均在 ±85.051° 以内），
+        // textureV 自然落在 [0,1] 范围，但保留 clamp 作为防御
+        const rawTextureV = useMercatorUV
+            ? (mercatorY(sinLat, cosLat) - mercNorth) * invMercRange
+            : v;
+        const textureV = Math.max(0, Math.min(1, rawTextureV));
+
         for (let col = 0; col <= segments; col++) {
             const u = col / segments;
             const lngDeg = lngMin + (lngMax - lngMin) * u;
@@ -1724,10 +1884,11 @@ export function computeMorphVertices(
 
             // 2.5D 相对坐标（Mercator 世界像素 - 相机中心）
             const mx = ((lngDeg + 180) / 360) * worldSize2D - centerWorld2D[0];
-            const sinLat = Math.sin(latRad);
+            // ★ 复用外层 sinLat，避免内层每顶点重复 Math.sin(latRad)
             // Mercator Y 投影公式：y = 0.5 - ln((1+sinφ)/(1-sinφ))/(4π)
-            const my = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * PI)) * worldSize2D - centerWorld2D[1];
-            out[idx] = mx;
+            const my = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * PI))
+                       * worldSize2D - centerWorld2D[1];
+            out[idx]     = mx;
             out[idx + 1] = my;
             out[idx + 2] = 0;
 
@@ -1737,15 +1898,17 @@ export function computeMorphVertices(
             out[idx + 4] = _ecefBuf[1] - camECEF[1];
             out[idx + 5] = _ecefBuf[2] - camECEF[2];
 
-            // 法线（球面近似，不依赖椭球体参数）
-            surfaceNormal(_normalBuf, lngRad, latRad);
-            out[idx + 6] = _normalBuf[0];
-            out[idx + 7] = _normalBuf[1];
-            out[idx + 8] = _normalBuf[2];
+            // ★ 法线：复用外层 sinLat/cosLat，内联球面近似计算
+            // (cosLat·cosLon)² + (cosLat·sinLon)² + sinLat² = 1（精确单位向量）
+            const cosLon = Math.cos(lngRad);
+            const sinLon = Math.sin(lngRad);
+            out[idx + 6] = cosLat * cosLon;
+            out[idx + 7] = cosLat * sinLon;
+            out[idx + 8] = sinLat;
 
-            // UV
-            out[idx + 9] = u;
-            out[idx + 10] = v;
+            // UV：U 线性（经度均匀），V 已在外层预算（★ Mercator 非线性修复）
+            out[idx + 9]  = u;
+            out[idx + 10] = textureV;
         }
     }
 

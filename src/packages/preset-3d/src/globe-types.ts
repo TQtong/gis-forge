@@ -177,6 +177,8 @@ export interface CachedTile {
     bindGroup: GPUBindGroup | null;
     /** 是否已发起异步请求且尚未结束 */
     loading: boolean;
+    /** 最近一次请求失败（网络/解码）；为 true 时不再自动重试，避免每帧海量 fetch */
+    loadError: boolean;
     /** 影像是否已上传 GPU 可供采样 */
     textureReady: boolean;
     /** DEM 是否已解析；未就绪时按 z=0 平面渲染 */
@@ -189,10 +191,12 @@ export interface CachedTile {
  * 某一 zoom/x/y 瓦片对应的曲面网格及常驻索引缓冲。
  */
 export interface CachedMesh {
-    /** CPU 侧拓扑与 Float64 顶点，供每帧 `meshToRTE` */
+    /** CPU 侧拓扑与 Float64 顶点，供每帧 `meshToRTEInto` 写入 RTE 再上传 */
     mesh: GlobeTileMesh;
     /** 上传后的 `GPUBuffer`，`INDEX` 用途 */
     indexBuffer: GPUBuffer;
+    /** RTE 交错顶点（每顶点 8×float32），每帧 `writeBuffer` 更新，不每帧 `createBuffer` */
+    vertexBuffer: GPUBuffer;
 }
 
 /**
