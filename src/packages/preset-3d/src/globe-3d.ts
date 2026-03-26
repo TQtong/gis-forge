@@ -188,8 +188,21 @@ const ROTATE_SENSITIVITY = 0.003;
 const GLOBE_TILE_WGSL = /* wgsl */`
 struct CameraUniforms {
   vpMatrix: mat4x4<f32>,
+  cameraPosition: vec3<f32>,
+  altitude: f32,
+  sunDirection: vec3<f32>,
+  logDepthBufFC: f32,
 };
+
+struct TileParams {
+  uvOffset: vec2<f32>,
+  uvScale: vec2<f32>,
+};
+
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
+@group(1) @binding(0) var tileSampler: sampler;
+@group(1) @binding(1) var tileTexture: texture_2d<f32>;
+@group(2) @binding(0) var<uniform> tile: TileParams;
 
 struct VsIn {
   @location(0) posRTE: vec3<f32>,
@@ -198,16 +211,47 @@ struct VsIn {
 };
 struct VsOut {
   @builtin(position) clipPos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) viewDir: vec3<f32>,
 };
+
+fn applyLogDepth(clipPos: vec4<f32>, logDepthBufFC: f32) -> vec4<f32> {
+  var pos = clipPos;
+  let logZ = log2(max(1e-6, pos.w + 1.0)) * logDepthBufFC;
+  pos.z = logZ * pos.w;
+  return pos;
+}
 
 @vertex fn globe_vs(in: VsIn) -> VsOut {
   var out: VsOut;
-  out.clipPos = camera.vpMatrix * vec4<f32>(in.posRTE, 1.0);
+  var clip = camera.vpMatrix * vec4<f32>(in.posRTE, 1.0);
+  out.clipPos = applyLogDepth(clip, camera.logDepthBufFC);
+  out.uv = tile.uvOffset + in.uv * tile.uvScale;
+  out.normal = in.normal;
+  out.viewDir = -normalize(in.posRTE);
   return out;
 }
 
-@fragment fn globe_fs() -> @location(0) vec4<f32> {
-  return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+@fragment fn globe_fs(in: VsOut) -> @location(0) vec4<f32> {
+  var color = textureSample(tileTexture, tileSampler, in.uv);
+  let N = normalize(in.normal);
+  let V = in.viewDir;
+
+  // Diffuse lighting from sun (in ECEF space, consistent with all layers)
+  let nDotL = max(dot(N, camera.sunDirection), 0.0);
+  let ambient = 0.3;
+  let diffuse = nDotL * 0.7;
+  let lighting = ambient + diffuse;
+  color = vec4<f32>(color.rgb * lighting, color.a);
+
+  // Atmosphere edge effect (limb darkening / blue tint at horizon)
+  let nDotV = max(dot(N, V), 0.0);
+  let atmoFactor = smoothstep(0.0, 0.15, nDotV);
+  let atmoColor = vec3<f32>(0.4, 0.6, 1.0);
+  color = vec4<f32>(mix(atmoColor, color.rgb, atmoFactor), 1.0);
+
+  return color;
 }
 `;
 
@@ -516,13 +560,16 @@ function computeCascadeFrusta(
  * 所有 Globe 模式下的渲染图层（polyline、point、extrusion）必须使用相同的常数，
  * 否则会出现 z-fighting（Pipeline v2 §五 + Shape Issues §七 P2 #9）。
  *
- * 公式来源：Outerra / Cesium logarithmic depth buffer
+ * 公式来源：Outerra / Cesium logarithmic depth buffer（WebGPU 适配版）
  *   logZ = log2(max(1e-6, clipW + 1.0)) * logDepthBufFC
- *   gl_Position.z = logZ * clipW
- * 其中 logDepthBufFC = 2.0 / log2(farZ + 1.0)
+ *   position.z = logZ * clipW
+ * 其中 logDepthBufFC = 1.0 / log2(farZ + 1.0)（WebGPU NDC z ∈ [0,1]）
+ *
+ * 注意：OpenGL 版本使用 2.0 / log2(farZ + 1.0)（NDC z ∈ [-1,1]），
+ * WebGPU 版本使用 1.0（NDC z ∈ [0,1]），否则几何体的 NDC z > 1.0 会被裁剪。
  *
  * @param farZ - 远裁剪面距离（米），必须 > 0
- * @returns logDepthBufFC = 2.0 / log2(farZ + 1.0)
+ * @returns logDepthBufFC = 1.0 / log2(farZ + 1.0)
  *
  * @stability stable
  *
@@ -540,9 +587,11 @@ export function computeLogDepthBufFC(farZ: number): number {
     // 防御：farZ <= 0 会导致 log2 返回 -Infinity 或 NaN
     if (farZ <= 0) {
         if (typeof __DEV__ !== 'undefined' && __DEV__) { devWarn('computeLogDepthBufFC: farZ must be > 0, got', farZ); }
-        return 2.0 / Math.log2(2.0); // fallback: farZ=1 → fc=2.0
+        return 1.0 / Math.log2(2.0); // fallback: farZ=1 → fc=1.0
     }
-    return 2.0 / Math.log2(farZ + 1.0);
+    // WebGPU NDC z ∈ [0, 1]（非 OpenGL 的 [-1, 1]），系数 = 1.0 而非 2.0
+    // logZ = log2(clipW + 1) × fc → 对于 clipW = farZ → logZ = 1.0（恰好映射到远裁面）
+    return 1.0 / Math.log2(farZ + 1.0);
 }
 
 /**
@@ -1082,6 +1131,20 @@ export class Globe3D {
 
     /** 线性采样器 */
     private _sampler: GPUSampler | null = null;
+
+    /**
+     * 1×1 占位纹理（深蓝色海洋底色 RGBA(10, 20, 50, 255)）。
+     * 瓦片影像纹理未加载完成时，使用此纹理渲染地球表面，
+     * 确保地球几何始终可见（不因网络延迟或 CORS 错误而消失）。
+     */
+    private _fallbackTexture: GPUTexture | null = null;
+
+    /**
+     * 占位纹理对应的 bind group（sampler + fallbackTexture）。
+     * 与正常瓦片的 bind group 使用相同的 layout（group(1)），
+     * 可直接替换正常瓦片的 bind group 使用。
+     */
+    private _fallbackBindGroup: GPUBindGroup | null = null;
 
     // ══════ Bind Group Layouts ══════
     /** group(0) = camera uniforms */
@@ -2677,6 +2740,23 @@ export class Globe3D {
             }],
         });
 
+        // ── 1×1 占位纹理（瓦片未加载时的地球底色） ──
+        // RGBA(10, 20, 50, 255) 深蓝色，模拟海洋底色
+        // 确保地球几何在瓦片加载之前就可见（不因 CORS/网络错误而消失）
+        this._fallbackTexture = device.createTexture({
+            size: { width: 1, height: 1 },
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+            label: 'Globe3D:fallbackTexture',
+        });
+        // 上传 1×1 深蓝色像素数据
+        device.queue.writeTexture(
+            { texture: this._fallbackTexture },
+            new Uint8Array([10, 20, 50, 255]),
+            { bytesPerRow: 4 },
+            { width: 1, height: 1 },
+        );
+
         // ── 固定 Bind Groups ──
 
         this._cameraBindGroup = device.createBindGroup({
@@ -2695,6 +2775,17 @@ export class Globe3D {
                 resource: { buffer: this._tileParamsBuffer },
             }],
             label: 'Globe3D:tileParamsBG',
+        });
+
+        // ── 占位纹理 bind group（瓦片未加载时的替代品） ──
+        // 使用与瓦片相同的 layout (group(1) = sampler + texture)
+        this._fallbackBindGroup = device.createBindGroup({
+            layout: this._tileBindGroupLayout,
+            entries: [
+                { binding: 0, resource: this._sampler },
+                { binding: 1, resource: this._fallbackTexture!.createView() },
+            ],
+            label: 'Globe3D:fallbackBG',
         });
     }
 
@@ -3003,8 +3094,24 @@ export class Globe3D {
 
         // ── 计算可见瓦片 ──
         let tiles = coveringTilesGlobe(globeCam);
+        // coveringTilesGlobe 依赖 screenToGlobe 射线-椭球面求交。
+        // 高空（altitude > 地球半径）时，viewport 边缘可能全部指向太空（pitch=-90 正俯视），
+        // 导致所有采样点未命中椭球面 → tiles=[]。此时手动生成 zoom-0 全部瓦片作为兜底。
         if (tiles.length === 0) {
-            tiles = [{ z: 0, x: 0, y: 0, key: '0/0/0', distToCamera: 0 }];
+            const fallbackZoom = Math.max(0, Math.floor(globeCam.zoom));
+            const numFallback = 1 << fallbackZoom;
+            tiles = [];
+            for (let y = 0; y < numFallback; y++) {
+                for (let x = 0; x < numFallback; x++) {
+                    tiles.push({
+                        z: fallbackZoom,
+                        x,
+                        y,
+                        key: `${fallbackZoom}/${x}/${y}`,
+                        distToCamera: 0,
+                    });
+                }
+            }
         }
 
         // ── 更新相机 uniforms ──
@@ -3212,9 +3319,10 @@ export class Globe3D {
     private _updateCameraUniforms(device: GPUDevice, gc: GlobeCamera): void {
         if (!this._cameraUniformBuffer) { return; }
 
-        // logDepthBufFC = 2.0 / log2(far + 1.0)
+        // logDepthBufFC = 1.0 / log2(far + 1.0)（WebGPU NDC z ∈ [0,1]）
+        // 使 log2(clipW+1) × logDepthBufFC 在 clipW=farZ 时恰好 = 1.0
         const farZ = gc.horizonDist * FAR_PLANE_HORIZON_FACTOR + gc.altitude;
-        const logDepthBufFC = 2.0 / Math.log2(farZ + 1.0);
+        const logDepthBufFC = 1.0 / Math.log2(farZ + 1.0);
 
         // 太阳方向（简化：基于日期时间计算太阳方位）
         const hourAngle = (this._dateTime.getUTCHours() + this._dateTime.getUTCMinutes() / 60) / 24 * TWO_PI - PI;
@@ -3418,11 +3526,18 @@ export class Globe3D {
                 cached = this._tileCache.get(key);
             }
 
-            // 纹理未就绪则跳过此瓦片（textureReady 守卫防止渲染半初始化的条目）
-            if (!cached || !cached.textureReady || !cached.texture || !cached.bindGroup) { continue; }
+            // 确定此瓦片使用的 bind group：真实纹理 or 占位纹理
+            // 纹理就绪 → 使用瓦片自身的 bindGroup
+            // 纹理未就绪 → 使用 1×1 深蓝色占位纹理，保证地球几何始终可见
+            const tileHasTexture = cached !== undefined
+                && cached.textureReady
+                && cached.texture !== null
+                && cached.bindGroup !== null;
+            const tileBG = tileHasTexture ? cached!.bindGroup! : this._fallbackBindGroup;
+            if (!tileBG) { continue; }
 
-            // 更新 LRU（移到末尾）
-            this._touchTileLRU(key);
+            // 纹理就绪时更新 LRU（占位纹理不参与 LRU 计数）
+            if (tileHasTexture) { this._touchTileLRU(key); }
 
             // ── 获取/创建网格（含正确的极地拓扑） ──
             const meshData = this._getTileMesh(device, tile.z, tile.x, tile.y);
@@ -3447,8 +3562,8 @@ export class Globe3D {
             _tileParamsData[3] = 1; // uvScale.y
             device.queue.writeBuffer(this._tileParamsBuffer!, 0, _tileParamsData);
 
-            // ── 绑定瓦片纹理 ──
-            pass.setBindGroup(1, cached.bindGroup);
+            // ── 绑定瓦片纹理（真实纹理 or 占位纹理） ──
+            pass.setBindGroup(1, tileBG);
 
             // ── 设置顶点/索引缓冲并绘制 ──
             pass.setVertexBuffer(0, vertBuf);
@@ -3692,14 +3807,33 @@ export class Globe3D {
      * const bitmap = await this._fetchTileImage('https://tile.osm.org/5/16/11.png');
      */
     private async _fetchTileImage(url: string): Promise<ImageBitmap> {
-        const response = await fetch(url);
+        // 使用 CORS 模式并声明接受图片类型，避免某些瓦片服务器拒绝请求
+        const response = await fetch(url, {
+            mode: 'cors',
+            credentials: 'omit',
+            headers: {
+                'Accept': 'image/png,image/jpeg,image/webp,image/*,*/*;q=0.8',
+            },
+        });
 
         // 检查 HTTP 状态
         if (!response.ok) {
             throw new Error(`HTTP ${response.status} for ${url}`);
         }
 
+        // 确认返回的 Content-Type 是图片格式（防止 HTML 错误页面被当作图片解析）
+        const contentType = response.headers.get('Content-Type') ?? '';
+        if (contentType && !contentType.startsWith('image/') && !contentType.startsWith('application/octet-stream')) {
+            throw new Error(`Non-image Content-Type "${contentType}" for ${url}`);
+        }
+
         const blob = await response.blob();
+
+        // 检查 blob 大小，防止空响应被 createImageBitmap 解析为空图片
+        if (blob.size === 0) {
+            throw new Error(`Empty response body for ${url}`);
+        }
+
         return createImageBitmap(blob, {
             premultiplyAlpha: 'none',
             colorSpaceConversion: 'none',
@@ -4003,6 +4137,13 @@ export class Globe3D {
         }
         // 释放大气 CPU 端网格引用（GC 回收 Float64Array / Float32Array / Uint32Array）
         this._atmoMesh = null;
+
+        // 销毁占位纹理
+        if (this._fallbackTexture) {
+            this._fallbackTexture.destroy();
+            this._fallbackTexture = null;
+        }
+        this._fallbackBindGroup = null;
 
         // 清空管线引用
         this._globePipeline = null;
