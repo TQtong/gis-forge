@@ -51,7 +51,6 @@ import {
 } from './globe-constants.ts';
 import {
     computeGlobeCamera,
-    runEggShapeDiagnostic,
     updateGlobeCameraUniforms,
 } from './globe-camera.ts';
 import {
@@ -81,11 +80,18 @@ import type {
     GlobeRendererStats,
     ImageryLayerRecord,
     MorphState,
+    PolarCapState,
     TileManagerState,
     TilesetRecord,
 } from './globe-types.ts';
-import { createEmptyGlobeGPURefs } from './globe-types.ts';
+import { createEmptyGlobeGPURefs, createEmptyPolarCapState } from './globe-types.ts';
 import { devError, requestGpuAdapterWithFallback } from './globe-utils.ts';
+import {
+    createPolarCapResources,
+    destroyPolarCapResources,
+    loadPolarCapTextureFromUrl,
+    renderPolarCaps,
+} from './globe-polar-cap.ts';
 
 export type { EntitySpec, Globe3DOptions, GlobeRendererStats } from './globe-types.ts';
 export { computeLogDepthBufFC } from './globe-utils.ts';
@@ -132,6 +138,20 @@ export class Globe3D {
         meshCache: new Map(),
         tileUrlTemplate: TILE_URL_TEMPLATE_DEFAULT,
     };
+
+    // ─── 极地冰盖（见 globe-polar-cap）────────────────────
+
+    /** 极地冰盖 GPU 状态（北极 + 南极的网格、纹理、缓冲） */
+    private readonly _polarCapState: PolarCapState = createEmptyPolarCapState();
+
+    /** 极地冰盖是否启用（由 Globe3DOptions.polarCaps.enabled 控制） */
+    private _polarCapsEnabled: boolean;
+
+    /** 北极自定义纹理 URL（可选，替代程序化纹理） */
+    private readonly _northPolarTextureUrl: string | undefined;
+
+    /** 南极自定义纹理 URL（可选） */
+    private readonly _southPolarTextureUrl: string | undefined;
 
     // ─── 视图 morph（见 globe-interaction）──────────────────
 
@@ -312,6 +332,13 @@ export class Globe3D {
         this._dateTime = new Date();
         this._clockMultiplier = DEFAULT_CLOCK_MULTIPLIER;
         this._terrainExaggeration = options.terrain?.exaggeration ?? DEFAULT_TERRAIN_EXAGGERATION;
+
+        // ── 极地冰盖选项 ──
+        // 默认关闭：瓦片网格已延伸到 ±90°（UV clamp 拉伸边缘像素），无需独立极地纹理。
+        // 仅当用户提供自定义极地纹理 URL 时才需启用独立极地冰盖层。
+        this._polarCapsEnabled = options.polarCaps?.enabled === true;
+        this._northPolarTextureUrl = options.polarCaps?.northTextureUrl;
+        this._southPolarTextureUrl = options.polarCaps?.southTextureUrl;
 
         // ── 影像 URL ──
         this._tileState.tileUrlTemplate = options.imagery?.url ?? TILE_URL_TEMPLATE_DEFAULT;
@@ -1067,6 +1094,28 @@ export class Globe3D {
     }
 
     /**
+     * 启用/禁用极地冰盖（Polar Cap）渲染。
+     * 关闭后 ±85.05°→±90° 区域不渲染冰盖纹理，恢复为深色空白（或 fallback 瓦片拉伸）。
+     *
+     * @param enabled - 是否启用
+     *
+     * @stability experimental
+     *
+     * @example
+     * globe.setPolarCapsEnabled(false); // 关闭冰盖
+     * globe.setPolarCapsEnabled(true);  // 重新开启
+     */
+    public setPolarCapsEnabled(enabled: boolean): void {
+        this._ensureAlive();
+        this._polarCapsEnabled = enabled;
+
+        // 如果首次启用且资源尚未创建，补充创建
+        if (enabled && !this._polarCapState.northReady && this._gpuRefs.device) {
+            createPolarCapResources(this._gpuRefs.device, this._gpuRefs, this._polarCapState);
+        }
+    }
+
+    /**
      * 启用/禁用阴影。
      *
      * @param enabled - 是否启用
@@ -1583,6 +1632,31 @@ export class Globe3D {
             this._gpuRefs.skyPipeline = createSkyPipeline(device, this._gpuRefs.surfaceFormat);
             this._gpuRefs.atmoPipeline = createAtmoPipeline(device, this._gpuRefs.surfaceFormat, this._gpuRefs);
 
+            // ── 创建极地冰盖 GPU 资源（程序化 Natural Earth 纹理）──
+            if (this._polarCapsEnabled) {
+                createPolarCapResources(device, this._gpuRefs, this._polarCapState);
+
+                // 如果用户配置了自定义极地纹理 URL，异步加载替换程序化纹理
+                if (this._northPolarTextureUrl) {
+                    loadPolarCapTextureFromUrl(
+                        this._northPolarTextureUrl, true,
+                        device, this._gpuRefs, this._polarCapState,
+                        () => this._destroyed,
+                    ).catch((err) => {
+                        devError('[Globe3D] North polar texture load failed:', err);
+                    });
+                }
+                if (this._southPolarTextureUrl) {
+                    loadPolarCapTextureFromUrl(
+                        this._southPolarTextureUrl, false,
+                        device, this._gpuRefs, this._polarCapState,
+                        () => this._destroyed,
+                    ).catch((err) => {
+                        devError('[Globe3D] South polar texture load failed:', err);
+                    });
+                }
+            }
+
             // ── 启动帧循环 ──
             this._startFrameLoop();
 
@@ -1717,11 +1791,6 @@ export class Globe3D {
         // ── 更新相机 uniforms ──
         updateGlobeCameraUniforms(device, globeCam, this._gpuRefs, this._dateTime);
 
-        // ── EggShape 一次性诊断（仅首帧 + DEV 模式）──
-        if (typeof __DEV__ !== 'undefined' && __DEV__ && this._frameCount === 0) {
-            runEggShapeDiagnostic(camState, globeCam, ctx, this._viewport);
-        }
-
         // ── 创建命令编码器 ──
         const encoder = device.createCommandEncoder({ label: 'Globe3D:frame' });
 
@@ -1762,6 +1831,11 @@ export class Globe3D {
         );
         tilesRendered = tileResult.tilesRendered;
         drawCalls += tileResult.drawCalls;
+
+        // ── 3. 极地冰盖（在瓦片之后、大气之前渲染，覆盖 ±85°→±90° 空白区域）──
+        if (this._polarCapsEnabled) {
+            drawCalls += renderPolarCaps(device, pass, globeCam, this._gpuRefs, this._polarCapState);
+        }
 
         if (this._atmosphere) {
             renderAtmosphere(device, pass, globeCam, this._gpuRefs);
@@ -1876,6 +1950,9 @@ export class Globe3D {
      * 销毁所有 GPU 资源。
      */
     private _destroyGPUResources(): void {
+        // 极地冰盖资源必须在通用 GPU 资源之前销毁（后者会置空 device 指针）
+        destroyPolarCapResources(this._polarCapState);
+
         clearTileCache(this._tileState);
         clearMeshCache(this._tileState.meshCache);
         destroyGlobeGPUResources(this._gpuRefs);

@@ -93,6 +93,49 @@ export const ATMO_SPHERE_SEGMENTS = 64;
  */
 export const ATMO_RADIUS_FACTOR = 1.025;
 
+// ─── 极地冰盖（Polar Cap） ───────────────────────────────────
+
+/**
+ * 极地冰盖程序化纹理的边长（像素）。
+ * 2048×2048 在方位等距投影下提供约 5°/2048 ≈ 0.0024° 角分辨率，
+ * 足以展现 Natural Earth 风格的冰盖边缘细节。值越大显存消耗越高（RGBA8 → 16MB/张）。
+ *
+ * @stability experimental
+ */
+export const POLAR_TEXTURE_SIZE = 2048;
+
+/**
+ * 极地冰盖纹理异步加载超时（毫秒）。
+ * 超时后回退到程序化生成的冰盖纹理，确保极地区域始终有视觉覆盖。
+ *
+ * @stability experimental
+ */
+export const POLAR_TEXTURE_LOAD_TIMEOUT_MS = 15_000;
+
+/**
+ * 北极冰盖底色 RGBA [0,255]：冰白带蓝灰色调，模拟北极浮冰与开放海水的混合。
+ * 来源参考：Natural Earth I 北极视图的平均色调。
+ */
+export const NORTH_POLE_BASE_COLOR: readonly [number, number, number, number] = [210, 225, 235, 255];
+
+/**
+ * 南极冰盖底色 RGBA [0,255]：纯冰白色，模拟南极冰盖的高反射率。
+ * 来源参考：Natural Earth I 南极视图的平均色调。
+ */
+export const SOUTH_POLE_BASE_COLOR: readonly [number, number, number, number] = [235, 240, 245, 255];
+
+/**
+ * 北极海洋底色 RGBA [0,255]：深蓝黑色，模拟北冰洋在卫星影像中的色调。
+ * 用于程序化纹理中极冠外缘（海洋区域）的填充。
+ */
+export const NORTH_POLE_OCEAN_COLOR: readonly [number, number, number, number] = [15, 35, 70, 255];
+
+/**
+ * 南极海洋底色 RGBA [0,255]：南大洋深蓝色。
+ * 用于程序化纹理中极冠外缘（海洋区域）的填充。
+ */
+export const SOUTH_POLE_OCEAN_COLOR: readonly [number, number, number, number] = [10, 30, 65, 255];
+
 // ─── 深度与顶点格式 ────────────────────────────────────────
 
 /**

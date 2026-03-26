@@ -48,6 +48,26 @@ export interface Globe3DOptions {
     readonly shadows?: boolean;
     /** `false` 不渲染天穹全屏背景；默认 `true` */
     readonly skybox?: boolean;
+
+    /**
+     * 极地冰盖（Polar Cap）配置。
+     * 开启后在 Web Mercator 无法覆盖的 ±85.05°→±90° 区域渲染冰盖球冠。
+     * 默认开启，使用程序化 Natural Earth 风格纹理。
+     */
+    readonly polarCaps?: {
+        /** 是否启用极地冰盖渲染；默认 `true` */
+        readonly enabled?: boolean;
+        /**
+         * 北极纹理 URL。提供后将异步加载此纹理替代程序化纹理。
+         * 纹理应为方位等距投影（中心=北极，边缘=85°N）的正方形影像。
+         * 支持 PNG / JPEG / WebP。
+         */
+        readonly northTextureUrl?: string;
+        /**
+         * 南极纹理 URL。同上，中心=南极，边缘=85°S。
+         */
+        readonly southTextureUrl?: string;
+    };
     /** 雾效（预留）；默认 `true` */
     readonly fog?: boolean;
     /** 无影像时的地球底色 RGBA，默认深蓝 */
@@ -173,6 +193,68 @@ export interface GlobeRendererStats {
     readonly drawCalls: number;
     /** 上一帧 `_renderFrame`  wall time（毫秒） */
     readonly frameTimeMs: number;
+}
+
+/**
+ * 极地冰盖（Polar Cap）的 GPU 资源与运行时状态。
+ * 每个极（北/南）各一份，包含网格、纹理、bind group、顶点/索引缓冲。
+ *
+ * 生命周期：由 `createPolarCapResources` 在 bootstrap 后创建，`destroyPolarCapResources` 在 remove 时释放。
+ * 纹理来源优先级：URL 加载 > 程序化生成 > fallback（1×1 深蓝）。
+ */
+export interface PolarCapState {
+    /** 北极冰盖 CPU 侧网格（ECEF Float64），供每帧 `meshToRTE` 使用 */
+    northMesh: GlobeTileMesh | null;
+    /** 南极冰盖 CPU 侧网格 */
+    southMesh: GlobeTileMesh | null;
+    /** 北极冰盖 GPU 索引缓冲（静态上传一次，不随帧更新） */
+    northIndexBuffer: GPUBuffer | null;
+    /** 南极冰盖 GPU 索引缓冲 */
+    southIndexBuffer: GPUBuffer | null;
+    /** 北极冰盖 GPU 顶点缓冲（每帧 RTE 更新） */
+    northVertexBuffer: GPUBuffer | null;
+    /** 南极冰盖 GPU 顶点缓冲 */
+    southVertexBuffer: GPUBuffer | null;
+    /** 北极冰盖纹理（程序化或 URL 加载） */
+    northTexture: GPUTexture | null;
+    /** 南极冰盖纹理 */
+    southTexture: GPUTexture | null;
+    /** 北极 bind group（group1：sampler + texture，与瓦片共用 layout） */
+    northBindGroup: GPUBindGroup | null;
+    /** 南极 bind group */
+    southBindGroup: GPUBindGroup | null;
+    /** 北极 URL 纹理是否正在异步加载 */
+    northLoading: boolean;
+    /** 南极 URL 纹理是否正在异步加载 */
+    southLoading: boolean;
+    /** 北极纹理是否已就绪（程序化或 URL 加载完成） */
+    northReady: boolean;
+    /** 南极纹理是否已就绪 */
+    southReady: boolean;
+}
+
+/**
+ * 创建空的 {@link PolarCapState}，所有指针为 null、标志为 false。
+ *
+ * @returns 初始化后的空状态，由 `createPolarCapResources` 填充
+ */
+export function createEmptyPolarCapState(): PolarCapState {
+    return {
+        northMesh: null,
+        southMesh: null,
+        northIndexBuffer: null,
+        southIndexBuffer: null,
+        northVertexBuffer: null,
+        southVertexBuffer: null,
+        northTexture: null,
+        southTexture: null,
+        northBindGroup: null,
+        southBindGroup: null,
+        northLoading: false,
+        southLoading: false,
+        northReady: false,
+        southReady: false,
+    };
 }
 
 /**

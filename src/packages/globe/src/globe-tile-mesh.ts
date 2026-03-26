@@ -84,6 +84,74 @@ export const WGS84_ELLIPSOID: Ellipsoid = {
 };
 
 // ════════════════════════════════════════════════════════════════
+// 极地常量
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * Web Mercator（EPSG:3857）纬度极限（度）。
+ * 超出此纬度的区域无法由 Mercator 瓦片覆盖——sin(85.05112878°) 使 Mercator Y 趋向无穷。
+ * 数学推导：lat = 2·arctan(e^π) - π/2 ≈ 85.05112878°。
+ * 极地冰盖网格从此纬度延伸到 ±90°。
+ *
+ * @stability stable
+ */
+export const MERCATOR_LAT_LIMIT = 85.05112878;
+
+/**
+ * 北极极点纬度（度），即极地冰盖网格的北向极限。
+ *
+ * @stability stable
+ */
+export const POLE_LAT_NORTH = 90.0;
+
+/**
+ * 南极极点纬度（度），即极地冰盖网格的南向极限。
+ *
+ * @stability stable
+ */
+export const POLE_LAT_SOUTH = -90.0;
+
+/**
+ * 极地冰盖网格的默认经向扇区数。
+ * 64 扇区 → 每扇区 5.625°，在极冠外缘（85°纬度圆上）
+ * 的弧长约 6378137 × cos(85°) × 5.625° × π/180 ≈ 54.7km，
+ * 肉眼不可见锯齿。
+ *
+ * @stability experimental
+ */
+export const POLAR_CAP_SECTORS = 64;
+
+/**
+ * 极地冰盖网格的默认径向环数。
+ * 8 环覆盖 5° 纬度跨度（85° → 90°），每环约 0.625°。
+ * 在高纬度球面曲率变化较小，8 环足以近似为无缝曲面。
+ *
+ * @stability experimental
+ */
+export const POLAR_CAP_RINGS = 8;
+
+/**
+ * 判断给定瓦片是否为极地瓦片（北极或南极边缘行）。
+ * 极地瓦片在 Web Mercator 网格中位于 y=0（北极边缘）或 y=numTiles-1（南极边缘）。
+ *
+ * @param z - 瓦片 zoom 级别（0, 1, 2, ...）
+ * @param y - 瓦片行号（0 = 最北行）
+ * @returns 若瓦片位于极地行则返回 true
+ *
+ * @example
+ * isPolarTile(0, 0);   // true — zoom=0 只有 1 行，既是北极也是南极
+ * isPolarTile(2, 0);   // true — 北极行
+ * isPolarTile(2, 3);   // true — 南极行（numTiles=4, y=3）
+ * isPolarTile(2, 1);   // false — 中纬度
+ *
+ * @stability stable
+ */
+export function isPolarTile(z: number, y: number): boolean {
+    const numTiles = 1 << z;
+    return y === 0 || y === numTiles - 1;
+}
+
+// ════════════════════════════════════════════════════════════════
 // 类型定义
 // ════════════════════════════════════════════════════════════════
 
@@ -341,18 +409,29 @@ export function tessellateGlobeTile(
     // 瓦片经纬度范围（度）
     const lngMin = (x / numTiles) * 360 - 180;
     const lngMax = ((x + 1) / numTiles) * 360 - 180;
-    const latMax = tileYToLat(y, z);        // 北边纬度（较大）
-    const latMin = tileYToLat(y + 1, z);    // 南边纬度（较小）
 
-    // 网格维度
-    const n1 = segments + 1;
-    const mainVertexCount = n1 * n1;
+    // Mercator 原始纬度范围（用于 UV 映射——纹理内容仅覆盖此范围）
+    const mercatorLatMax = tileYToLat(y, z);        // 北边纬度（较大）
+    const mercatorLatMin = tileYToLat(y + 1, z);    // 南边纬度（较小）
 
     // ═══ 裙边边缘判定 ═══
     // 北极瓦片（y=0）：顶边所有顶点汇聚到极点，裙边退化→跳过
     const isNorthPole = (y === 0);
     // 南极瓦片（y=numTiles-1）：底边所有顶点汇聚到极点→跳过
     const isSouthPole = (y === numTiles - 1);
+
+    // 极地瓦片几何范围延伸到真正的极点（±90°），填补 Mercator 投影的 85°→90° 空白。
+    // 纹理 UV 将被 clamp 到 [0,1]，使延伸区域采样 Mercator 纹理的边缘像素——
+    // 视觉上极地区域与相邻瓦片的边缘无缝衔接，无需独立的极地纹理。
+    const latMax = isNorthPole ? POLE_LAT_NORTH : mercatorLatMax;
+    const latMin = isSouthPole ? POLE_LAT_SOUTH : mercatorLatMin;
+
+    // Mercator 纬度跨度（度），用于 UV v 的归一化
+    const mercatorLatSpan = mercatorLatMin - mercatorLatMax;
+
+    // 网格维度
+    const n1 = segments + 1;
+    const mainVertexCount = n1 * n1;
 
     // 四条边是否生成裙边
     const hasTopSkirt = !isNorthPole;
@@ -379,9 +458,16 @@ export function tessellateGlobeTile(
     // ═══ 填充主网格顶点 ═══
     for (let row = 0; row <= segments; row++) {
         const v = row / segments;
-        // 从北到南线性插值纬度
+        // 从北到南线性插值纬度（使用可能已延伸的 latMax/latMin）
         const latDeg = latMax + (latMin - latMax) * v;
         const latRad = latDeg * DEG2RAD;
+
+        // UV v 坐标：映射到 Mercator 原始纬度范围 [mercatorLatMax, mercatorLatMin]，
+        // 并 clamp 到 [0,1]。对于极地延伸区域（latDeg 超出 Mercator 范围），
+        // uvV 被钳位到 0（北极延伸）或 1（南极延伸），
+        // GPU 采样器的 clamp-to-edge 确保采样到纹理边缘像素——与相邻瓦片无缝衔接。
+        const rawUvV = (latDeg - mercatorLatMax) / mercatorLatSpan;
+        const uvV = Math.max(0, Math.min(1, rawUvV));
 
         for (let col = 0; col <= segments; col++) {
             const u = col / segments;
@@ -403,9 +489,9 @@ export function tessellateGlobeTile(
             normals[idx * 3 + 1] = _normalBuf[1];
             normals[idx * 3 + 2] = _normalBuf[2];
 
-            // UV 纹理坐标
+            // UV 纹理坐标：u 沿经度线性，v 沿纬度映射到 Mercator 范围
             uvs[idx * 2] = u;
-            uvs[idx * 2 + 1] = v;
+            uvs[idx * 2 + 1] = uvV;
         }
     }
 
@@ -543,10 +629,20 @@ export function tessellateGlobeTile(
     }
 
     // ═══ 索引生成（主网格 + 裙边）═══
+    // 北极和南极分别独立处理：z=0 时同一瓦片既是北极又是南极，
+    // 需要第一行用北极扇形、最后一行用南极扇形，中间行用标准网格。
+
+    // 扇形行数（被极点替代的行）
+    const northFanRows = isNorthPole ? 1 : 0;
+    const southFanRows = isSouthPole ? 1 : 0;
+    // 标准网格行数 = 总行数 - 极点扇形行数
+    const gridRows = segments - northFanRows - southFanRows;
+
     // 预计算主网格索引的精确数量
-    const mainIdxCount = (isNorthPole || isSouthPole)
-        ? segments * 3 + (segments - 1) * segments * 6   // 扇形 + 网格
-        : segments * segments * 6;                         // 全网格
+    const fanIdxCount = (northFanRows + southFanRows) * segments * 3;  // 每个扇形行 segments 个三角形
+    const gridIdxCount = gridRows * segments * 6;                       // 每行 segments 个四边形 × 2 三角形
+    const mainIdxCount = fanIdxCount + gridIdxCount;
+
     // 裙边索引：每条活跃边缘 × segments 个四边形 × 每四边形 2 三角形 × 每三角形 3 索引
     const skirtIdxCount = skirtEdgeCount * segments * 6;
     const totalMaxIdxCount = mainIdxCount + skirtIdxCount;
@@ -554,57 +650,47 @@ export function tessellateGlobeTile(
     const indices = new Uint32Array(totalMaxIdxCount);
     let ii = 0;
 
-    // ── 主网格索引（含极地退化三角形处理）──
+    // ── 北极扇形（第一行 → 极点汇聚到第二行）──
+    // 第一行所有顶点（row=0）在 lat=90° 时共享同一 ECEF 位置
     if (isNorthPole) {
-        // 北极：第一行所有顶点共享极点位置 → 扇形连接到第二行
         for (let col = 0; col < segments; col++) {
-            indices[ii++] = 0;              // 极点（所有列共享同一 ECEF 位置）
-            indices[ii++] = n1 + col;       // 第二行左
-            indices[ii++] = n1 + col + 1;   // 第二行右
+            // CCW 从地球外部/上方观察：极点 → 第二行左 → 第二行右
+            indices[ii++] = 0;              // 极点（row=0 所有列共享同一 ECEF）
+            indices[ii++] = n1 + col;       // 第二行（row=1）左
+            indices[ii++] = n1 + col + 1;   // 第二行（row=1）右
         }
-        // 剩余行正常网格（row 1..segments-1）
-        for (let row = 1; row < segments; row++) {
-            for (let col = 0; col < segments; col++) {
-                const tl = row * n1 + col;
-                const tr = tl + 1;
-                const bl = (row + 1) * n1 + col;
-                const br = bl + 1;
-                // CCW 正面朝外（从地球外部观察）
-                indices[ii++] = tl; indices[ii++] = bl; indices[ii++] = tr;
-                indices[ii++] = tr; indices[ii++] = bl; indices[ii++] = br;
-            }
+    }
+
+    // ── 中间标准网格行 ──
+    // 起始行：若有北极扇形则从 row=1 开始，否则 row=0
+    // 结束行：若有南极扇形则到 row=segments-2，否则 row=segments-1
+    const gridRowStart = isNorthPole ? 1 : 0;
+    const gridRowEnd = isSouthPole ? segments - 1 : segments;
+    for (let row = gridRowStart; row < gridRowEnd; row++) {
+        for (let col = 0; col < segments; col++) {
+            const tl = row * n1 + col;
+            const tr = tl + 1;
+            const bl = (row + 1) * n1 + col;
+            const br = bl + 1;
+            // CCW 正面朝外（从地球外部观察）
+            indices[ii++] = tl; indices[ii++] = bl; indices[ii++] = tr;
+            indices[ii++] = tr; indices[ii++] = bl; indices[ii++] = br;
         }
-    } else if (isSouthPole) {
-        // 南极：正常行在前（row 0..segments-2），最后一行用扇形
-        for (let row = 0; row < segments - 1; row++) {
-            for (let col = 0; col < segments; col++) {
-                const tl = row * n1 + col;
-                const tr = tl + 1;
-                const bl = (row + 1) * n1 + col;
-                const br = bl + 1;
-                indices[ii++] = tl; indices[ii++] = bl; indices[ii++] = tr;
-                indices[ii++] = tr; indices[ii++] = bl; indices[ii++] = br;
-            }
-        }
-        // 最后一行 → 扇形（极点索引 = 最后一行第一个顶点）
+    }
+
+    // ── 南极扇形（最后一行 → 极点汇聚）──
+    // 最后一行所有顶点（row=segments）在 lat=-90° 时共享同一 ECEF 位置。
+    // 绕序推导：从地球外部观察南极（视线方向 +Z，即从 -Z 向上看），
+    // 经度递增方向在下方视角下为顺时针，所以 CCW 绕序为 外圈左 → 极点 → 外圈右。
+    // 与北极绕序结构一致（极点在中间），镜像关系体现在 Z 轴方向相反。
+    // 叉积验证：(pole-outerLeft) × (outerRight-outerLeft) 法线指向 -Z 方向 = 外向 ✓
+    if (isSouthPole) {
         const lastRow = segments;
-        const poleIdx = lastRow * n1;
+        const poleIdx = lastRow * n1;  // 极点索引（最后一行任一列，ECEF 相同）
         for (let col = 0; col < segments; col++) {
-            indices[ii++] = (lastRow - 1) * n1 + col;
-            indices[ii++] = poleIdx;
-            indices[ii++] = (lastRow - 1) * n1 + col + 1;
-        }
-    } else {
-        // 非极地：标准网格，每个四边形拆为 2 个三角形
-        for (let row = 0; row < segments; row++) {
-            for (let col = 0; col < segments; col++) {
-                const tl = row * n1 + col;
-                const tr = tl + 1;
-                const bl = (row + 1) * n1 + col;
-                const br = bl + 1;
-                indices[ii++] = tl; indices[ii++] = bl; indices[ii++] = tr;
-                indices[ii++] = tr; indices[ii++] = bl; indices[ii++] = br;
-            }
+            indices[ii++] = (lastRow - 1) * n1 + col;        // 外圈左
+            indices[ii++] = poleIdx;                          // 极点（中间）
+            indices[ii++] = (lastRow - 1) * n1 + col + 1;    // 外圈右
         }
     }
 
@@ -686,6 +772,241 @@ export function tessellateGlobeTile(
         indices: indices.slice(0, totalIndexCount),
         vertexCount: totalVertexCount,
         indexCount: totalIndexCount,
+        boundingSphere: {
+            center: [bsX, bsY, bsZ],
+            radius: bsRadius,
+        },
+    };
+}
+
+// ════════════════════════════════════════════════════════════════
+// §3.2b 极地冰盖曲面细分（Plan B: Natural Earth 极地纹理）
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * 生成极地冰盖（Polar Cap）球面网格。
+ * 覆盖 Web Mercator 无法投影的 ±85.05° → ±90° 极地区域，
+ * 使用方位等距（Azimuthal Equidistant）UV 映射将圆形极地纹理正确贴合到球冠曲面上。
+ *
+ * ## 网格拓扑
+ * - **中心极点**：1 个顶点，位于 ±90° 纬度的椭球面位置，UV = (0.5, 0.5)
+ * - **同心环**：`rings` 个环，从极点向外（朝 ±85.05°）等纬度间距分布
+ * - **径向扇区**：每环 `sectors` 个顶点，沿经度均匀分布（0°~360°）
+ * - **内层扇形**：极点 → 第 1 环的 `sectors` 个三角形
+ * - **外层网格**：第 1~rings 环之间的 `(rings-1) × sectors` 个四边形 → `×2` 三角形
+ *
+ * ## UV 映射——方位等距投影（Azimuthal Equidistant）
+ * ```
+ *   r = (90° - |latitude|) / (90° - 85.05°)    ∈ [0, 1]
+ *   θ = longitude（弧度）
+ *   u = 0.5 + 0.5 × r × cos(θ)
+ *   v = 0.5 + 0.5 × r × sin(θ)    (南极取 -sin(θ) 以镜像翻转)
+ * ```
+ * 极点映射到 UV 中心 (0.5, 0.5)，外缘（85.05° 纬度圆）映射到 UV 单位圆边缘。
+ * 这使得以极点为中心拍摄/投影的卫星影像可以无变形地映射到球冠上。
+ *
+ * ## 绕序
+ * 所有三角形均为 CCW（从地球外部观察），兼容 `cullMode: 'back'` + `frontFace: 'ccw'`。
+ * - 北极：极点 → ring[i] → ring[i+1]（逆时针，因为从上方看经度递增方向为逆时针）
+ * - 南极：极点 → ring[i+1] → ring[i]（从下方看翻转后仍为逆时针）
+ *
+ * @param isNorth - `true` 生成北极冰盖（90° → 85.05°N），`false` 生成南极冰盖（-90° → -85.05°S）
+ * @param sectors - 经向扇区数，默认 {@link POLAR_CAP_SECTORS}（64）
+ * @param rings - 径向环数（不含极点），默认 {@link POLAR_CAP_RINGS}（8）
+ * @param ellipsoid - 椭球体参数，默认 WGS84
+ * @returns 与标准 GlobeTileMesh 兼容的极地冰盖网格，可直接 meshToRTE 后送 GPU
+ *
+ * @example
+ * // 生成北极冰盖网格（默认 64 扇区 × 8 环）
+ * const northCap = tessellateGlobePolarCap(true);
+ * // 生成南极冰盖网格
+ * const southCap = tessellateGlobePolarCap(false);
+ * // 自定义分辨率（128 扇区 × 12 环）
+ * const hiResCap = tessellateGlobePolarCap(true, 128, 12);
+ *
+ * @stability experimental
+ */
+export function tessellateGlobePolarCap(
+    isNorth: boolean,
+    sectors: number = POLAR_CAP_SECTORS,
+    rings: number = POLAR_CAP_RINGS,
+    ellipsoid: Ellipsoid = WGS84_ELLIPSOID,
+): GlobeTileMesh {
+    // ═══ 纬度范围（度）═══
+    // 北极：从 90° 向外到 MERCATOR_LAT_LIMIT（85.05°）
+    // 南极：从 -90° 向外到 -MERCATOR_LAT_LIMIT（-85.05°）
+    const poleLat = isNorth ? POLE_LAT_NORTH : POLE_LAT_SOUTH;
+    const edgeLat = isNorth ? MERCATOR_LAT_LIMIT : -MERCATOR_LAT_LIMIT;
+    // 极点到外缘的纬度跨度（度），约 4.95°
+    const latSpan = Math.abs(poleLat - edgeLat);
+
+    // ═══ 顶点布局 ═══
+    // 极点 1 个 + rings 个环 × 每环 sectors 个 = 1 + rings × sectors
+    const vertexCount = 1 + rings * sectors;
+
+    // ═══ 索引计数 ═══
+    // 内层扇形：sectors 个三角形 × 3 = sectors × 3
+    // 外层网格：(rings - 1) 个环间 × sectors 个四边形 × 2 三角形 × 3 索引
+    const fanTriCount = sectors;
+    const gridTriCount = (rings - 1) * sectors * 2;
+    const indexCount = (fanTriCount + gridTriCount) * 3;
+
+    // ═══ 分配数组 ═══
+    const positions = new Float64Array(vertexCount * 3);
+    const normals = new Float32Array(vertexCount * 3);
+    const uvs = new Float32Array(vertexCount * 2);
+    const indices = new Uint32Array(indexCount);
+
+    // ═══ 极点顶点（索引 0）═══
+    const poleLatRad = poleLat * DEG2RAD;
+    // 极点经度取 0（无关紧要，因为极点处所有经线汇聚）
+    localGeodeticToECEF(_ecefBuf, 0, poleLatRad, 0, ellipsoid);
+    positions[0] = _ecefBuf[0];
+    positions[1] = _ecefBuf[1];
+    positions[2] = _ecefBuf[2];
+
+    surfaceNormal(_normalBuf, 0, poleLatRad);
+    normals[0] = _normalBuf[0];
+    normals[1] = _normalBuf[1];
+    normals[2] = _normalBuf[2];
+
+    // 极点 UV = 纹理中心
+    uvs[0] = 0.5;
+    uvs[1] = 0.5;
+
+    // ═══ 环形顶点（索引 1..rings×sectors）═══
+    // ring=0 是最靠近极点的环，ring=rings-1 是最靠近 85.05° 的外缘环
+    for (let ring = 0; ring < rings; ring++) {
+        // 归一化径向距离：ring 0 最靠近极点但不在极点上
+        // (ring+1)/rings 使 ring=0 → 1/rings（极点附近），ring=rings-1 → 1.0（外缘）
+        const rNorm = (ring + 1) / rings;
+
+        // 纬度：从极点向外线性插值
+        const latDeg = isNorth
+            ? poleLat - latSpan * rNorm    // 北极：90° → 85.05°
+            : poleLat + latSpan * rNorm;   // 南极：-90° → -85.05°
+        const latRad = latDeg * DEG2RAD;
+
+        for (let sec = 0; sec < sectors; sec++) {
+            // 经度：0° → 360°，均匀分布（sec/sectors 使首尾不重合，避免退化三角形）
+            const lngRad = (sec / sectors) * 2 * PI;
+
+            // 顶点索引：跳过极点（索引 0），ring × sectors + sec + 1
+            const vi = 1 + ring * sectors + sec;
+
+            // ECEF 位置（Float64 精度）
+            localGeodeticToECEF(_ecefBuf, lngRad, latRad, 0, ellipsoid);
+            positions[vi * 3] = _ecefBuf[0];
+            positions[vi * 3 + 1] = _ecefBuf[1];
+            positions[vi * 3 + 2] = _ecefBuf[2];
+
+            // 椭球面法线
+            surfaceNormal(_normalBuf, lngRad, latRad);
+            normals[vi * 3] = _normalBuf[0];
+            normals[vi * 3 + 1] = _normalBuf[1];
+            normals[vi * 3 + 2] = _normalBuf[2];
+
+            // 方位等距 UV 映射
+            // r ∈ [0, 1]：极点中心 → 外缘边界
+            // θ = lngRad：经度方向角
+            const u = 0.5 + 0.5 * rNorm * Math.cos(lngRad);
+            // 南极镜像翻转 sin 分量，使纹理从南极下方观察时方向正确
+            const v = isNorth
+                ? 0.5 + 0.5 * rNorm * Math.sin(lngRad)
+                : 0.5 - 0.5 * rNorm * Math.sin(lngRad);
+            uvs[vi * 2] = u;
+            uvs[vi * 2 + 1] = v;
+        }
+    }
+
+    // ═══ 索引生成 ═══
+    let ii = 0;
+
+    // ── 内层扇形：极点 → 第 1 环 ──
+    // 每个扇区生成 1 个三角形，连接极点（索引 0）与第 1 环（ring=0）的相邻两点
+    for (let sec = 0; sec < sectors; sec++) {
+        const cur = 1 + sec;                           // ring=0 当前扇区顶点
+        const next = 1 + (sec + 1) % sectors;          // ring=0 下一扇区（环绕取模）
+
+        if (isNorth) {
+            // 北极 CCW（从地球外部/上方观察）：
+            // 极点 → 当前 → 下一个（经度递增方向为逆时针）
+            indices[ii++] = 0;     // 极点
+            indices[ii++] = cur;   // 当前扇区
+            indices[ii++] = next;  // 下一扇区
+        } else {
+            // 南极 CCW（从地球外部/下方观察）：
+            // 经度递增方向从下方看为顺时针，所以反转为 极点 → 下一个 → 当前
+            indices[ii++] = 0;     // 极点
+            indices[ii++] = next;  // 下一扇区（交换）
+            indices[ii++] = cur;   // 当前扇区（交换）
+        }
+    }
+
+    // ── 外层网格：ring=0 → ring=rings-1 之间的四边形带 ──
+    for (let ring = 0; ring < rings - 1; ring++) {
+        for (let sec = 0; sec < sectors; sec++) {
+            // 内环（靠近极点）的两个相邻顶点
+            const innerCur = 1 + ring * sectors + sec;
+            const innerNext = 1 + ring * sectors + (sec + 1) % sectors;
+            // 外环（远离极点）的两个相邻顶点
+            const outerCur = 1 + (ring + 1) * sectors + sec;
+            const outerNext = 1 + (ring + 1) * sectors + (sec + 1) % sectors;
+
+            if (isNorth) {
+                // 北极 CCW 四边形拆分：
+                // 三角形 1：innerCur → outerCur → innerNext
+                // 三角形 2：innerNext → outerCur → outerNext
+                indices[ii++] = innerCur;
+                indices[ii++] = outerCur;
+                indices[ii++] = innerNext;
+
+                indices[ii++] = innerNext;
+                indices[ii++] = outerCur;
+                indices[ii++] = outerNext;
+            } else {
+                // 南极 CCW（从下方观察需翻转）：
+                // 三角形 1：innerCur → innerNext → outerCur
+                // 三角形 2：innerNext → outerNext → outerCur
+                indices[ii++] = innerCur;
+                indices[ii++] = innerNext;
+                indices[ii++] = outerCur;
+
+                indices[ii++] = innerNext;
+                indices[ii++] = outerNext;
+                indices[ii++] = outerCur;
+            }
+        }
+    }
+
+    // ═══ 包围球 ═══
+    // 极地冰盖质心近似为极点 ECEF 位置（偏移很小）
+    let bsX = 0, bsY = 0, bsZ = 0;
+    for (let i = 0; i < vertexCount; i++) {
+        bsX += positions[i * 3];
+        bsY += positions[i * 3 + 1];
+        bsZ += positions[i * 3 + 2];
+    }
+    bsX /= vertexCount;
+    bsY /= vertexCount;
+    bsZ /= vertexCount;
+
+    let bsRadius = 0;
+    for (let i = 0; i < vertexCount; i++) {
+        const dx = positions[i * 3] - bsX;
+        const dy = positions[i * 3 + 1] - bsY;
+        const dz = positions[i * 3 + 2] - bsZ;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > bsRadius) { bsRadius = dist; }
+    }
+
+    return {
+        positions,
+        normals,
+        uvs,
+        indices,
+        vertexCount,
+        indexCount: ii,
         boundingSphere: {
             center: [bsX, bsY, bsZ],
             radius: bsRadius,

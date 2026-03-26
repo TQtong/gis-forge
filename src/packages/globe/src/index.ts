@@ -25,6 +25,7 @@ export type { SunPosition } from './sun.ts';
 export {
     getSegments,
     tessellateGlobeTile,
+    tessellateGlobePolarCap,
     meshToRTE,
     meshToRTE_HighLow,
     screenToGlobe,
@@ -36,6 +37,12 @@ export {
     lngToTileX,
     latToTileY,
     tileYToLat,
+    isPolarTile,
     WGS84_ELLIPSOID,
+    MERCATOR_LAT_LIMIT,
+    POLE_LAT_NORTH,
+    POLE_LAT_SOUTH,
+    POLAR_CAP_SECTORS,
+    POLAR_CAP_RINGS,
 } from './globe-tile-mesh.ts';
 export type { GlobeTileMesh, GlobeTileID, GlobeCamera, Ellipsoid } from './globe-tile-mesh.ts';
