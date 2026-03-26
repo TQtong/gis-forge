@@ -73,9 +73,9 @@ export function App(): React.ReactElement {
             globe = new Globe3D({
                 container: el,
                 center: [116.3974, 39.9093],
-                altitude: 2_000_000,
+                altitude: 20_000_000,
                 bearing: 0,
-                pitch: -30,
+                pitch: -90,
                 atmosphere: true,
                 skybox: true,
                 enableRotate: true,

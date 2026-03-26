@@ -224,10 +224,22 @@ fn applyLogDepth(clipPos: vec4<f32>, logDepthBufFC: f32) -> vec4<f32> {
 
 @fragment fn globe_fs(in: VsOut) -> @location(0) vec4<f32> {
   var color = textureSample(tileTexture, tileSampler, in.uv);
-  let nDotV = max(dot(normalize(in.normal), in.viewDir), 0.0);
+  let N = normalize(in.normal);
+  let V = in.viewDir;
+
+  // Diffuse lighting from sun (in ECEF space, consistent with all layers)
+  let nDotL = max(dot(N, camera.sunDirection), 0.0);
+  let ambient = 0.3;
+  let diffuse = nDotL * 0.7;
+  let lighting = ambient + diffuse;
+  color = vec4<f32>(color.rgb * lighting, color.a);
+
+  // Atmosphere edge effect (limb darkening / blue tint at horizon)
+  let nDotV = max(dot(N, V), 0.0);
   let atmoFactor = smoothstep(0.0, 0.15, nDotV);
-  let atmoColor = vec4<f32>(0.4, 0.6, 1.0, 1.0);
-  color = mix(atmoColor, color, atmoFactor);
+  let atmoColor = vec3<f32>(0.4, 0.6, 1.0);
+  color = vec4<f32>(mix(atmoColor, color.rgb, atmoFactor), 1.0);
+
   return color;
 }
 `;
@@ -432,6 +444,136 @@ function computeHorizonDist(altitude: number): number {
 }
 
 // ════════════════════════════════════════════════════════════════
+// P2 #7: Multi-Frustum Cascade 分割
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * 计算多截锥体分割（Pipeline v2 §五 + Shape Issues §五）。
+ * 当单个截锥体的 far/near 比超过阈值时，分割为多个截锥体渲染。
+ * 每个截锥体独立执行一个 render pass，深度缓冲在 pass 之间清除。
+ *
+ * 分割策略：在对数空间均匀划分 [near, far]，相邻截锥体有 20% 重叠避免接缝。
+ * 输出从远到近排列（先渲染远处截锥体，利用深度覆盖近处会正确覆盖远处）。
+ *
+ * Multi-frustum rendering: for now single frustum + log depth. Cascade function available for future use.
+ *
+ * @param nearZ - 最近裁剪面（米），必须 > 0
+ * @param farZ - 最远裁剪面（米），必须 > nearZ
+ * @param maxRatio - 单个截锥体允许的最大 far/near 比，默认 10000
+ * @returns 截锥体列表 [{near, far}]，从远到近排列（先渲染远处，利用深度覆盖）
+ *
+ * @stability experimental
+ *
+ * @example
+ * // 近地面 near=0.5m far=1e8m → ratio=2e8 → 分割为 2~3 个截锥体
+ * const frusta = computeCascadeFrusta(0.5, 1e8);
+ * // → [{ near: ~316m, far: 1e8 }, { near: 0.4m, far: ~395m }]
+ *
+ * @example
+ * // 单截锥体足够的情况
+ * const single = computeCascadeFrusta(10, 50000);
+ * // → [{ near: 10, far: 50000 }]  (ratio=5000 < 10000)
+ */
+function computeCascadeFrusta(
+    nearZ: number,
+    farZ: number,
+    maxRatio: number = 10000,
+): Array<{ near: number; far: number }> {
+    // 边界防御：nearZ 必须为正，farZ 必须大于 nearZ
+    if (nearZ <= 0 || farZ <= nearZ) {
+        return [{ near: Math.max(nearZ, 0.1), far: Math.max(farZ, 1.0) }];
+    }
+
+    const ratio = farZ / nearZ;
+    if (ratio <= maxRatio) {
+        // 单截锥体足够——不分割
+        return [{ near: nearZ, far: farZ }];
+    }
+
+    // 分割为多个截锥体：在对数空间均匀分割
+    // numFrusta = ceil(log(ratio) / log(maxRatio))
+    const numFrusta = Math.ceil(Math.log(ratio) / Math.log(maxRatio));
+    const frusta: Array<{ near: number; far: number }> = [];
+    const logNear = Math.log(nearZ);
+    const logFar = Math.log(farZ);
+    // 对数空间中每个截锥体的跨度
+    const step = (logFar - logNear) / numFrusta;
+
+    // 从远到近排列：i = numFrusta-1 → 0
+    for (let i = numFrusta - 1; i >= 0; i--) {
+        const fNear = Math.exp(logNear + step * i);
+        const fFar = Math.exp(logNear + step * (i + 1));
+        // 20% overlap：向近端方向扩展 near，避免相邻截锥体之间的接缝
+        // 第 0 个截锥体（最近）不扩展，保持原始 nearZ
+        const overlapNear = i > 0 ? fNear * 0.8 : fNear;
+        frusta.push({ near: overlapNear, far: fFar });
+    }
+
+    return frusta;
+}
+
+// ════════════════════════════════════════════════════════════════
+// P2 #9: Polyline / Overlay 对数深度一致性工具
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * 计算对数深度缓冲常数（与 globe_vs 的 applyLogDepth 配套）。
+ * 所有 Globe 模式下的渲染图层（polyline、point、extrusion）必须使用相同的常数，
+ * 否则会出现 z-fighting（Pipeline v2 §五 + Shape Issues §七 P2 #9）。
+ *
+ * 公式来源：Outerra / Cesium logarithmic depth buffer
+ *   logZ = log2(max(1e-6, clipW + 1.0)) * logDepthBufFC
+ *   gl_Position.z = logZ * clipW
+ * 其中 logDepthBufFC = 2.0 / log2(farZ + 1.0)
+ *
+ * @param farZ - 远裁剪面距离（米），必须 > 0
+ * @returns logDepthBufFC = 2.0 / log2(farZ + 1.0)
+ *
+ * @stability stable
+ *
+ * @example
+ * const fc = computeLogDepthBufFC(71190838);
+ * // fc ≈ 0.0762... 用于 polyline shader 的 applyLogDepth 函数
+ *
+ * @example
+ * // 在 Globe3D 帧渲染中：
+ * const farZ = horizonDist * FAR_PLANE_HORIZON_FACTOR + altitude;
+ * const fc = computeLogDepthBufFC(farZ);
+ * // 写入所有图层的 uniform buffer
+ */
+export function computeLogDepthBufFC(farZ: number): number {
+    // 防御：farZ <= 0 会导致 log2 返回 -Infinity 或 NaN
+    if (farZ <= 0) {
+        if (typeof __DEV__ !== 'undefined' && __DEV__) { devWarn('computeLogDepthBufFC: farZ must be > 0, got', farZ); }
+        return 2.0 / Math.log2(2.0); // fallback: farZ=1 → fc=2.0
+    }
+    return 2.0 / Math.log2(farZ + 1.0);
+}
+
+/**
+ * Polyline / overlay 图层复用的 WGSL 对数深度函数。
+ * 必须与 GLOBE_TILE_WGSL 中的 applyLogDepth 完全一致。
+ * 
+ * 使用方式：在 polyline/point/extrusion 等图层的 WGSL 着色器中嵌入此代码片段，
+ * 并在 uniform buffer 中传入与 Globe 瓦片相同的 logDepthBufFC 值
+ * （通过 computeLogDepthBufFC(farZ) 计算）。
+ *
+ * @stability stable
+ *
+ * @example
+ * // 在 ShaderAssembler 中组合 polyline shader：
+ * const polylineShaderCode = LOG_DEPTH_WGSL + polylineMainCode;
+ */
+export const LOG_DEPTH_WGSL = /* wgsl */`
+fn applyLogDepth(clipPos: vec4<f32>, logDepthBufFC: f32) -> vec4<f32> {
+  var pos = clipPos;
+  let logZ = log2(max(1e-6, pos.w + 1.0)) * logDepthBufFC;
+  pos.z = logZ * pos.w;
+  return pos;
+}
+`;
+
+// ════════════════════════════════════════════════════════════════
 // 模块级复用缓冲（避免帧循环中分配）
 // ════════════════════════════════════════════════════════════════
 
@@ -452,6 +594,12 @@ const _tmpMat4C = mat4.create();
 
 /** 临时 vec3（各种方向/位置计算） */
 const _tmpVec3A = vec3.create();
+const _tmpVec3B = vec3.create();
+const _tmpVec3C = vec3.create();
+
+/** RTE lookAt 用的 Float64 暂存（避免 Float32 精度损失） */
+const _ecefCam64 = new Float64Array(3);
+const _ecefCenter64 = new Float64Array(3);
 
 /** camera uniform 数据缓冲（96 bytes = 24 floats） */
 const _cameraUniformData = new Float32Array(CAMERA_UNIFORM_SIZE / 4);
@@ -649,6 +797,11 @@ interface GeoJsonRecord {
  * 缓存的瓦片 GPU 资源。
  * texture + bindGroup 组合为一个缓存条目，加载中的瓦片 loading=true。
  */
+// Defensive terrain design (GeoForge_3D_Globe_Shape_Issues §四):
+// - textureReady=true + demReady=false → render as flat tile (z=0)
+// - textureReady=true + demReady=true  → render as terrain tile
+// - textureReady=false → use parent tile placeholder
+// - terrainProvider switch: old terrain tiles retained until new data arrives
 interface CachedTile {
     /** 瓦片纹理（GPUTexture），加载完成后非 null */
     texture: GPUTexture | null;
@@ -656,6 +809,12 @@ interface CachedTile {
     bindGroup: GPUBindGroup | null;
     /** 是否正在加载中 */
     loading: boolean;
+    /** 影像纹理是否已就绪（区分"占位中"和"纹理已可渲染"） */
+    textureReady: boolean;
+    /** DEM 高程数据是否已就绪（false = 以 z=0 平面渲染） */
+    demReady: boolean;
+    /** DEM 高程数据（Float32Array），null 表示平面瓦片（z=0） */
+    demData: Float32Array | null;
 }
 
 /**
@@ -727,6 +886,13 @@ export class Globe3D {
 
     /** 上一帧的 CameraState 快照 */
     private _lastCamState: CameraState | null = null;
+
+    /**
+     * 上一帧的 GlobeCamera 快照。
+     * pickGlobe / _readDepthAtPixel 等异步查询方法需要帧循环外
+     * 的 inverseVP_ECEF，所以在 _renderFrame 结尾缓存一份。
+     */
+    private _lastGlobeCam: GlobeCamera | null = null;
 
     // ══════ WebGPU 核心 ══════
     /** GPU 设备 */
@@ -825,6 +991,9 @@ export class Globe3D {
 
     /** 上一帧时间戳（ms） */
     private _lastFrameTime = 0;
+
+    /** 帧计数器（诊断用） */
+    private _frameCount = 0;
 
     /** ready Promise 的 resolve 回调 */
     private _readyResolve: (() => void) | null = null;
@@ -953,6 +1122,12 @@ export class Globe3D {
         } else {
             this._canvas.setAttribute('aria-label', 'GeoForge 3D Globe');
         }
+
+        // 容器必须是定位元素，才能让 Canvas 的 100% 尺寸生效
+        if (getComputedStyle(this._container).position === 'static') {
+            this._container.style.position = 'relative';
+        }
+        this._container.style.overflow = 'hidden';
 
         // 将 Canvas 挂到容器
         this._container.appendChild(this._canvas);
@@ -1887,6 +2062,119 @@ export class Globe3D {
     }
 
     // ════════════════════════════════════════════════════════════
+    // GPU Picking（深度读回 + 射线求交）
+    // ════════════════════════════════════════════════════════════
+
+    /**
+     * 屏幕像素坐标 → 地球表面 ECEF 位置（异步）。
+     *
+     * 当前实现使用 ray-ellipsoid intersection（screenToGlobe）；
+     * 后续可通过 `_readDepthAtPixel` 读取 GPU 深度缓冲获得精确
+     * 三维交点（含地形高程）。
+     *
+     * @param screenX - 屏幕 X（CSS 像素）
+     * @param screenY - 屏幕 Y（CSS 像素）
+     * @returns [lng, lat, altitude] 度/米，或 null（射线不与地球相交）
+     *
+     * @stability experimental
+     *
+     * @example
+     * const result = await globe.pickGlobe(400, 300);
+     * if (result) { console.log(`lng=${result[0]}, lat=${result[1]}, alt=${result[2]}`); }
+     */
+    public async pickGlobe(screenX: number, screenY: number): Promise<[number, number, number] | null> {
+        this._ensureAlive();
+
+        // 需要至少渲染过一帧才能获取 GlobeCamera
+        if (!this._lastGlobeCam) { return null; }
+
+        const gc = this._lastGlobeCam;
+
+        // 射线-椭球求交（screenToGlobe 返回 [lng, lat] 度 或 null）
+        const hit = screenToGlobe(
+            screenX, screenY,
+            gc.inverseVP_ECEF,
+            gc.viewportWidth, gc.viewportHeight,
+        );
+
+        if (!hit) { return null; }
+
+        // 返回 [lng, lat, altitude=0]（地表交点，无地形高程）
+        return [hit[0], hit[1], 0];
+    }
+
+    /**
+     * 读取深度缓冲中指定像素的深度值（GPU → CPU 异步读回）。
+     *
+     * 流程：
+     * 1. 创建 1×1 staging buffer（256 字节，WebGPU 最小映射尺寸）
+     * 2. 将深度纹理 (x,y) 处 1×1 像素复制到 staging buffer
+     * 3. mapAsync 映射 → 读取 depth32float 值
+     * 4. 返回深度值（0~1 范围；Reversed-Z 下 0.0=远平面，1.0=近平面）
+     *
+     * @param x - 屏幕 X（CSS 像素）
+     * @param y - 屏幕 Y（CSS 像素）
+     * @returns 深度值（0~1），或 null（坐标越界/无深度/背景像素）
+     *
+     * @stability experimental
+     *
+     * @example
+     * const depth = await this._readDepthAtPixel(400, 300);
+     * if (depth !== null) { console.log(`depth = ${depth}`); }
+     */
+    private async _readDepthAtPixel(x: number, y: number): Promise<number | null> {
+        const device = this._device;
+
+        // GPU 设备或深度纹理不可用
+        if (!device || !this._depthTexture) { return null; }
+
+        // CSS 像素 → 物理像素（考虑设备像素比）
+        const px = Math.round(x * this._viewport.pixelRatio);
+        const py = Math.round(y * this._viewport.pixelRatio);
+
+        // 边界检查：物理坐标必须在深度纹理范围内
+        if (px < 0 || px >= this._depthTexture.width || py < 0 || py >= this._depthTexture.height) {
+            return null;
+        }
+
+        // WebGPU 要求 buffer mapping 最小 256 字节，depth32float = 4 bytes/pixel
+        const STAGING_BUFFER_SIZE = 256;
+
+        // 创建临时 staging buffer（MAP_READ 用于 CPU 回读）
+        const stagingBuffer = device.createBuffer({
+            size: STAGING_BUFFER_SIZE,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            label: 'Globe3D:depthReadback',
+        });
+
+        // 编码 GPU 命令：深度纹理 → staging buffer（1×1 像素拷贝）
+        const encoder = device.createCommandEncoder({ label: 'Globe3D:depthCopy' });
+        encoder.copyTextureToBuffer(
+            { texture: this._depthTexture, origin: { x: px, y: py } },
+            { buffer: stagingBuffer, bytesPerRow: STAGING_BUFFER_SIZE },
+            { width: 1, height: 1 },
+        );
+        device.queue.submit([encoder.finish()]);
+
+        // 等待 GPU → CPU 传输完成
+        await stagingBuffer.mapAsync(GPUMapMode.READ);
+
+        // 读取第一个 float32（depth 值）
+        const data = new Float32Array(stagingBuffer.getMappedRange(0, 4));
+        const depth = data[0];
+
+        // 释放 staging buffer 资源
+        stagingBuffer.unmap();
+        stagingBuffer.destroy();
+
+        // Reversed-Z: depth ≈ 0.0 表示远平面（背景/天空），无有效几何体
+        // 此处阈值 0.0001 过滤掉背景像素
+        if (depth <= 0.0001) { return null; }
+
+        return depth;
+    }
+
+    // ════════════════════════════════════════════════════════════
     // Morph API（2D↔3D 视图过渡）
     // ════════════════════════════════════════════════════════════
 
@@ -2031,7 +2319,12 @@ export class Globe3D {
         const pw = Math.round(w * dpr);
         const ph = Math.round(h * dpr);
 
-        // 设置 Canvas 物理尺寸
+        // 尺寸未变时复用上一帧 Viewport 对象，避免每帧分配
+        if (this._canvas.width === pw && this._canvas.height === ph) {
+            return this._viewport;
+        }
+
+        // 设置 Canvas 物理尺寸（触发 WebGPU surface texture 重新分配）
         this._canvas.width = pw;
         this._canvas.height = ph;
 
@@ -2492,12 +2785,19 @@ export class Globe3D {
 
         const frameStart = performance.now();
 
+        // ── 每帧刷新 Canvas 尺寸（容器可能因布局变化而改变大小） ──
+        // 同时更新 viewport，保证投影矩阵 aspect 与实际渲染目标一致
+        this._viewport = this._resizeCanvas(this._maxPixelRatio);
+
         // ── 更新相机 ──
         const camState = this._camera3D.update(dt, this._viewport);
         this._lastCamState = camState;
 
         // ── 计算 Globe 相机（自定义投影） ──
         const globeCam = this._computeGlobeCamera(camState, this._viewport);
+
+        // 缓存 GlobeCamera 供异步查询（pickGlobe / _readDepthAtPixel）
+        this._lastGlobeCam = globeCam;
 
         // ── 获取 surface texture ──
         let surfaceTexture: GPUTexture;
@@ -2568,6 +2868,7 @@ export class Globe3D {
         this._statsTilesRendered = tilesRendered;
         this._statsDrawCalls = drawCalls;
         this._statsFrameTimeMs = performance.now() - frameStart;
+        this._frameCount++;
     }
 
     /**
@@ -2631,35 +2932,52 @@ export class Globe3D {
         // ── 标准透视投影 ──
         mat4.perspective(_tmpMat4A, fov, aspect, nearZ, farZ);
 
-        // ── VP = proj × view（RTE 版本，用于瓦片渲染） ──
-        mat4.multiply(_tmpMat4B, _tmpMat4A, camState.viewMatrix);
+        // ── 相机 ECEF 位置（Float64 精度） ──
+        // CameraState.position 是 Float32，精度不足以做 ECEF 减法。
+        // 但 Camera3D 内部用 Float64 计算后截断到 Float32 存入 CameraState.position。
+        // 这里用 Float64 重新计算相机 ECEF 位置，避免精度损失。
+        const centerLngRad = camState.center[0] * DEG2RAD;
+        const centerLatRad = camState.center[1] * DEG2RAD;
+        geodeticToECEF(_ecefCenter64, centerLngRad, centerLatRad, 0);
 
-        // 复制出来（帧间数据不能被覆盖）
-        const vpMatrix = mat4.clone(_tmpMat4B);
+        // 相机 ECEF = center 地表 + 沿法线偏移 altitude（简化：pitch=-90° 时相机在正上方）
+        // 通用：用 Camera3D 的 position（Float32，精度 ~1m 在 20000km 高度足够用于渲染）
+        const camECEFx: number = camState.position[0];
+        const camECEFy: number = camState.position[1];
+        const camECEFz: number = camState.position[2];
 
-        // ── ECEF 绝对空间版 VP 用于 screenToGlobe ──
-        // Camera3D 的 viewMatrix 是 RTE 的（eye at origin），我们需要 ECEF 版
-        // viewMatrix_ECEF = viewMatrix 但平移列用绝对 ECEF 相机位置
-        // 更简单：构造 lookAt from ECEF camera position
-        const camECEFx = camState.position[0];
-        const camECEFy = camState.position[1];
-        const camECEFz = camState.position[2];
+        // ── 构建 RTE View Matrix（Pipeline v2 §二） ──
+        // eye = [0,0,0]（RTE 原点 = 相机位置）
+        // target = centerECEF - cameraECEF（Float64 减法，结果转 Float32）
+        // 这样 viewMatrix 的平移列为 [0,0,0]，纯旋转，避免 Float32 精度灾难
+        const targetRteX = _ecefCenter64[0] - camECEFx;
+        const targetRteY = _ecefCenter64[1] - camECEFy;
+        const targetRteZ = _ecefCenter64[2] - camECEFz;
 
-        // 用 viewMatrix_RTE 本身来构造 ECEF 版：
-        // viewMatrix_ECEF = viewMatrix_RTE 但加上相机平移
-        // 实际上：viewMatrix_RTE 的平移部分为 0（eye 在原点），
-        // viewMatrix_ECEF 的平移 = viewMatrix_RTE * (-cameraPos)
-        const viewECEF = mat4.clone(camState.viewMatrix);
-        // 平移列(col 3) = R × (-eye)：
-        // viewECEF[12] = -(R[0]*cx + R[4]*cy + R[8]*cz)
-        // viewECEF[13] = -(R[1]*cx + R[5]*cy + R[9]*cz)
-        // viewECEF[14] = -(R[2]*cx + R[6]*cy + R[10]*cz)
-        viewECEF[12] = -(viewECEF[0] * camECEFx + viewECEF[4] * camECEFy + viewECEF[8] * camECEFz);
-        viewECEF[13] = -(viewECEF[1] * camECEFx + viewECEF[5] * camECEFy + viewECEF[9] * camECEFz);
-        viewECEF[14] = -(viewECEF[2] * camECEFx + viewECEF[6] * camECEFy + viewECEF[10] * camECEFz);
+        // up = 地理北向（ENU 的 North 方向）
+        // 在 ECEF 中，ENU 的 North = [-sin(lat)*cos(lon), -sin(lat)*sin(lon), cos(lat)]
+        const sinLat = Math.sin(centerLatRad);
+        const cosLat = Math.cos(centerLatRad);
+        const sinLon = Math.sin(centerLngRad);
+        const cosLon = Math.cos(centerLngRad);
 
-        // vpMatrix_ECEF = proj × viewECEF
-        mat4.multiply(_tmpMat4C, _tmpMat4A, viewECEF);
+        vec3.set(_tmpVec3A, 0, 0, 0);  // eye = RTE origin
+        vec3.set(_tmpVec3B, targetRteX, targetRteY, targetRteZ);  // target
+        vec3.set(_tmpVec3C, -sinLat * cosLon, -sinLat * sinLon, cosLat);  // up = North
+
+        mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
+
+        // ── VP_RTE = proj × viewRTE ──
+        mat4.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
+        const vpMatrix = mat4.clone(_tmpMat4C);
+
+        // ── VP_ECEF = proj × viewECEF（用于 screenToGlobe 反投影） ──
+        // ECEF 版 lookAt: eye = cameraECEF, target = centerECEF, up = North
+        vec3.set(_tmpVec3A, camECEFx, camECEFy, camECEFz);
+        vec3.set(_tmpVec3B, _ecefCenter64[0], _ecefCenter64[1], _ecefCenter64[2]);
+        // _tmpVec3C (up/North) 不变
+        mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
+        mat4.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
 
         // inverseVP_ECEF
         const inverseVP_ECEF = mat4.create();
@@ -2812,8 +3130,8 @@ export class Globe3D {
                 cached = this._tileCache.get(key);
             }
 
-            // 纹理未就绪则跳过此瓦片
-            if (!cached || !cached.texture || !cached.bindGroup) { continue; }
+            // 纹理未就绪则跳过此瓦片（textureReady 守卫防止渲染半初始化的条目）
+            if (!cached || !cached.textureReady || !cached.texture || !cached.bindGroup) { continue; }
 
             // 更新 LRU（移到末尾）
             this._touchTileLRU(key);
@@ -2855,6 +3173,16 @@ export class Globe3D {
             // 标记临时缓冲为可释放（WebGPU 会在提交后回收）
             // 注：生产环境应使用缓冲池复用
         }
+
+        // ── P2 #8: Pure ellipsoid mode fallback ──
+        // When no tiles have textures yet (initial load or imagery disabled),
+        // the sky dome + atmosphere already provide the globe's visible shape.
+        // The globe tile geometry contributes depth writes for correct occlusion.
+        // The "pure ellipsoid" appearance is the default state before tiles load:
+        //   - SkyDome renders behind the globe (background fill)
+        //   - Atmosphere renders the edge glow (Rayleigh/Mie scattering)
+        //   - Tiles render on top as their textures become available
+        // Future: render untextured tiles with a solid base color when no imagery is available.
 
         return { tilesRendered, drawCalls };
     }
@@ -2966,8 +3294,15 @@ export class Globe3D {
         const device = this._device;
         if (!device) { return; }
 
-        // 预占缓存位，标记为加载中
-        this._tileCache.set(key, { texture: null, bindGroup: null, loading: true });
+        // 预占缓存位，标记为加载中（textureReady/demReady 均为 false）
+        this._tileCache.set(key, {
+            texture: null,
+            bindGroup: null,
+            loading: true,
+            textureReady: false,
+            demReady: false,
+            demData: null,
+        });
         this._tileLRU.push(key);
 
         // LRU 淘汰
@@ -3018,12 +3353,13 @@ export class Globe3D {
                     label: `Globe3D:tileBG:${key}`,
                 });
 
-                // 更新缓存
+                // 更新缓存（影像纹理就绪，DEM 数据需另外加载）
                 const cached = this._tileCache.get(key);
                 if (cached) {
                     cached.texture = texture;
                     cached.bindGroup = bindGroup;
                     cached.loading = false;
+                    cached.textureReady = true;
                 }
             })
             .catch((err) => {

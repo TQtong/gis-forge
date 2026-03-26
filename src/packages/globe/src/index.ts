@@ -26,6 +26,7 @@ export {
     getSegments,
     tessellateGlobeTile,
     meshToRTE,
+    meshToRTE_HighLow,
     screenToGlobe,
     isTileVisible_Horizon,
     isTileVisible_Frustum,
@@ -35,5 +36,6 @@ export {
     lngToTileX,
     latToTileY,
     tileYToLat,
+    WGS84_ELLIPSOID,
 } from './globe-tile-mesh.ts';
-export type { GlobeTileMesh, GlobeTileID, GlobeCamera } from './globe-tile-mesh.ts';
+export type { GlobeTileMesh, GlobeTileID, GlobeCamera, Ellipsoid } from './globe-tile-mesh.ts';
