@@ -118,8 +118,19 @@ const TILE_PARAMS_SIZE = 16;
 /** 天穹 uniform buffer 字节数（inverseVP 64 + altitude 4 + pad 12 = 80 bytes） */
 const SKY_UNIFORM_SIZE = 96;
 
-/** 大气 uniform buffer 字节数（inverseVP 64 + camPos 12 + altitude 4 = 80 bytes） */
-const ATMO_UNIFORM_SIZE = 80;
+/**
+ * 大气椭球体球面细分段数。
+ * 纬度和经度方向各 64 段，生成 (64+1)² = 4225 个顶点，索引数 = 64² × 6 = 24576。
+ * GPU 负担极小（单次 drawIndexed），但足以生成平滑的球面轮廓。
+ */
+const ATMO_SPHERE_SEGMENTS = 64;
+
+/**
+ * 大气壳半径系数：大气椭球体半径 = WGS84_A × 此系数。
+ * 1.025 表示大气壳高于地表约 WGS84_A × 0.025 ≈ 159,453 米（约 159km）。
+ * CesiumJS 使用相同的 1.025 系数。
+ */
+const ATMO_RADIUS_FACTOR = 1.025;
 
 /** 深度纹理清除值（标准 Z: 1.0 = 最远，0.0 = 最近） */
 const DEPTH_CLEAR_VALUE = 1.0;
@@ -177,21 +188,8 @@ const ROTATE_SENSITIVITY = 0.003;
 const GLOBE_TILE_WGSL = /* wgsl */`
 struct CameraUniforms {
   vpMatrix: mat4x4<f32>,
-  cameraPosition: vec3<f32>,
-  altitude: f32,
-  sunDirection: vec3<f32>,
-  logDepthBufFC: f32,
 };
-
-struct TileParams {
-  uvOffset: vec2<f32>,
-  uvScale: vec2<f32>,
-};
-
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
-@group(1) @binding(0) var tileSampler: sampler;
-@group(1) @binding(1) var tileTexture: texture_2d<f32>;
-@group(2) @binding(0) var<uniform> tile: TileParams;
 
 struct VsIn {
   @location(0) posRTE: vec3<f32>,
@@ -200,47 +198,16 @@ struct VsIn {
 };
 struct VsOut {
   @builtin(position) clipPos: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-  @location(1) normal: vec3<f32>,
-  @location(2) viewDir: vec3<f32>,
 };
-
-fn applyLogDepth(clipPos: vec4<f32>, logDepthBufFC: f32) -> vec4<f32> {
-  var pos = clipPos;
-  let logZ = log2(max(1e-6, pos.w + 1.0)) * logDepthBufFC;
-  pos.z = logZ * pos.w;
-  return pos;
-}
 
 @vertex fn globe_vs(in: VsIn) -> VsOut {
   var out: VsOut;
-  var clip = camera.vpMatrix * vec4<f32>(in.posRTE, 1.0);
-  out.clipPos = applyLogDepth(clip, camera.logDepthBufFC);
-  out.uv = tile.uvOffset + in.uv * tile.uvScale;
-  out.normal = in.normal;
-  out.viewDir = -normalize(in.posRTE);
+  out.clipPos = camera.vpMatrix * vec4<f32>(in.posRTE, 1.0);
   return out;
 }
 
-@fragment fn globe_fs(in: VsOut) -> @location(0) vec4<f32> {
-  var color = textureSample(tileTexture, tileSampler, in.uv);
-  let N = normalize(in.normal);
-  let V = in.viewDir;
-
-  // Diffuse lighting from sun (in ECEF space, consistent with all layers)
-  let nDotL = max(dot(N, camera.sunDirection), 0.0);
-  let ambient = 0.3;
-  let diffuse = nDotL * 0.7;
-  let lighting = ambient + diffuse;
-  color = vec4<f32>(color.rgb * lighting, color.a);
-
-  // Atmosphere edge effect (limb darkening / blue tint at horizon)
-  let nDotV = max(dot(N, V), 0.0);
-  let atmoFactor = smoothstep(0.0, 0.15, nDotV);
-  let atmoColor = vec3<f32>(0.4, 0.6, 1.0);
-  color = vec4<f32>(mix(atmoColor, color.rgb, atmoFactor), 1.0);
-
-  return color;
+@fragment fn globe_fs() -> @location(0) vec4<f32> {
+  return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }
 `;
 
@@ -285,63 +252,88 @@ struct SkyVsOut {
   skyColor = mix(skyColor, spaceColor, altNorm * altNorm);
   return vec4<f32>(skyColor, 1.0);
 }
-`;
+  `;
 
 /**
- * 大气散射着色器。
- * 全屏三角形 → 射线-大气壳求交 → 密度估算 → 加性混合。
+ * 大气散射着色器（方案 A：CesiumJS 几何方案）。
+ *
+ * 与旧版"全屏三角形 + ray-sphere 求交"方案的根本区别：
+ * - 旧版：shader 中用 Float32 的 cameraPosition 做 ray-sphere 求交 → 三轴精度不均 → 蛋形
+ * - 新版：大气轮廓由 Float64 RTE 几何顶点决定（走瓦片同路径）→ 亚毫米精度 → 正圆
+ *
+ * 复用 globe tile pipeline 的 CameraUniforms（group(0) = vpMatrix），
+ * 保证大气顶点使用完全相同的 VP 矩阵进行变换，与 globe 瓦片完美对齐。
+ *
+ * 散射模型：简化 Rayleigh 散射近似
+ * - 边缘（nDotV → 0）：光路穿越大气层最长 → 密度最高 → 蓝色最深
+ * - 中心（nDotV → 1）：光路最短 → 密度最低 → 几乎透明
+ * - globe 瓦片覆盖在大气前面（先画大气，后画瓦片），仅边缘环可见
+ *
+ * 设计依据：GeoForge_Atmosphere_Globe_Alignment_Issues §四 方案 A
  */
 const ATMOSPHERE_WGSL = /* wgsl */`
-struct AtmoUniforms {
-  inverseVP: mat4x4<f32>,
-  cameraPosition: vec3<f32>,
-  altitude: f32,
+// 与 globe tile pipeline 共享相同的相机 uniform 结构和绑定
+// group(0) binding(0) = cameraUniformBuffer（至少包含 vpMatrix: mat4x4<f32>）
+struct CameraUniforms {
+  vpMatrix: mat4x4<f32>,
 };
-@group(0) @binding(0) var<uniform> atmo: AtmoUniforms;
+@group(0) @binding(0) var<uniform> camera: CameraUniforms;
 
+// 顶点输入：与 globe tile 完全相同的交错布局
+// posRTE(3) + normal(3) + uv(2) = 8 floats = 32 bytes/vertex
+struct VsIn {
+  @location(0) posRTE: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+};
+
+// 顶点→片元插值：传递 RTE 空间位置和球面法线
 struct AtmoVsOut {
-  @builtin(position) pos: vec4<f32>,
-  @location(0) rayDir: vec3<f32>,
+  @builtin(position) clipPos: vec4<f32>,
+  @location(0) posRTE: vec3<f32>,
+  @location(1) normal: vec3<f32>,
 };
 
-@vertex fn atmo_vs(@builtin(vertex_index) i: u32) -> AtmoVsOut {
-  let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
-  let ndc = uv * 2.0 - 1.0;
+@vertex fn atmo_vs(in: VsIn) -> AtmoVsOut {
   var out: AtmoVsOut;
-  out.pos = vec4<f32>(ndc, 0.9999, 1.0);
-  let worldFar = atmo.inverseVP * vec4<f32>(ndc, 1.0, 1.0);
-  let worldNear = atmo.inverseVP * vec4<f32>(ndc, 0.0, 1.0);
-  out.rayDir = normalize((worldFar.xyz / worldFar.w) - (worldNear.xyz / worldNear.w));
+  // 与 globe tile 完全相同的 VP 变换 → 精度路径一致 → 轮廓完美对齐
+  out.clipPos = camera.vpMatrix * vec4<f32>(in.posRTE, 1.0);
+  // 传递 RTE 空间位置（相机在原点 [0,0,0]）供片元着色器计算视线方向
+  out.posRTE = in.posRTE;
+  // 传递球面法线（归一化的球心→表面方向）用于散射路径估计
+  out.normal = in.normal;
   return out;
 }
 
 @fragment fn atmo_fs(in: AtmoVsOut) -> @location(0) vec4<f32> {
-  let earthRadius = 6378137.0;
-  let atmoRadius = earthRadius * 1.025;
-  let rd = normalize(in.rayDir);
-  // Ray origin = [0,0,0] (RTE 空间相机在原点)
-  // 地球中心在 RTE 空间 = -cameraPosition (ECEF 地心在原点, 相机在 camPos)
-  let earthCenter = -atmo.cameraPosition;
-  // 射线-球体求交: P(t) = t*rd, sphere: |P - earthCenter|^2 = R^2
-  let oc = -earthCenter; // = camPos, 即从球心到射线原点的向量
-  let b = dot(oc, rd);
-  let c = dot(oc, oc) - atmoRadius * atmoRadius;
-  let disc = b * b - c;
-  if (disc < 0.0) { return vec4<f32>(0.0); }
-  let sqrtDisc = sqrt(disc);
-  let t0 = -b - sqrtDisc;
-  let t1 = -b + sqrtDisc;
-  if (t1 < 0.0) { return vec4<f32>(0.0); }
-  let ce = dot(oc, oc) - earthRadius * earthRadius;
-  let discE = b * b - ce;
-  var pathLen = t1 - max(t0, 0.0);
-  if (discE > 0.0) {
-    let tE = -b - sqrt(discE);
-    if (tE > 0.0) { pathLen = tE - max(t0, 0.0); }
-  }
-  let maxPath = atmoRadius - earthRadius;
+  // WGS84 赤道半径和大气壳半径（米）
+  let earthR = 6378137.0;
+  let atmoR = earthR * 1.025;
+  // 大气壳厚度 ≈ 159,453 米，是散射路径长度的基准
+  let maxPath = atmoR - earthR;
+
+  // 视线方向：从相机（RTE 原点 [0,0,0]）指向大气球面上的当前片元
+  // 几何方案下，posRTE 来自顶点插值，精度远高于 ray-sphere 求交
+  let viewDir = normalize(in.posRTE);
+
+  // 散射路径长度估计（简化 Rayleigh 散射模型）：
+  // - nDotV = 球面法线与视线方向的夹角余弦（abs 处理背面）
+  // - 边缘处 nDotV → 0：光路穿越大气层的弦长趋于最大 → 散射最强（蓝色光晕）
+  // - 正面观察 nDotV → 1：光路穿越大气层最短 → 散射最弱（几乎透明）
+  // - max(nDotV, 0.01) 防止除零（极端掠射角箝位到 100 倍最大路径）
+  let nDotV = abs(dot(in.normal, viewDir));
+  let pathLen = maxPath / max(nDotV, 0.01);
+
+  // 密度归一化：pathLen / (maxPath × 4.0) 将路径长度映射到 [0,1]
+  // 乘数 4.0 控制大气光晕的衰减速率（值越大 → 光晕越薄）
   let density = clamp(pathLen / (maxPath * 4.0), 0.0, 1.0);
+
+  // Rayleigh 散射近似色：蓝色为主（短波长散射更强）
+  // RGB(0.3, 0.5, 1.0) × 0.6 强度系数 → 最大亮度 ≈ (0.18, 0.30, 0.60)
   let atmoColor = vec3<f32>(0.3, 0.5, 1.0);
+
+  // 输出：加性混合（src=one, dst=one）叠加到已有帧缓冲上
+  // alpha = density × 0.4，在不透明 globe 区域被覆盖，仅边缘环可见
   return vec4<f32>(atmoColor * density * 0.6, density * 0.4);
 }
 `;
@@ -610,8 +602,6 @@ const _cameraUniformData = new Float32Array(CAMERA_UNIFORM_SIZE / 4);
 /** sky uniform 数据缓冲（96 bytes = 24 floats）。vec3 padding 对齐到 16 字节使总大小 96。 */
 const _skyUniformData = new Float32Array(SKY_UNIFORM_SIZE / 4);
 
-/** atmo uniform 数据缓冲（80 bytes = 20 floats） */
-const _atmoUniformData = new Float32Array(ATMO_UNIFORM_SIZE / 4);
 
 /** tile params uniform 数据缓冲（16 bytes = 4 floats） */
 const _tileParamsData = new Float32Array(TILE_PARAMS_SIZE / 4);
@@ -847,6 +837,151 @@ export interface GlobeRendererStats {
 }
 
 // ════════════════════════════════════════════════════════════════
+// 大气椭球体网格生成（方案 A：CesiumJS 几何方案）
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * 生成大气散射椭球体的完整球面网格（CesiumJS 方案 A）。
+ *
+ * 球体半径 = WGS84 赤道半径 × 1.025（高于地表约 159km），
+ * 使用纬度-经度均匀网格细分，顶点坐标存储为 Float64（ECEF 精度），
+ * 可直接调用 meshToRTE 进行 RTE 转换后上传 GPU。
+ *
+ * 与 tessellateGlobeTile 的区别：
+ * - 生成完整球体（不是单个瓦片）
+ * - 无裙边几何（大气壳不需要接缝处理）
+ * - 半径为 WGS84_A × 1.025 而非地球表面
+ *
+ * 设计依据：GeoForge_Atmosphere_Globe_Alignment_Issues §四 方案 A
+ * - 大气轮廓由几何顶点决定 → 走 RTE 精度路径 → 与 globe 瓦片完美对齐
+ * - 消除 ray-sphere 求交的 Float32 蛋形问题
+ *
+ * 精度分析：
+ *   Float64 顶点 → Float64 减法(cameraECEF) → Float32 传 GPU
+ *   RTE 值域 ±数千 km → Float32 ULP ≈ 0.0006m（亚毫米级）
+ *   与 globe 瓦片完全相同的精度路径 → 轮廓完美对齐
+ *
+ * @param segments - 纬度和经度方向的细分段数，默认 ATMO_SPHERE_SEGMENTS (64)。
+ *                   顶点数 = (segments+1)²，索引数 = segments² × 6。
+ *                   64 段产生 4225 顶点 / 24576 索引，
+ *                   GPU 负担极小（单次 drawIndexed 调用）。
+ * @returns GlobeTileMesh 兼容结构，可直接传给 meshToRTE
+ *
+ * @stability experimental
+ *
+ * @example
+ * const shell = tessellateAtmosphereShell(64);
+ * const rteVerts = meshToRTE(shell, camera.cameraECEF);
+ * // → 上传 rteVerts 到 GPU vertex buffer → drawIndexed(shell.indexCount)
+ */
+function tessellateAtmosphereShell(segments: number = ATMO_SPHERE_SEGMENTS): GlobeTileMesh {
+    // 大气壳半径 = WGS84 赤道半径 × 1.025，高于地表约 159km
+    const atmoRadius = WGS84_A * ATMO_RADIUS_FACTOR;
+
+    // 顶点总数：(segments+1) 行 × (segments+1) 列（含首尾重复顶点以闭合 UV）
+    const rows = segments + 1;
+    const cols = segments + 1;
+    const vertCount = rows * cols;
+
+    // Float64 存储 ECEF 位置（确保 RTE 减法的 Float64 精度链完整）
+    const positions = new Float64Array(vertCount * 3);
+
+    // Float32 存储法线和 UV（GPU 精度足够，法线和 UV 本身值域有限）
+    const normals = new Float32Array(vertCount * 3);
+    const uvs = new Float32Array(vertCount * 2);
+
+    // 遍历纬度方向（theta: 0→π，北极→南极）和经度方向（phi: 0→2π）
+    let vi = 0;
+    for (let lat = 0; lat <= segments; lat++) {
+        // theta = 余纬度（0 = 北极，π = 南极）
+        const theta = (lat / segments) * PI;
+        // 预计算 sin/cos，每纬度行只算一次（避免内层循环重复计算）
+        const sinT = Math.sin(theta);
+        const cosT = Math.cos(theta);
+
+        for (let lng = 0; lng <= segments; lng++) {
+            // phi = 经度（0 → 2π，完整绕行一圈）
+            const phi = (lng / segments) * TWO_PI;
+            const sinP = Math.sin(phi);
+            const cosP = Math.cos(phi);
+
+            // 球面上的 ECEF 坐标（Float64 精度）
+            // X = R × sin(theta) × cos(phi)
+            // Y = R × sin(theta) × sin(phi)
+            // Z = R × cos(theta)
+            // 此坐标系与 WGS84 ECEF 一致：Z 轴指向北极，X 轴经过本初子午线赤道
+            const x = atmoRadius * sinT * cosP;
+            const y = atmoRadius * sinT * sinP;
+            const z = atmoRadius * cosT;
+
+            // 写入 Float64 位置数组（保持完整精度，RTE 减法在 meshToRTE 中执行）
+            positions[vi * 3] = x;
+            positions[vi * 3 + 1] = y;
+            positions[vi * 3 + 2] = z;
+
+            // 法线 = 归一化的球面位置方向（球心指向表面）
+            // 对于正球体，法线 = (sinT×cosP, sinT×sinP, cosT)，天然归一化（长度 = 1）
+            normals[vi * 3] = sinT * cosP;
+            normals[vi * 3 + 1] = sinT * sinP;
+            normals[vi * 3 + 2] = cosT;
+
+            // UV 坐标：u = 经度归一化 [0,1]，v = 纬度归一化 [0,1]
+            // 大气渲染不依赖 UV 采样，但保留 UV 以兼容 meshToRTE 的交错格式
+            uvs[vi * 2] = lng / segments;
+            uvs[vi * 2 + 1] = lat / segments;
+
+            vi++;
+        }
+    }
+
+    // 三角形索引：每个四边形分为 2 个三角形，CCW 绕序使法线朝外
+    // 极点处的退化三角形（面积为 0）自然被 GPU 裁剪，无需特殊处理
+    const indexCount = segments * segments * 6;
+    const indices = new Uint32Array(indexCount);
+    let ii = 0;
+
+    for (let latRow = 0; latRow < segments; latRow++) {
+        for (let lngCol = 0; lngCol < segments; lngCol++) {
+            // 当前四边形的四个顶点索引
+            // a(TL) ---- a+1(TR)
+            // |  \          |
+            // |   \         |
+            // b(BL) ---- b+1(BR)
+            const a = latRow * cols + lngCol;
+            const b = a + cols;
+
+            // 三角形 1: a → b → a+1（CCW 从外部看，法线朝外）
+            // 验证：(b-a)×(a+1-a) 的叉积指向球心外侧 ✓
+            indices[ii++] = a;
+            indices[ii++] = b;
+            indices[ii++] = a + 1;
+
+            // 三角形 2: a+1 → b → b+1（CCW 从外部看，法线朝外）
+            indices[ii++] = a + 1;
+            indices[ii++] = b;
+            indices[ii++] = b + 1;
+        }
+    }
+
+    // 包围球：大气壳是以原点为中心的正球体，半径 = atmoRadius
+    // 用于 Frustum Culling（虽然大气壳通常始终可见，但保持接口一致性）
+    const boundingSphere = {
+        center: [0, 0, 0] as [number, number, number],
+        radius: atmoRadius,
+    };
+
+    return {
+        positions,
+        normals,
+        uvs,
+        indices,
+        indexCount,
+        vertexCount: vertCount,
+        boundingSphere,
+    };
+}
+
+// ════════════════════════════════════════════════════════════════
 // Globe3D 主类
 // ════════════════════════════════════════════════════════════════
 
@@ -936,8 +1071,14 @@ export class Globe3D {
     /** 天穹 uniform buffer（80 bytes） */
     private _skyUniformBuffer: GPUBuffer | null = null;
 
-    /** 大气 uniform buffer（80 bytes） */
-    private _atmoUniformBuffer: GPUBuffer | null = null;
+    /** 大气椭球体 CPU 端网格（Float64 ECEF 位置，用于每帧 RTE 重算） */
+    private _atmoMesh: GlobeTileMesh | null = null;
+
+    /** 大气椭球体 GPU 索引缓冲（创建一次，不随帧变化） */
+    private _atmoIndexBuffer: GPUBuffer | null = null;
+
+    /** 大气椭球体 GPU 顶点缓冲（每帧更新 RTE 坐标，预分配固定大小） */
+    private _atmoVertexBuffer: GPUBuffer | null = null;
 
     /** 线性采样器 */
     private _sampler: GPUSampler | null = null;
@@ -2459,10 +2600,32 @@ export class Globe3D {
             label: 'Globe3D:skyUniforms',
         });
 
-        this._atmoUniformBuffer = device.createBuffer({
-            size: ATMO_UNIFORM_SIZE,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            label: 'Globe3D:atmoUniforms',
+        // ── 大气椭球体网格（方案 A：CesiumJS 几何方案） ──
+        // 生成完整球体网格（R × 1.025），仅生成一次，后续只做 RTE 变换
+        // Float64 ECEF 位置 → meshToRTE(Float64 减法) → Float32 上传 GPU
+        this._atmoMesh = tessellateAtmosphereShell(ATMO_SPHERE_SEGMENTS);
+
+        // 大气索引缓冲（不随帧变化，只上传一次）
+        this._atmoIndexBuffer = device.createBuffer({
+            size: this._atmoMesh.indices.byteLength,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+            label: 'Globe3D:atmoIndexBuffer',
+        });
+        device.queue.writeBuffer(
+            this._atmoIndexBuffer,
+            0,
+            this._atmoMesh.indices.buffer as ArrayBuffer,
+            this._atmoMesh.indices.byteOffset,
+            this._atmoMesh.indices.byteLength,
+        );
+
+        // 大气顶点缓冲（每帧更新 RTE 数据，预分配固定大小避免每帧重新创建）
+        // 8 floats/vertex × vertexCount × 4 bytes/float = 交错格式的总字节数
+        const atmoVertBufSize = this._atmoMesh.vertexCount * VERTEX_FLOATS * 4;
+        this._atmoVertexBuffer = device.createBuffer({
+            size: atmoVertBufSize,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            label: 'Globe3D:atmoVertexBuffer',
         });
 
         // ── 线性采样器 ──
@@ -2601,7 +2764,7 @@ export class Globe3D {
             label: 'Globe3D:globePipeline',
         });
     }
-
+    
     /**
      * 创建天穹渲染管线。
      * 全屏三角形，深度设为 0.9999（远处），不做深度测试但写入深度。
@@ -2661,8 +2824,14 @@ export class Globe3D {
     }
 
     /**
-     * 创建大气散射渲染管线。
-     * 全屏三角形，加性混合（src: one, dst: one），不写入深度。
+     * 创建大气散射渲染管线（方案 A：CesiumJS 几何方案）。
+     *
+     * 与旧版全屏三角形管线的关键区别：
+     * - **有顶点缓冲**：与 globe tile 相同的交错格式 posRTE(3)+normal(3)+uv(2)
+     * - **复用 cameraBindGroupLayout**：group(0) = 相机 VP 矩阵，保证精度路径一致
+     * - **cullMode: 'back'**：渲染球体前面（外表面），相机在球体外部时可见
+     *   （相机在大气壳内部时 altitude < 159km，此时地球填满整个屏幕，大气光晕不可见）
+     * - **加性混合 + 不写深度**：大气光晕叠加到已有帧缓冲内容上
      *
      * @param device - GPU 设备
      * @param format - 纹理格式
@@ -2677,18 +2846,11 @@ export class Globe3D {
             label: 'Globe3D:atmoShader',
         });
 
-        // 大气只需 group(0) = atmo uniforms
-        const atmoLayout = device.createBindGroupLayout({
-            label: 'Globe3D:atmoUniformLayout',
-            entries: [{
-                binding: 0,
-                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-                buffer: { type: 'uniform' },
-            }],
-        });
-
+        // 复用 globe pipeline 的 cameraBindGroupLayout（group(0) = vpMatrix）
+        // 这保证大气顶点使用完全相同的 VP 矩阵，与 globe 瓦片轮廓完美对齐
+        // 不再需要独立的 atmoUniformLayout（旧版用于传 inverseVP + cameraPosition）
         const pipelineLayout = device.createPipelineLayout({
-            bindGroupLayouts: [atmoLayout],
+            bindGroupLayouts: [this._cameraBindGroupLayout!],
             label: 'Globe3D:atmoPipelineLayout',
         });
 
@@ -2697,13 +2859,29 @@ export class Globe3D {
             vertex: {
                 module: shaderModule,
                 entryPoint: 'atmo_vs',
-                buffers: [],
+                // 交错顶点缓冲：与 globe tile 完全相同的布局
+                // posRTE(3) + normal(3) + uv(2) = 8 floats = 32 bytes/vertex
+                buffers: [{
+                    arrayStride: VERTEX_BYTES,
+                    stepMode: 'vertex',
+                    attributes: [
+                        // posRTE: 大气球面上的点在 RTE 空间中的位置
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' as GPUVertexFormat },
+                        // normal: 球面法线（归一化的球心→表面方向）
+                        { shaderLocation: 1, offset: 12, format: 'float32x3' as GPUVertexFormat },
+                        // uv: 纹理坐标（大气不使用，但保持格式一致）
+                        { shaderLocation: 2, offset: 24, format: 'float32x2' as GPUVertexFormat },
+                    ],
+                }],
             },
             fragment: {
                 module: shaderModule,
                 entryPoint: 'atmo_fs',
                 targets: [{
                     format,
+                    // 加性混合：大气光晕叠加到已有帧缓冲内容
+                    // src=one, dst=one → outColor = srcColor + dstColor
+                    // 效果：天穹背景色 + 大气蓝色光晕 = 边缘蓝色渐变
                     blend: {
                         color: {
                             srcFactor: 'one',
@@ -2721,11 +2899,17 @@ export class Globe3D {
             primitive: {
                 topology: 'triangle-list',
                 frontFace: 'ccw',
-                cullMode: 'none',
+                // cullMode: 'back' → 渲染前面（外表面），适用于相机在球体外部的主要场景
+                // 大气壳半径 ≈ 6538km，相机在 altitude > 159km 时在球体外部
+                // altitude < 159km 时地球几乎填满屏幕，大气光晕不可见，无影响
+                cullMode: 'back',
             },
             depthStencil: {
                 format: 'depth32float',
+                // 不写入深度：大气是半透明叠加层，不应遮挡后续渲染的几何体
                 depthWriteEnabled: false,
+                // depthCompare: always → 大气始终渲染，不受深度缓冲限制
+                // 大气光晕需要在 globe 瓦片的边缘处可见（包括瓦片后方的区域）
                 depthCompare: 'always',
             },
             label: 'Globe3D:atmoPipeline',
@@ -2818,7 +3002,10 @@ export class Globe3D {
         const depthView = this._depthTexture!.createView();
 
         // ── 计算可见瓦片 ──
-        const tiles = coveringTilesGlobe(globeCam);
+        let tiles = coveringTilesGlobe(globeCam);
+        if (tiles.length === 0) {
+            tiles = [{ z: 0, x: 0, y: 0, key: '0/0/0', distToCamera: 0 }];
+        }
 
         // ── 更新相机 uniforms ──
         this._updateCameraUniforms(device, globeCam);
@@ -3328,7 +3515,19 @@ export class Globe3D {
     // ════════════════════════════════════════════════════════════
 
     /**
-     * 渲染大气散射效果（加性混合全屏三角形）。
+     * 渲染大气散射效果（方案 A：CesiumJS 几何方案）。
+     *
+     * 与旧版全屏三角形方案的关键区别：
+     * - **不再做 ray-sphere 求交**：大气轮廓由几何顶点决定
+     * - **走 RTE 精度路径**：Float64 ECEF → Float64 减法 → Float32 → VP 变换
+     *   精度与 globe 瓦片完全一致（亚毫米级），消除蛋形问题
+     * - **复用 cameraBindGroup**：与 globe 瓦片共享完全相同的 VP 矩阵
+     * - **drawIndexed**：渲染椭球体几何而非全屏三角形
+     *
+     * 每帧流程：
+     *   1. meshToRTE(atmoMesh, cameraECEF) → Float32 RTE 顶点
+     *   2. writeBuffer 更新预分配的顶点缓冲
+     *   3. setPipeline + setBindGroup(cameraBindGroup) + drawIndexed
      *
      * @param device - GPU 设备
      * @param pass - 渲染通道编码器
@@ -3342,34 +3541,44 @@ export class Globe3D {
         pass: GPURenderPassEncoder,
         gc: GlobeCamera,
     ): void {
-        if (!this._atmoPipeline || !this._atmoUniformBuffer) { return; }
+        // 必须同时有大气管线、相机 bind group 和大气网格 GPU 资源才能渲染
+        if (!this._atmoPipeline || !this._cameraBindGroup
+            || !this._atmoMesh || !this._atmoIndexBuffer || !this._atmoVertexBuffer) {
+            return;
+        }
 
-        // 更新大气 uniform
-        // inverseVP: 16 floats (offset 0)
-        _atmoUniformData.set(gc.inverseVP_RTE, 0);
-        // cameraPosition: 3 floats (offset 16)
-        _atmoUniformData[16] = gc.cameraECEF[0];
-        _atmoUniformData[17] = gc.cameraECEF[1];
-        _atmoUniformData[18] = gc.cameraECEF[2];
-        // altitude: 1 float (offset 19)
-        _atmoUniformData[19] = gc.altitude;
+        // ── RTE 顶点变换（Float64 精度减法 → Float32） ──
+        // 与 globe 瓦片完全相同的精度路径：
+        //   CPU: Float64 ECEF(atmoVertex) - Float64 ECEF(camera) → Float64 差值
+        //   Float64 → Float32 截断 → 值域 ±数千 km → ULP ≈ 0.0006m（亚毫米级）
+        // 这消除了旧版 ray-sphere 方案中 Float32 绝对 ECEF 的 ~3m 精度问题
+        const rteVerts = meshToRTE(this._atmoMesh, gc.cameraECEF);
 
-        device.queue.writeBuffer(this._atmoUniformBuffer, 0, _atmoUniformData);
+        // ── 上传 RTE 顶点到预分配的 GPU 缓冲 ──
+        // 每帧更新（RTE 坐标随相机移动而变化，即使网格本身不变）
+        // 使用 writeBuffer 而非每帧重建缓冲，避免 GPU 内存分配/回收开销
+        device.queue.writeBuffer(
+            this._atmoVertexBuffer,
+            0,
+            rteVerts.buffer as ArrayBuffer,
+            rteVerts.byteOffset,
+            rteVerts.byteLength,
+        );
 
-        // 创建临时 bind group
-        const atmoBG = device.createBindGroup({
-            layout: this._atmoPipeline.getBindGroupLayout(0),
-            entries: [{
-                binding: 0,
-                resource: { buffer: this._atmoUniformBuffer },
-            }],
-            label: 'Globe3D:atmoBG',
-        });
-
+        // ── 设置管线和绑定组 ──
         pass.setPipeline(this._atmoPipeline);
-        pass.setBindGroup(0, atmoBG);
-        // 全屏三角形只需 3 个顶点
-        pass.draw(3);
+        // 复用 globe 瓦片的 cameraBindGroup（共享 VP 矩阵 → 保证精度路径完全一致）
+        // 大气 shader 的 CameraUniforms.vpMatrix 读取与 globe_vs 完全相同的矩阵数据
+        pass.setBindGroup(0, this._cameraBindGroup);
+
+        // ── 设置顶点和索引缓冲 ──
+        pass.setVertexBuffer(0, this._atmoVertexBuffer);
+        pass.setIndexBuffer(this._atmoIndexBuffer, 'uint32');
+
+        // ── 发出 drawIndexed 调用 ──
+        // 大气椭球体是单次绘制调用，64×64 段 = 24576 个索引 = 8192 个三角形
+        // GPU 开销极小（远小于瓦片渲染的总开销）
+        pass.drawIndexed(this._atmoMesh.indexCount);
     }
 
     // ════════════════════════════════════════════════════════════
@@ -3783,10 +3992,17 @@ export class Globe3D {
             this._skyUniformBuffer.destroy();
             this._skyUniformBuffer = null;
         }
-        if (this._atmoUniformBuffer) {
-            this._atmoUniformBuffer.destroy();
-            this._atmoUniformBuffer = null;
+        // 大气椭球体 GPU 缓冲销毁
+        if (this._atmoIndexBuffer) {
+            this._atmoIndexBuffer.destroy();
+            this._atmoIndexBuffer = null;
         }
+        if (this._atmoVertexBuffer) {
+            this._atmoVertexBuffer.destroy();
+            this._atmoVertexBuffer = null;
+        }
+        // 释放大气 CPU 端网格引用（GC 回收 Float64Array / Float32Array / Uint32Array）
+        this._atmoMesh = null;
 
         // 清空管线引用
         this._globePipeline = null;
