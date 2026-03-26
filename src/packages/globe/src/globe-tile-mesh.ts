@@ -137,6 +137,8 @@ export interface GlobeCamera {
     readonly vpMatrix: Float32Array;
     /** 逆 VP 矩阵（ECEF 绝对空间版），用于 screenToGlobe 射线反投影 */
     readonly inverseVP_ECEF: Float32Array;
+    /** 逆 VP 矩阵（RTE 版），用于大气/天穹 shader 射线方向计算（Float32 精度安全） */
+    readonly inverseVP_RTE: Float32Array;
     /** 相机 ECEF 坐标 [x, y, z]（米），Float64 精度 */
     readonly cameraECEF: [number, number, number];
     /** 注视点经纬度 [lng, lat]（度） */

@@ -318,9 +318,12 @@ struct AtmoVsOut {
 @fragment fn atmo_fs(in: AtmoVsOut) -> @location(0) vec4<f32> {
   let earthRadius = 6378137.0;
   let atmoRadius = earthRadius * 1.025;
-  let camPos = atmo.cameraPosition;
   let rd = normalize(in.rayDir);
-  let oc = camPos;
+  // Ray origin = [0,0,0] (RTE 空间相机在原点)
+  // 地球中心在 RTE 空间 = -cameraPosition (ECEF 地心在原点, 相机在 camPos)
+  let earthCenter = -atmo.cameraPosition;
+  // 射线-球体求交: P(t) = t*rd, sphere: |P - earthCenter|^2 = R^2
+  let oc = -earthCenter; // = camPos, 即从球心到射线原点的向量
   let b = dot(oc, rd);
   let c = dot(oc, oc) - atmoRadius * atmoRadius;
   let disc = b * b - c;
@@ -2988,13 +2991,20 @@ export class Globe3D {
         mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
         mat4.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
 
-        // inverseVP_ECEF
+        // inverseVP_ECEF（用于 screenToGlobe 反投影到 ECEF 绝对坐标）
         const inverseVP_ECEF = mat4.create();
         mat4.invert(inverseVP_ECEF, _tmpMat4C);
 
+        // inverseVP_RTE（用于大气/天穹 shader 计算射线方向）
+        // RTE 空间的值域 ±数千公里 → Float32 精度远优于 ECEF 空间 ±26M 米
+        // 射线方向在 RTE 和 ECEF 中相同（仅差一个平移），所以 RTE inverse 可安全替代
+        const inverseVP_RTE = mat4.create();
+        mat4.invert(inverseVP_RTE, vpMatrix);
+
         return {
             vpMatrix,
-            inverseVP_ECEF: inverseVP_ECEF,
+            inverseVP_ECEF,
+            inverseVP_RTE,
             cameraECEF: [camECEFx, camECEFy, camECEFz],
             center: [camState.center[0], camState.center[1]],
             zoom: camState.zoom,
@@ -3149,7 +3159,7 @@ export class Globe3D {
 
         // 更新天穹 uniform
         // inverseVP: 16 floats (offset 0)
-        _skyUniformData.set(gc.inverseVP_ECEF, 0);
+        _skyUniformData.set(gc.inverseVP_RTE, 0);
         // altitude: 1 float (offset 16)
         _skyUniformData[16] = gc.altitude;
         // padding: 3 floats (offset 17-19)
@@ -3336,7 +3346,7 @@ export class Globe3D {
 
         // 更新大气 uniform
         // inverseVP: 16 floats (offset 0)
-        _atmoUniformData.set(gc.inverseVP_ECEF, 0);
+        _atmoUniformData.set(gc.inverseVP_RTE, 0);
         // cameraPosition: 3 floats (offset 16)
         _atmoUniformData[16] = gc.cameraECEF[0];
         _atmoUniformData[17] = gc.cameraECEF[1];
