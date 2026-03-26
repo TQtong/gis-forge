@@ -1005,8 +1005,8 @@ function lngLatToWorldPixel(lng: number, lat: number, worldSize: number): [numbe
  * @param z  - 齐次向量 z 分量
  * @param w  - 齐次向量 w 分量
  * @returns [rx, ry, rz, rw] 结果四维向量
- *
- * @example
+   *
+   * @example
  * const clip = mulMat4Vec4(invVP, ndcX, ndcY, 1.0, 1.0);
  * const worldX = clip[0] / clip[3];
  */
@@ -3310,7 +3310,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     setData(data: unknown): void {
       // 支持外部注入 URL 模板（由 Map2D 在 addSource 后传入）
       if (data !== null && data !== undefined && typeof data === 'object') {
-        const record = data as Record<string, unknown>;
+      const record = data as Record<string, unknown>;
         if (Array.isArray(record['tiles'])) {
           urlTemplates = record['tiles'] as string[];
         }
