@@ -2820,6 +2820,11 @@ export class Globe3D {
         // ── 更新相机 uniforms ──
         this._updateCameraUniforms(device, globeCam);
 
+        // ── EggShape 一次性诊断（仅首帧 + DEV 模式）──
+        if (typeof __DEV__ !== 'undefined' && __DEV__ && this._frameCount === 0) {
+            this._runEggShapeDiagnostic(camState, globeCam, ctx);
+        }
+
         // ── 创建命令编码器 ──
         const encoder = device.createCommandEncoder({ label: 'Globe3D:frame' });
 
@@ -2932,27 +2937,30 @@ export class Globe3D {
         // ── 标准透视投影 ──
         mat4.perspective(_tmpMat4A, fov, aspect, nearZ, farZ);
 
-        // ── 相机 ECEF 位置（Float64 精度） ──
-        // CameraState.position 是 Float32，精度不足以做 ECEF 减法。
-        // 但 Camera3D 内部用 Float64 计算后截断到 Float32 存入 CameraState.position。
-        // 这里用 Float64 重新计算相机 ECEF 位置，避免精度损失。
+        // ── 相机与注视点 ECEF 位置（全程 Float64 精度） ──
+        // CameraState.position 是 Float32（~3m 精度），不足以做 ECEF 减法。
+        // 必须从经纬度+高度重新计算 Float64 ECEF，然后 Float64 减法得到 RTE。
+        const camPos = this._camera3D.getPosition();
+        const camLonRad = camPos.lon * DEG2RAD;
+        const camLatRad = camPos.lat * DEG2RAD;
+        geodeticToECEF(_ecefCam64, camLonRad, camLatRad, camPos.alt);
+
         const centerLngRad = camState.center[0] * DEG2RAD;
         const centerLatRad = camState.center[1] * DEG2RAD;
         geodeticToECEF(_ecefCenter64, centerLngRad, centerLatRad, 0);
 
-        // 相机 ECEF = center 地表 + 沿法线偏移 altitude（简化：pitch=-90° 时相机在正上方）
-        // 通用：用 Camera3D 的 position（Float32，精度 ~1m 在 20000km 高度足够用于渲染）
-        const camECEFx: number = camState.position[0];
-        const camECEFy: number = camState.position[1];
-        const camECEFz: number = camState.position[2];
+        // Float64 相机位置（用于 RTE 减法和 GlobeCamera 输出）
+        const camECEFx: number = _ecefCam64[0];
+        const camECEFy: number = _ecefCam64[1];
+        const camECEFz: number = _ecefCam64[2];
 
-        // ── 构建 RTE View Matrix（Pipeline v2 §二） ──
+        // ── 构建 RTE View Matrix（Pipeline v2 §二 + EggShape Issues 根因二） ──
         // eye = [0,0,0]（RTE 原点 = 相机位置）
-        // target = centerECEF - cameraECEF（Float64 减法，结果转 Float32）
-        // 这样 viewMatrix 的平移列为 [0,0,0]，纯旋转，避免 Float32 精度灾难
-        const targetRteX = _ecefCenter64[0] - camECEFx;
-        const targetRteY = _ecefCenter64[1] - camECEFy;
-        const targetRteZ = _ecefCenter64[2] - camECEFz;
+        // target = centerECEF - cameraECEF（Float64 减法，避免精度灾难）
+        // 平移列为 [0,0,0]，纯旋转 — Float32 安全
+        const targetRteX: number = _ecefCenter64[0] - _ecefCam64[0];
+        const targetRteY: number = _ecefCenter64[1] - _ecefCam64[1];
+        const targetRteZ: number = _ecefCenter64[2] - _ecefCam64[2];
 
         // up = 地理北向（ENU 的 North 方向）
         // 在 ECEF 中，ENU 的 North = [-sin(lat)*cos(lon), -sin(lat)*sin(lon), cos(lat)]
@@ -2972,8 +2980,9 @@ export class Globe3D {
         const vpMatrix = mat4.clone(_tmpMat4C);
 
         // ── VP_ECEF = proj × viewECEF（用于 screenToGlobe 反投影） ──
-        // ECEF 版 lookAt: eye = cameraECEF, target = centerECEF, up = North
-        vec3.set(_tmpVec3A, camECEFx, camECEFy, camECEFz);
+        // ECEF 版 lookAt: eye = cameraECEF(Float64→Float32), target = centerECEF, up = North
+        // screenToGlobe 需要 ECEF 绝对坐标空间的 VP 矩阵来反投影射线
+        vec3.set(_tmpVec3A, _ecefCam64[0], _ecefCam64[1], _ecefCam64[2]);
         vec3.set(_tmpVec3B, _ecefCenter64[0], _ecefCenter64[1], _ecefCenter64[2]);
         // _tmpVec3C (up/North) 不变
         mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
@@ -3033,6 +3042,88 @@ export class Globe3D {
         _cameraUniformData[23] = logDepthBufFC;
 
         device.queue.writeBuffer(this._cameraUniformBuffer, 0, _cameraUniformData);
+    }
+
+    /**
+     * EggShape 一次性诊断（GeoForge_Globe_EggShape_Issues §排查流程 5 步）。
+     * 仅在 __DEV__ 模式的首帧运行，输出所有关键渲染参数到控制台。
+     * 用于快速定位地球变形的根因（7 个根因的决策树判定）。
+     *
+     * @param camState - Camera3D 返回的 CameraState
+     * @param gc - Globe 自己计算的 GlobeCamera
+     * @param ctx - WebGPU 画布上下文
+     *
+     * @stability internal
+     */
+    private _runEggShapeDiagnostic(
+        camState: CameraState,
+        gc: GlobeCamera,
+        ctx: GPUCanvasContext,
+    ): void {
+        const vp = this._viewport;
+        const aspect = vp.width / Math.max(vp.height, 1);
+        const fov = camState.fov;
+        const f = 1 / Math.tan(fov * 0.5);
+
+        // ═══ Step 1：投影矩阵（根因一/七）═══
+        const expectP0 = f / aspect;
+        const projOK = Math.abs(_tmpMat4A[0] - expectP0) < 0.001
+                     && Math.abs(_tmpMat4A[5] - f) < 0.001;
+        // eslint-disable-next-line no-console
+        console.log(
+            `%c[EggDiag Step1] proj[0]:${_tmpMat4A[0].toFixed(4)} expect:${expectP0.toFixed(4)} ` +
+            `proj[5]:${_tmpMat4A[5].toFixed(4)} expect:${f.toFixed(4)} ` +
+            `ratio:${(_tmpMat4A[0] / _tmpMat4A[5]).toFixed(4)} expect:${(1 / aspect).toFixed(4)} ` +
+            `${projOK ? 'OK' : 'FAIL'}`,
+            projOK ? 'color:green' : 'color:red;font-weight:bold',
+        );
+
+        // ═══ Step 2：RTE 平移泄漏（根因二）═══
+        const rteOK = Math.abs(gc.vpMatrix[12]) < 1 && Math.abs(gc.vpMatrix[13]) < 1;
+        // eslint-disable-next-line no-console
+        console.log(
+            `%c[EggDiag Step2] vpMat[12]:${gc.vpMatrix[12].toFixed(4)} [13]:${gc.vpMatrix[13].toFixed(4)} ` +
+            `[14]:${gc.vpMatrix[14].toFixed(2)} ${rteOK ? 'OK' : 'FAIL (RTE leak)'}`,
+            rteOK ? 'color:green' : 'color:red;font-weight:bold',
+        );
+
+        // ═══ Step 3：GPU uniform 与 vpMatrix 一致性（根因三）═══
+        const uploadMatch = Math.abs(_cameraUniformData[0] - gc.vpMatrix[0]) < 0.0001;
+        // eslint-disable-next-line no-console
+        console.log(
+            `%c[EggDiag Step3] uniform[0]:${_cameraUniformData[0].toFixed(4)} vpMat[0]:${gc.vpMatrix[0].toFixed(4)} ` +
+            `${uploadMatch ? 'OK' : 'FAIL (matrix override)'}`,
+            uploadMatch ? 'color:green' : 'color:red;font-weight:bold',
+        );
+
+        // ═══ Step 4：Canvas 尺寸（根因四）═══
+        let surfW = 0, surfH = 0;
+        try { const s = ctx.getCurrentTexture(); surfW = s.width; surfH = s.height; } catch { /* */ }
+        const sizeOK = surfW === vp.physicalWidth && surfH === vp.physicalHeight;
+        // eslint-disable-next-line no-console
+        console.log(
+            `%c[EggDiag Step4] CSS:${vp.width}x${vp.height} Phys:${vp.physicalWidth}x${vp.physicalHeight} ` +
+            `Surf:${surfW}x${surfH} ${sizeOK ? 'OK' : 'FAIL (size mismatch)'}`,
+            sizeOK ? 'color:green' : 'color:red;font-weight:bold',
+        );
+
+        // ═══ Step 5：FOV 合理性（根因七）═══
+        const fovDeg = fov * RAD2DEG;
+        const fovOK = fovDeg > 10 && fovDeg < 120;
+        // eslint-disable-next-line no-console
+        console.log(
+            `%c[EggDiag Step5] fov:${fovDeg.toFixed(1)}deg f:${f.toFixed(4)} ` +
+            `${fovOK ? 'OK' : 'FAIL (fov units)'}`,
+            fovOK ? 'color:green' : 'color:red;font-weight:bold',
+        );
+
+        // ═══ 总结 ═══
+        const allOK = projOK && rteOK && uploadMatch && sizeOK && fovOK;
+        // eslint-disable-next-line no-console
+        console.log(
+            `%c[EggDiag] ${allOK ? 'ALL PASS' : 'ISSUES FOUND'}`,
+            allOK ? 'color:green;font-weight:bold;font-size:14px' : 'color:red;font-weight:bold;font-size:14px',
+        );
     }
 
     // ════════════════════════════════════════════════════════════
