@@ -83,3 +83,15 @@ export const _skyUniformData = new Float32Array(24);
  * 瓦片 UV 变换 `TileParams`：uvOffset.xy + uvScale.xy，共 4 float。
  */
 export const _tileParamsData = new Float32Array(4);
+
+/**
+ * 跨 scheme 纹理投影参数 `DrapingParams`：imgWest + imgEast + latToV_scale + latToV_offset，共 4 float。
+ * Phase 3 地形管线使用。
+ */
+export const _drapingParamsData = new Float32Array(4);
+
+/**
+ * 地形参数 `TerrainParams`：exaggeration + heightScale + heightOffset + pad，共 4 float。
+ * Phase 3 地形管线使用。
+ */
+export const _terrainParamsData = new Float32Array(4);

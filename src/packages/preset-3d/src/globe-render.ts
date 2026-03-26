@@ -88,12 +88,14 @@ export function renderGlobeTiles(
 
     for (let i = 0; i < tiles.length; i++) {
         const tile = tiles[i];
-        const key = tile.key;
+        // v3 过渡：GlobeTileID.key 已从 string 改为 number，
+        // 但 TileManagerState.tileCache 仍使用 string 键——Phase 2 将全面迁移到 TileCacheState。
+        const strKey = `${tile.z}/${tile.x}/${tile.y}`;
 
-        let cached = tileState.tileCache.get(key);
+        let cached = tileState.tileCache.get(strKey);
         if (!cached) {
-            loadTileTexture(key, tile.z, tile.x, tile.y, device, refs, tileState, isDestroyed);
-            cached = tileState.tileCache.get(key);
+            loadTileTexture(strKey, tile.z, tile.x, tile.y, device, refs, tileState, isDestroyed);
+            cached = tileState.tileCache.get(strKey);
         }
 
         const tileHasTexture = cached !== undefined
@@ -103,7 +105,7 @@ export function renderGlobeTiles(
         const tileBG = tileHasTexture ? cached!.bindGroup! : refs.fallbackBindGroup;
         if (!tileBG) { continue; }
 
-        if (tileHasTexture) { touchTileLRU(tileState, key); }
+        if (tileHasTexture) { touchTileLRU(tileState, strKey); }
 
         const meshData = getOrCreateTileMesh(device, tile.z, tile.x, tile.y, tileState.meshCache);
         if (!meshData) { continue; }
@@ -113,7 +115,7 @@ export function renderGlobeTiles(
         const vertBuf = device.createBuffer({
             size: rteVerts.byteLength,
             usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-            label: `Globe3D:vertBuf:${key}`,
+            label: `Globe3D:vertBuf:${strKey}`,
         });
         device.queue.writeBuffer(vertBuf, 0, rteVerts.buffer as ArrayBuffer, rteVerts.byteOffset, rteVerts.byteLength);
 

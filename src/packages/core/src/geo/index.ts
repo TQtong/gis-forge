@@ -84,3 +84,51 @@ export {
     bd09ToGcj02,
     gcj02ToBd09,
 } from './projection-math.ts';
+
+// ============================================================
+// tiling-scheme — 瓦片方案抽象（TilingScheme 接口 + 自由函数 + 注册表）
+// ============================================================
+export {
+    tileBoundsInto,
+    tileBounds,
+    tileKey,
+    decodeTileKey,
+    tileKeyStr,
+    tileKeyAuto,
+    touchesPole,
+    forEachOverlappingTile,
+    tileCenterInto,
+    registerTilingScheme,
+    getTilingSchemeById,
+    _registerBuiltins,
+} from './tiling-scheme.ts';
+
+export type {
+    TilingScheme,
+    TileCoord as TilingTileCoord,
+    GlobeTileID as TilingGlobeTileID,
+    TileBounds,
+} from './tiling-scheme.ts';
+
+// ============================================================
+// web-mercator-tiling-scheme — EPSG:3857 瓦片方案
+// ============================================================
+export { WebMercator } from './web-mercator-tiling-scheme.ts';
+
+// ============================================================
+// geographic-tiling-scheme — EPSG:4326 瓦片方案
+// ============================================================
+export { Geographic } from './geographic-tiling-scheme.ts';
+
+// ============================================================
+// tile-source — 瓦片数据源描述
+// ============================================================
+export {
+    createTileSource,
+    tileUrl,
+} from './tile-source.ts';
+
+export type {
+    TileSource,
+    TileSourceFormat,
+} from './tile-source.ts';

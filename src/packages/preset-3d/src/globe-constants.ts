@@ -136,6 +136,26 @@ export const NORTH_POLE_OCEAN_COLOR: readonly [number, number, number, number] =
  */
 export const SOUTH_POLE_OCEAN_COLOR: readonly [number, number, number, number] = [10, 30, 65, 255];
 
+// ─── 地形管线（Phase 3）────────────────────────────────────
+
+/** TerrainParams uniform 大小：exaggeration + heightScale + heightOffset + pad = 16 字节 */
+export const TERRAIN_UNIFORM_SIZE = 16;
+
+/** DrapingParams uniform 大小：imgWest + imgEast + latToV_scale + latToV_offset = 16 字节 */
+export const DRAPING_UNIFORM_SIZE = 16;
+
+/** 地形模式交错顶点：posRTE(3) + normal(3) + uv(2) + lngDeg(1) + latDeg(1) = 10 floats */
+export const TERRAIN_VERTEX_FLOATS = 10;
+
+/** 地形顶点步长（字节）：10 × 4 = 40 */
+export const TERRAIN_VERTEX_BYTES = TERRAIN_VERTEX_FLOATS * 4;
+
+/** SSE 阈值（像素）。瓦片在屏幕上的几何误差低于此值则不再分裂。 */
+export const SSE_THRESHOLD = 2.0;
+
+/** 四叉树递归栈上限（防止无限递归） */
+export const MAX_RECURSE_DEPTH = 25;
+
 // ─── 深度与顶点格式 ────────────────────────────────────────
 
 /**

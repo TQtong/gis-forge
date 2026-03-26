@@ -197,3 +197,112 @@ fn applyLogDepth(clipPos: vec4<f32>, logDepthBufFC: f32) -> vec4<f32> {
   return pos;
 }
 `;
+
+/**
+ * 地形瓦片栅格化着色器（v3 Phase 3）。
+ *
+ * 与 {@link GLOBE_TILE_WGSL} 的区别：
+ * - group(2) 为 DrapingParams（跨 scheme 纹理投影参数），替代 TileParams 的简单 UV offset/scale
+ * - group(3) 为 TerrainData（heightMap 纹理 + 采样器 + TerrainParams uniform）
+ * - 顶点额外包含 lngDeg / latDeg 属性（location 3/4）
+ * - 顶点着色器先做高程位移（沿法线方向 offset），再做 VP 变换
+ * - 片元着色器用 `drapeUV` 计算纹理坐标（Mercator 重投影）
+ *
+ * @remarks
+ * - Vertex：`terrain_vs`，高程位移 + RTE 位置 × VP + 对数深度
+ * - Fragment：`terrain_fs`，跨 scheme 纹理采样 × 日照 × 边缘大气
+ */
+export const TERRAIN_TILE_WGSL = /* wgsl */`
+struct CameraUniforms {
+  vpMatrix: mat4x4<f32>,
+  cameraPosition: vec3<f32>,
+  altitude: f32,
+  sunDirection: vec3<f32>,
+  logDepthBufFC: f32,
+};
+
+struct DrapingParams {
+  imgWest: f32,
+  imgEast: f32,
+  imgLatToV_scale: f32,
+  imgLatToV_offset: f32,
+};
+
+struct TerrainParams {
+  exaggeration: f32,
+  heightScale: f32,
+  heightOffset: f32,
+  _pad: f32,
+};
+
+@group(0) @binding(0) var<uniform> camera: CameraUniforms;
+@group(1) @binding(0) var tileSampler: sampler;
+@group(1) @binding(1) var tileTexture: texture_2d<f32>;
+@group(2) @binding(0) var<uniform> draping: DrapingParams;
+@group(3) @binding(0) var heightMap: texture_2d<f32>;
+@group(3) @binding(1) var heightSampler: sampler;
+@group(3) @binding(2) var<uniform> terrain: TerrainParams;
+
+struct TerrainVsIn {
+  @location(0) posRTE: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) lngDeg: f32,
+  @location(4) latDeg: f32,
+};
+
+struct TerrainVsOut {
+  @builtin(position) clipPos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) viewDir: vec3<f32>,
+};
+
+fn applyLogDepth_t(clipPos: vec4<f32>, logDepthBufFC: f32) -> vec4<f32> {
+  var pos = clipPos;
+  let logZ = log2(max(1e-6, pos.w + 1.0)) * logDepthBufFC;
+  pos.z = logZ * pos.w;
+  return pos;
+}
+
+fn drapeUV(lngDeg: f32, latDeg: f32) -> vec2<f32> {
+  let u = (lngDeg - draping.imgWest) / (draping.imgEast - draping.imgWest);
+  let latRad = latDeg * 0.017453293;
+  let mercY = log(tan(latRad) + 1.0 / cos(latRad));
+  let v = mercY * draping.imgLatToV_scale + draping.imgLatToV_offset;
+  return vec2<f32>(clamp(u, 0.0, 1.0), clamp(v, 0.0, 1.0));
+}
+
+@vertex fn terrain_vs(in: TerrainVsIn) -> TerrainVsOut {
+  let h = textureSampleLevel(heightMap, heightSampler, in.uv, 0.0).r;
+  let elevation = (h * terrain.heightScale + terrain.heightOffset) * terrain.exaggeration;
+  let displaced = in.posRTE + in.normal * elevation;
+
+  var out: TerrainVsOut;
+  var clip = camera.vpMatrix * vec4<f32>(displaced, 1.0);
+  out.clipPos = applyLogDepth_t(clip, camera.logDepthBufFC);
+  out.uv = drapeUV(in.lngDeg, in.latDeg);
+  out.normal = in.normal;
+  out.viewDir = -normalize(displaced);
+  return out;
+}
+
+@fragment fn terrain_fs(in: TerrainVsOut) -> @location(0) vec4<f32> {
+  var color = textureSample(tileTexture, tileSampler, in.uv);
+  let N = normalize(in.normal);
+  let V = in.viewDir;
+
+  let nDotL = max(dot(N, camera.sunDirection), 0.0);
+  let ambient = 0.3;
+  let diffuse = nDotL * 0.7;
+  let lighting = ambient + diffuse;
+  color = vec4<f32>(color.rgb * lighting, color.a);
+
+  let nDotV = max(dot(N, V), 0.0);
+  let atmoFactor = smoothstep(0.0, 0.15, nDotV);
+  let atmoColor = vec3<f32>(0.4, 0.6, 1.0);
+  color = vec4<f32>(mix(atmoColor, color.rgb, atmoFactor), 1.0);
+
+  return color;
+}
+`;

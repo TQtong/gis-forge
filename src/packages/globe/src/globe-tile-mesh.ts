@@ -23,6 +23,14 @@ import {
     haversineDistance,
 } from '../../core/src/geo/ellipsoid.ts';
 import type { Vec3d } from '../../core/src/geo/ellipsoid.ts';
+import type { TilingScheme } from '../../core/src/geo/tiling-scheme.ts';
+import {
+    tileBoundsInto,
+    tileCenterInto,
+    touchesPole,
+    tileKey,
+} from '../../core/src/geo/tiling-scheme.ts';
+import { WebMercator } from '../../core/src/geo/web-mercator-tiling-scheme.ts';
 
 // ════════════════════════════════════════════════════════════════
 // 常量
@@ -181,7 +189,8 @@ export interface GlobeTileMesh {
 }
 
 /**
- * 3D Globe 瓦片标识。
+ * 3D Globe 瓦片标识——渲染调度用的完整标识。
+ * v3 变更：key 从 string 改为 number（{@link tileKey} 编码），新增 schemeId。
  */
 export interface GlobeTileID {
     /** 瓦片 zoom 级别 */
@@ -190,10 +199,12 @@ export interface GlobeTileID {
     readonly x: number;
     /** 瓦片行号 */
     readonly y: number;
-    /** 唯一键 "z/x/y" */
-    readonly key: string;
+    /** 数值缓存键，由 {@link tileKey} 生成（v3：从 string 改为 number） */
+    readonly key: number;
     /** 与相机注视点的大圆距离（米），用于排序 */
     readonly distToCamera: number;
+    /** 方案 ID，轻量引用而非完整 TilingScheme 对象 */
+    readonly schemeId: number;
 }
 
 /**
@@ -234,6 +245,9 @@ export interface GlobeCamera {
 // ════════════════════════════════════════════════════════════════
 // 模块级复用缓冲（避免每次调用分配）
 // ════════════════════════════════════════════════════════════════
+
+/** tessellateGlobeTile 内部 tileBoundsInto 独立缓冲，避免与模块级 _boundsBuf 冲突 */
+const _tsBoundsBuf = new Float64Array(4);
 
 /** localGeodeticToECEF / surfaceNormal 输出暂存 */
 const _ecefBuf = new Float64Array(3) as Vec3d;
@@ -330,38 +344,37 @@ export function getSegments(tileZ: number): number {
 /**
  * 经度 → 瓦片列号（浮点，需 floor 取整）。
  *
+ * @deprecated 使用 `WebMercator.lngX(lngDeg, z)` 替代。保留至 v4 移除。
  * @param lngDeg - 经度（度）
  * @param z - zoom 级别
  * @returns 浮点瓦片 X 坐标
  */
 export function lngToTileX(lngDeg: number, z: number): number {
-    return ((lngDeg + 180) / 360) * (1 << z);
+    return WebMercator.lngX(lngDeg, z);
 }
 
 /**
  * 纬度 → 瓦片行号（浮点，需 floor 取整）。
- * 使用 Web Mercator 纬度映射公式。
  *
+ * @deprecated 使用 `WebMercator.latY(latDeg, z)` 替代。保留至 v4 移除。
  * @param latDeg - 纬度（度）
  * @param z - zoom 级别
  * @returns 浮点瓦片 Y 坐标
  */
 export function latToTileY(latDeg: number, z: number): number {
-    const r = latDeg * DEG2RAD;
-    return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / PI) / 2) * (1 << z);
+    return WebMercator.latY(latDeg, z);
 }
 
 /**
  * 瓦片行号 → 纬度（度）。
- * 逆 Web Mercator 纬度映射。
  *
+ * @deprecated 使用 `WebMercator.yLat(y, z)` 替代。保留至 v4 移除。
  * @param y - 瓦片行号（浮点或整数）
  * @param z - zoom 级别
  * @returns 纬度（度）
  */
 export function tileYToLat(y: number, z: number): number {
-    const n = PI - 2 * PI * y / (1 << z);
-    return Math.atan(Math.sinh(n)) * RAD2DEG;
+    return WebMercator.yLat(y, z);
 }
 
 /**
@@ -403,30 +416,35 @@ export function tessellateGlobeTile(
     y: number,
     segments: number,
     ellipsoid: Ellipsoid = WGS84_ELLIPSOID,
+    scheme: TilingScheme = WebMercator,
 ): GlobeTileMesh {
-    const numTiles = 1 << z;
+    // v3：通过 scheme 获取地理边界，替代硬编码 Mercator 公式
+    // _tsBoundsBuf 是函数局部的独立缓冲，避免与模块级 _boundsBuf 冲突
+    const bounds = tileBoundsInto(scheme, z, x, y, _tsBoundsBuf);
+    const lngMin = bounds[0];  // west
+    const lngMax = bounds[2];  // east
 
-    // 瓦片经纬度范围（度）
-    const lngMin = (x / numTiles) * 360 - 180;
-    const lngMax = ((x + 1) / numTiles) * 360 - 180;
+    // 原始纬度范围（用于 UV 映射——纹理内容仅覆盖此范围）
+    const mercatorLatMax = bounds[3];  // north（较大）
+    const mercatorLatMin = bounds[1];  // south（较小）
 
-    // Mercator 原始纬度范围（用于 UV 映射——纹理内容仅覆盖此范围）
-    const mercatorLatMax = tileYToLat(y, z);        // 北边纬度（较大）
-    const mercatorLatMin = tileYToLat(y + 1, z);    // 南边纬度（较小）
-
-    // ═══ 裙边边缘判定 ═══
-    // 北极瓦片（y=0）：顶边所有顶点汇聚到极点，裙边退化→跳过
-    const isNorthPole = (y === 0);
-    // 南极瓦片（y=numTiles-1）：底边所有顶点汇聚到极点→跳过
-    const isSouthPole = (y === numTiles - 1);
+    // 极地判定：行位置（y=0 或 y=最后行）OR 纬度达到 ±89.99°
+    // WebMercator y=0 的纬度仅 85.05°（不触达 89.99° 阈值），但仍需扇形三角形 + 极地延伸
+    // Geographic y=0 的纬度 = 90°，touchesPole 会直接命中
+    // 两种条件取 OR 确保所有方案的极地行都被正确处理
+    const pole = touchesPole(scheme, z, y);
+    const numYTiles = scheme.numY(z);
+    const isNorthPole = pole === 'north' || y === 0;
+    const isSouthPole = pole === 'south' || y === numYTiles - 1;
 
     // 极地瓦片几何范围延伸到真正的极点（±90°），填补 Mercator 投影的 85°→90° 空白。
-    // 纹理 UV 将被 clamp 到 [0,1]，使延伸区域采样 Mercator 纹理的边缘像素——
+    // 纹理 UV 将被 clamp 到 [0,1]，使延伸区域采样纹理的边缘像素——
     // 视觉上极地区域与相邻瓦片的边缘无缝衔接，无需独立的极地纹理。
+    // 注意：Geographic 方案 latRange = [-90, 90]，不需要延伸（touchesPole 会正确判定）
     const latMax = isNorthPole ? POLE_LAT_NORTH : mercatorLatMax;
     const latMin = isSouthPole ? POLE_LAT_SOUTH : mercatorLatMin;
 
-    // Mercator 纬度跨度（度），用于 UV v 的归一化
+    // 纬度跨度（度），用于 UV v 的归一化
     const mercatorLatSpan = mercatorLatMin - mercatorLatMax;
 
     // 网格维度
@@ -1300,14 +1318,12 @@ export function isTileVisible_Horizon(
     tx: number, ty: number, tz: number,
     camECEF: [number, number, number],
     ellipsoid: Ellipsoid = WGS84_ELLIPSOID,
+    scheme: TilingScheme = WebMercator,
 ): boolean {
-    const numTiles = 1 << tz;
-    // 瓦片中心经纬度（度）
-    const lngDeg = (tx + 0.5) / numTiles * 360 - 180;
-    const latDeg = tileYToLat(ty + 0.5, tz);
-
-    const lngRad = lngDeg * DEG2RAD;
-    const latRad = latDeg * DEG2RAD;
+    // v3：通过 scheme 获取瓦片中心经纬度，替代硬编码 Mercator 公式
+    const center = tileCenterInto(scheme, tz, tx, ty);
+    const lngRad = center[0] * DEG2RAD;
+    const latRad = center[1] * DEG2RAD;
 
     // 使用参数化椭球体计算瓦片中心 ECEF
     localGeodeticToECEF(_ecefBuf, lngRad, latRad, 0, ellipsoid);
@@ -1325,10 +1341,12 @@ export function isTileVisible_Horizon(
               + camToTileY * _normalBuf[1]
               + camToTileZ * _normalBuf[2];
 
-    // 大瓦片的角半径余量（瓦片边缘可能跨越地平线）
-    // tileAngularRadius ≈ π / numTiles（一个瓦片覆盖的角度）
-    const tileAngularRadius = PI / numTiles;
-    // margin = sin(角半径) × 椭球体赤道半径，使用参数化椭球体的 a
+    // 角半径余量——根据方案获取正确的 numX/numY
+    const numYTiles = scheme.numY(tz);
+    const numXTiles = scheme.numX(tz);
+    const maxTiles = Math.max(numXTiles, numYTiles);
+    const tileAngularRadius = PI / maxTiles;
+    // margin = sin(角半径) × 椭球体赤道半径
     const margin = Math.sin(tileAngularRadius) * ellipsoid.a;
 
     // dot < margin → 法线大致朝向相机 → 可见
@@ -1435,161 +1453,192 @@ export function isTileVisible_Frustum(
 // §4.4 coveringTilesGlobe
 // ════════════════════════════════════════════════════════════════
 
+/** SSE 阈值（像素）。瓦片在屏幕上的几何误差低于此值则不再分裂。 */
+const SSE_THRESHOLD = 2.0;
+
+/** 四叉树递归栈上限（防止无限递归） */
+const MAX_RECURSE_DEPTH = 25;
+
 /**
- * 计算 3D Globe 视口覆盖的瓦片列表（Pipeline v2 §4.4）。
+ * 计算 3D Globe 视口覆盖的瓦片列表。
  *
- * 算法：
- * 1. 屏幕边缘 + 内部网格 40+ 个采样点 → screenToGlobe 投射到椭球面
- * 2. 地理坐标范围 → 瓦片坐标范围（跨日期变更线检测）
- * 3. 枚举 + Horizon Cull + LOD 距离衰减
- * 4. 按距离排序，截断到上限
+ * v3 变更：
+ * - 新增 `scheme` 参数（默认 WebMercator，保持向后兼容）
+ * - 算法从 AABB 扁平枚举改为**四叉树自顶向下遍历**
+ * - 移除 MERCATOR_LAT_LIMIT 极地 hack（scheme.latRange 自动处理）
+ * - 移除 lodDrop hack（SSE 屏幕空间误差判定替代）
  *
- * 自动从 camera.ellipsoid 读取椭球体参数（默认 WGS84），
- * 传递给 screenToGlobe 和 isTileVisible_Horizon。
+ * 算法（四叉树）：
+ * 1. 从 zoom=0 根瓦片开始递归
+ * 2. 每个节点先做 Horizon Cull——背面则整棵子树跳过
+ * 3. SSE 判定：屏幕空间误差 < 阈值则停止分裂，输出当前节点
+ * 4. 否则分裂为 4 个子节点递归
+ * 5. 到达 targetZoom 上限也输出
  *
- * @param camera - Globe 相机状态（含可选 ellipsoid 字段）
+ * @param camera - Globe 相机状态（不含 scheme——scheme 是数据源属性）
+ * @param scheme - 要计算覆盖的瓦片方案，默认 WebMercator
  * @returns 瓦片列表，按距相机排序
  *
+ * @complexity O(T × log(z)) 其中 T = 输出瓦片数，z = 目标 zoom
+ *   Horizon cull 在 zoom 0~2 即可剪掉 ~50% 子树
+ *
  * @example
+ * // WebMercator（默认，与改造前行为一致）
  * const tiles = coveringTilesGlobe(camera);
- * for (const t of tiles) { loadTile(t.z, t.x, t.y); }
+ *
+ * @example
+ * // Geographic scheme
+ * import { Geographic } from '../../core/src/geo/geographic-tiling-scheme';
+ * const tiles = coveringTilesGlobe(camera, Geographic);
  */
-export function coveringTilesGlobe(camera: GlobeCamera): GlobeTileID[] {
-    const tileZoom = Math.max(0, Math.floor(camera.zoom));
-    const numTiles = 1 << tileZoom;
-
-    const W = camera.viewportWidth;
-    const H = camera.viewportHeight;
-
-    // 从相机状态提取椭球体（默认 WGS84）
+export function coveringTilesGlobe(
+    camera: GlobeCamera,
+    scheme: TilingScheme = WebMercator,
+): GlobeTileID[] {
+    const targetZoom = Math.max(0, Math.min(24, Math.floor(camera.zoom)));
+    const result: GlobeTileID[] = [];
     const ell = camera.ellipsoid ?? WGS84_ELLIPSOID;
 
-    // ═══ 步骤 1：屏幕采样点 → 椭球面经纬度 ═══
-    // 边缘密采（9 点/边 = 36）+ 内部网格 3×3 = 9 + 中心 1 = 46 点
-    const pts: [number, number][] = [];
-    // 上下边缘各 9 点
-    for (let i = 0; i <= 8; i++) { pts.push([W * i / 8, 0]); }
-    for (let i = 0; i <= 8; i++) { pts.push([W * i / 8, H]); }
-    // 左右边缘各 7 点（排除角点重复）
-    for (let i = 1; i <= 7; i++) { pts.push([0, H * i / 8]); }
-    for (let i = 1; i <= 7; i++) { pts.push([W, H * i / 8]); }
-    // 中心
-    pts.push([W / 2, H / 2]);
-    // 内部 3×3 网格点（高 pitch 时需要更多采样以覆盖可见区域）
-    for (let i = 1; i <= 3; i++) {
-        for (let j = 1; j <= 3; j++) {
-            pts.push([W * i / 4, H * j / 4]);
-        }
-    }
+    // 从 zoom=0 根瓦片开始递归（Geographic: 2×1, WebMercator: 1×1）
+    const rootNumX = scheme.numX(0);
+    const rootNumY = scheme.numY(0);
 
-    // 投射到椭球面（使用参数化椭球体）
-    const hits: [number, number][] = [];
-    for (let pi = 0; pi < pts.length; pi++) {
-        const hit = screenToGlobe(
-            pts[pi][0], pts[pi][1],
-            camera.inverseVP_ECEF,
-            W, H,
-            ell,
-        );
-        if (hit !== null) { hits.push(hit); }
-    }
-
-    // 所有射线都指向太空——相机看向深空方向，无可见瓦片
-    if (hits.length === 0) { return []; }
-
-    // ═══ 步骤 2：经纬度范围 → 瓦片坐标范围 ═══
-    let mnLng = Infinity, mxLng = -Infinity;
-    let mnLat = Infinity, mxLat = -Infinity;
-    for (let i = 0; i < hits.length; i++) {
-        const lng = hits[i][0], lat = hits[i][1];
-        if (lng < mnLng) { mnLng = lng; }
-        if (lng > mxLng) { mxLng = lng; }
-        if (lat < mnLat) { mnLat = lat; }
-        if (lat > mxLat) { mxLat = lat; }
-    }
-
-    // 跨日期变更线检测（经度跨度 > 180°）
-    if (mxLng - mnLng > 180) {
-        mnLng = -180;
-        mxLng = 180;
-    }
-
-    const minTX = Math.max(0, Math.floor(lngToTileX(mnLng, tileZoom)));
-    const maxTX = Math.min(numTiles - 1, Math.ceil(lngToTileX(mxLng, tileZoom)));
-    // latToTileY: 较大纬度 → 较小 Y
-    let minTY = Math.max(0, Math.floor(latToTileY(mxLat, tileZoom)));
-    let maxTY = Math.min(numTiles - 1, Math.ceil(latToTileY(mnLat, tileZoom)));
-
-    // ── P1 #5: Polar EPSG:4326 tile coverage ──
-    // WebMercator is undefined beyond ±85.05°. When the camera can see polar regions,
-    // extend tile range to cover rows 0 (north pole) and numTiles-1 (south pole).
-    // The tile geometry (tessellateGlobeTile) already handles polar fan triangles.
-    const MERCATOR_LAT_LIMIT = 85.05;
-    if (mxLat > MERCATOR_LAT_LIMIT || camera.altitude > 5_000_000) {
-        // Camera can see north pole region → include row 0
-        minTY = 0;
-    }
-    if (mnLat < -MERCATOR_LAT_LIMIT || camera.altitude > 5_000_000) {
-        // Camera can see south pole region → include last row
-        maxTY = numTiles - 1;
-    }
-
-    // ═══ 步骤 3：枚举 + Horizon Cull + LOD ═══
-    const [clng, clat] = camera.center;
-    const clngRad = clng * DEG2RAD;
-    const clatRad = clat * DEG2RAD;
-
-    const seen = new Set<string>();
-    const tiles: GlobeTileID[] = [];
-
-    for (let y = minTY; y <= maxTY; y++) {
-        for (let x = minTX; x <= maxTX; x++) {
-            // Horizon Cull：背面瓦片跳过（使用参数化椭球体）
-            if (!isTileVisible_Horizon(x, y, tileZoom, camera.cameraECEF, ell)) {
-                continue;
-            }
-
-            // 瓦片中心经纬度
-            const tlng = (x + 0.5) / numTiles * 360 - 180;
-            const tlat = tileYToLat(y + 0.5, tileZoom);
-
-            // 与相机注视点的大圆距离（haversineDistance 内部用 WGS84_A，对非 WGS84 有微小偏差，
-            // 但此距离仅用于 LOD 排序，不影响正确性）
-            const dist = haversineDistance(
-                clngRad, clatRad,
-                tlng * DEG2RAD, tlat * DEG2RAD,
-            );
-
-            // LOD 距离衰减：距中心越远 → zoom 越低
-            const lodDrop = Math.min(
-                Math.floor(Math.log2(Math.max(1, dist / 500000))),
-                4,
-            );
-            const z = Math.max(0, tileZoom - lodDrop);
-
-            // 降级到父瓦片
-            const shift = tileZoom - z;
-            const px = x >> shift;
-            const py = y >> shift;
-            const key = `${z}/${px}/${py}`;
-
-            // 去重
-            if (seen.has(key)) { continue; }
-            seen.add(key);
-
-            tiles.push({ z, x: px, y: py, key, distToCamera: dist });
+    for (let y = 0; y < rootNumY; y++) {
+        for (let x = 0; x < rootNumX; x++) {
+            _subdivide(scheme, 0, x, y, targetZoom, camera, ell, result);
         }
     }
 
     // 按距离排序（近→远，利于 early-Z）
-    tiles.sort((a, b) => a.distToCamera - b.distToCamera);
-
+    result.sort((a, b) => a.distToCamera - b.distToCamera);
     // 上限截断
-    if (tiles.length > MAX_GLOBE_TILES) {
-        tiles.length = MAX_GLOBE_TILES;
+    if (result.length > MAX_GLOBE_TILES) {
+        result.length = MAX_GLOBE_TILES;
+    }
+    return result;
+}
+
+/**
+ * 四叉树递归：Horizon Cull → SSE 判定 → 分裂或输出。
+ *
+ * @param scheme - 瓦片方案
+ * @param z - 当前递归 zoom
+ * @param x - 当前列号
+ * @param y - 当前行号
+ * @param targetZoom - 目标最大 zoom
+ * @param camera - Globe 相机
+ * @param ell - 椭球体
+ * @param result - 输出数组
+ */
+function _subdivide(
+    scheme: TilingScheme,
+    z: number, x: number, y: number,
+    targetZoom: number,
+    camera: GlobeCamera,
+    ell: Ellipsoid,
+    result: GlobeTileID[],
+): void {
+    // 防御：递归深度保护
+    if (z > MAX_RECURSE_DEPTH) return;
+
+    // 1. Horizon Cull——背面则整棵子树跳过
+    if (!isTileVisible_Horizon(x, y, z, camera.cameraECEF, ell, scheme)) {
+        return;
     }
 
-    return tiles;
+    // 2. 到达最大 zoom → 输出
+    if (z >= targetZoom) {
+        _emitTile(scheme, z, x, y, camera, result);
+        return;
+    }
+
+    // 3. SSE 判定——屏幕空间误差低于阈值则不再分裂
+    const sse = _estimateSSE(scheme, z, x, y, camera);
+    if (sse < SSE_THRESHOLD) {
+        _emitTile(scheme, z, x, y, camera, result);
+        return;
+    }
+
+    // 4. 分裂为 4 个子节点
+    const cz = z + 1;
+    const cx = x * 2;
+    const cy = y * 2;
+    _subdivide(scheme, cz, cx,     cy,     targetZoom, camera, ell, result);
+    _subdivide(scheme, cz, cx + 1, cy,     targetZoom, camera, ell, result);
+    _subdivide(scheme, cz, cx,     cy + 1, targetZoom, camera, ell, result);
+    _subdivide(scheme, cz, cx + 1, cy + 1, targetZoom, camera, ell, result);
+}
+
+/**
+ * 将通过筛选的瓦片加入输出列表。
+ * 计算瓦片中心到相机注视点的 haversine 距离用于排序。
+ *
+ * @param scheme - 瓦片方案
+ * @param z - zoom
+ * @param x - 列号
+ * @param y - 行号
+ * @param camera - Globe 相机
+ * @param result - 输出数组
+ */
+function _emitTile(
+    scheme: TilingScheme, z: number, x: number, y: number,
+    camera: GlobeCamera, result: GlobeTileID[],
+): void {
+    const center = tileCenterInto(scheme, z, x, y);
+    const dist = haversineDistance(
+        camera.center[0] * DEG2RAD, camera.center[1] * DEG2RAD,
+        center[0] * DEG2RAD, center[1] * DEG2RAD,
+    );
+    result.push({
+        z, x, y,
+        key: tileKey(scheme.id, z, x, y),
+        distToCamera: dist,
+        schemeId: scheme.id,
+    });
+}
+
+/**
+ * 估算瓦片在屏幕上的几何误差（像素）。
+ * 公式：SSE = (tileGeometricError × viewportHeight) / (distance × 2 × tan(fov/2))
+ *
+ * geometricError ≈ 瓦片对角线长度（地面米数）
+ * distance = 相机到瓦片中心的直线距离 + 海拔
+ *
+ * @param scheme - 瓦片方案
+ * @param z - zoom
+ * @param x - 列号
+ * @param y - 行号
+ * @param camera - Globe 相机
+ * @returns SSE 像素值
+ */
+function _estimateSSE(
+    scheme: TilingScheme, z: number, x: number, y: number,
+    camera: GlobeCamera,
+): number {
+    const center = tileCenterInto(scheme, z, x, y);
+    // 瓦片中心到相机注视点的大圆距离（米）
+    const dist = haversineDistance(
+        camera.center[0] * DEG2RAD, camera.center[1] * DEG2RAD,
+        center[0] * DEG2RAD, center[1] * DEG2RAD,
+    );
+
+    // 瓦片地面对角线长度（米）的粗略估计
+    const bounds = tileBoundsInto(scheme, z, x, y);
+    const latSpan = (bounds[3] - bounds[1]) * DEG2RAD;
+    const lngSpan = (bounds[2] - bounds[0]) * DEG2RAD;
+    // 纬度中点用于经度→米的 cos 修正
+    const avgLatRad = ((bounds[3] + bounds[1]) / 2) * DEG2RAD;
+    const dLat = latSpan * WGS84_A;
+    const dLng = lngSpan * WGS84_A * Math.cos(avgLatRad);
+    const diag = Math.sqrt(dLat * dLat + dLng * dLng);
+
+    // 到相机的距离（米），取大圆距离 + 海拔，至少 1m 防除零
+    const camDist = Math.max(dist + camera.altitude, 1.0);
+    // 透视缩放因子
+    const tanHalfFov = Math.tan(camera.fov * 0.5);
+
+    // SSE = 瓦片地面尺寸 × 视口高度 / (距离 × 2 × tan(fov/2))
+    return (diag * camera.viewportHeight) / (camDist * 2 * tanHalfFov);
 }
 
 // ════════════════════════════════════════════════════════════════

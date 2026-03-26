@@ -26,8 +26,16 @@ export interface Globe3DOptions {
     readonly terrain?: {
         /** DEM 或 TileJSON 根 URL */
         readonly url: string;
+        /** 瓦片投影方案：Web Mercator 或地理经纬格网 */
+        readonly scheme?: 'webmercator' | 'geographic';
+        /** DEM 编码格式（调度/解码用） */
+        readonly format?: 'mapzen' | 'mapbox' | 'terrarium' | 'quantized-mesh';
         /** 高程缩放，默认 1（真实米制） */
         readonly exaggeration?: number;
+        /** TMS 风格 Y 轴翻转（相对 XYZ） */
+        readonly tmsFlipY?: boolean;
+        /** 允许请求的最大 zoom */
+        readonly maxZoom?: number;
     };
 
     /**
@@ -38,6 +46,12 @@ export interface Globe3DOptions {
         readonly url?: string;
         /** 方案标识，如 `xyz` / `wmts`（调度器扩展用） */
         readonly type?: string;
+        /** 瓦片投影方案：Web Mercator 或地理经纬格网 */
+        readonly scheme?: 'webmercator' | 'geographic';
+        /** 子域轮询列表，替换 URL 中的 `{s}` */
+        readonly subdomains?: string[];
+        /** TMS 风格 Y 轴翻转（相对 XYZ） */
+        readonly tmsFlipY?: boolean;
         /** 最大 zoom，防止请求不存在级别 */
         readonly maximumLevel?: number;
     };
@@ -182,6 +196,35 @@ export interface CachedMesh {
 }
 
 /**
+ * 泛型 LRU 缓存——纹理类条目的通用容器。
+ * @stability experimental
+ */
+export interface TileLRUCache<T> {
+    /** 键 → 值（数值键由 tileKey() 生成） */
+    readonly entries: Map<number, T>;
+    /** LRU 序列（头部最旧）——存储数值键 */
+    readonly lru: number[];
+    /** 容量上限 */
+    readonly maxSize: number;
+}
+
+/**
+ * 分层缓存结构（v3）——替代旧 TileManagerState。
+ * 影像/地形 GPU 纹理各自独立 LRU，网格缓存按 tileKey 跨数据源共享。
+ * @stability experimental
+ */
+export interface TileCacheState {
+    /** 影像纹理 LRU */
+    readonly imagery: TileLRUCache<CachedTile>;
+    /** 网格缓存。键 = tileKey(schemeId, z, x, y)。不同 scheme 通过 schemeId 区分。无 LRU。 */
+    readonly mesh: Map<number, CachedMesh>;
+    /** mesh 缓存上限（超出时全量清理最旧项） */
+    readonly meshMaxSize: number;
+    /** 当前影像图层使用的 TileSource 引用（用于 URL 构建） */
+    readonly imagerySrc: import('./../../core/src/geo/tile-source.ts').TileSource | null;
+}
+
+/**
  * {@link import('./globe-3d.ts').Globe3D.renderer}  getter 返回的快照。
  */
 export interface GlobeRendererStats {
@@ -308,6 +351,23 @@ export interface GlobeGPURefs {
     cameraBindGroup: GPUBindGroup | null;
     /** 预绑 `tileParamsBuffer` */
     tileParamsBindGroup: GPUBindGroup | null;
+
+    // ─── 地形管线（Phase 3）──────────────────────────────────
+
+    /** 地形瓦片渲染管线（terrain_vs + terrain_fs，含 group(3) terrain data） */
+    terrainPipeline: GPURenderPipeline | null;
+    /** group(2): DrapingParams（跨 scheme 纹理投影参数） */
+    drapingParamsBuffer: GPUBuffer | null;
+    /** group(2) bind group layout */
+    drapingBindGroupLayout: GPUBindGroupLayout | null;
+    /** group(3): heightMap texture + sampler + TerrainParams uniform */
+    terrainBindGroupLayout: GPUBindGroupLayout | null;
+    /** 地形参数 uniform：exaggeration + heightScale + heightOffset + pad */
+    terrainParamsBuffer: GPUBuffer | null;
+    /** 地形高程纹理采样器（双线性插值） */
+    terrainSampler: GPUSampler | null;
+    /** 预绑 drapingParamsBuffer 的 bind group */
+    drapingBindGroup: GPUBindGroup | null;
 }
 
 /**
@@ -340,6 +400,13 @@ export function createEmptyGlobeGPURefs(): GlobeGPURefs {
         tileParamsBindGroupLayout: null,
         cameraBindGroup: null,
         tileParamsBindGroup: null,
+        terrainPipeline: null,
+        drapingParamsBuffer: null,
+        drapingBindGroupLayout: null,
+        terrainBindGroupLayout: null,
+        terrainParamsBuffer: null,
+        terrainSampler: null,
+        drapingBindGroup: null,
     };
 }
 

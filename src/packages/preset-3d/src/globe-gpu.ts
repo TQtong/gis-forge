@@ -13,11 +13,15 @@ import {
     ATMOSPHERE_WGSL,
     GLOBE_TILE_WGSL,
     SKY_DOME_WGSL,
+    TERRAIN_TILE_WGSL,
 } from './globe-shaders.ts';
 import {
     ATMO_SPHERE_SEGMENTS,
     CAMERA_UNIFORM_SIZE,
+    DRAPING_UNIFORM_SIZE,
     SKY_UNIFORM_SIZE,
+    TERRAIN_UNIFORM_SIZE,
+    TERRAIN_VERTEX_BYTES,
     TILE_PARAMS_SIZE,
     VERTEX_BYTES,
     VERTEX_FLOATS,
@@ -336,6 +340,133 @@ export function createAtmoPipeline(device: GPUDevice, format: GPUTextureFormat, 
 }
 
 /**
+ * 创建地形管线所需的 GPU 资源：bind group layout、uniform buffer、sampler、pipeline。
+ *
+ * @param device - GPU 设备
+ * @param format - swapchain 颜色格式
+ * @param refs - 需已含 cameraBindGroupLayout 和 tileBindGroupLayout
+ *
+ * @stability experimental
+ */
+export function createTerrainResources(device: GPUDevice, format: GPUTextureFormat, refs: GlobeGPURefs): void {
+    // DrapingParams uniform buffer (group 2)
+    refs.drapingParamsBuffer = device.createBuffer({
+        size: DRAPING_UNIFORM_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        label: 'Globe3D:drapingParams',
+    });
+
+    // DrapingParams bind group layout (group 2)
+    refs.drapingBindGroupLayout = device.createBindGroupLayout({
+        label: 'Globe3D:drapingLayout',
+        entries: [{
+            binding: 0,
+            visibility: GPUShaderStage.VERTEX,
+            buffer: { type: 'uniform' },
+        }],
+    });
+
+    // DrapingParams bind group
+    refs.drapingBindGroup = device.createBindGroup({
+        layout: refs.drapingBindGroupLayout,
+        entries: [{
+            binding: 0,
+            resource: { buffer: refs.drapingParamsBuffer },
+        }],
+        label: 'Globe3D:drapingBG',
+    });
+
+    // TerrainParams uniform buffer (inside group 3)
+    refs.terrainParamsBuffer = device.createBuffer({
+        size: TERRAIN_UNIFORM_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        label: 'Globe3D:terrainParams',
+    });
+
+    // 地形高程纹理采样器——双线性插值 + clamp-to-edge
+    refs.terrainSampler = device.createSampler({
+        magFilter: 'linear',
+        minFilter: 'linear',
+        addressModeU: 'clamp-to-edge',
+        addressModeV: 'clamp-to-edge',
+        label: 'Globe3D:terrainSampler',
+    });
+
+    // Terrain bind group layout (group 3): heightMap + sampler + TerrainParams
+    refs.terrainBindGroupLayout = device.createBindGroupLayout({
+        label: 'Globe3D:terrainLayout',
+        entries: [
+            {
+                binding: 0,
+                visibility: GPUShaderStage.VERTEX,
+                texture: { sampleType: 'unfilterable-float', viewDimension: '2d' },
+            },
+            {
+                binding: 1,
+                visibility: GPUShaderStage.VERTEX,
+                sampler: { type: 'non-filtering' },
+            },
+            {
+                binding: 2,
+                visibility: GPUShaderStage.VERTEX,
+                buffer: { type: 'uniform' },
+            },
+        ],
+    });
+
+    // Terrain render pipeline
+    const shaderModule = device.createShaderModule({
+        code: TERRAIN_TILE_WGSL,
+        label: 'Globe3D:terrainShader',
+    });
+
+    const pipelineLayout = device.createPipelineLayout({
+        bindGroupLayouts: [
+            refs.cameraBindGroupLayout!,       // group 0
+            refs.tileBindGroupLayout!,          // group 1 (imagery texture)
+            refs.drapingBindGroupLayout,        // group 2 (draping params)
+            refs.terrainBindGroupLayout,        // group 3 (terrain data)
+        ],
+        label: 'Globe3D:terrainPipelineLayout',
+    });
+
+    refs.terrainPipeline = device.createRenderPipeline({
+        layout: pipelineLayout,
+        vertex: {
+            module: shaderModule,
+            entryPoint: 'terrain_vs',
+            buffers: [{
+                arrayStride: TERRAIN_VERTEX_BYTES,
+                stepMode: 'vertex',
+                attributes: [
+                    { shaderLocation: 0, offset: 0,  format: 'float32x3' },   // posRTE
+                    { shaderLocation: 1, offset: 12, format: 'float32x3' },   // normal
+                    { shaderLocation: 2, offset: 24, format: 'float32x2' },   // uv
+                    { shaderLocation: 3, offset: 32, format: 'float32' },     // lngDeg
+                    { shaderLocation: 4, offset: 36, format: 'float32' },     // latDeg
+                ],
+            }],
+        },
+        fragment: {
+            module: shaderModule,
+            entryPoint: 'terrain_fs',
+            targets: [{ format }],
+        },
+        primitive: {
+            topology: 'triangle-list',
+            frontFace: 'ccw',
+            cullMode: 'back',
+        },
+        depthStencil: {
+            format: 'depth32float',
+            depthWriteEnabled: true,
+            depthCompare: 'less-equal',
+        },
+        label: 'Globe3D:terrainPipeline',
+    });
+}
+
+/**
  * 若 `refs.depthTexture` 缺失或尺寸与当前 `getCurrentTexture()` 不一致，则销毁并重建。
  *
  * @param device - GPU 设备
@@ -415,6 +546,21 @@ export function destroyGlobeGPUResources(refs: GlobeGPURefs): void {
     refs.tileParamsBindGroupLayout = null;
 
     refs.sampler = null;
+
+    // 地形资源
+    if (refs.drapingParamsBuffer) {
+        refs.drapingParamsBuffer.destroy();
+        refs.drapingParamsBuffer = null;
+    }
+    if (refs.terrainParamsBuffer) {
+        refs.terrainParamsBuffer.destroy();
+        refs.terrainParamsBuffer = null;
+    }
+    refs.terrainPipeline = null;
+    refs.drapingBindGroupLayout = null;
+    refs.terrainBindGroupLayout = null;
+    refs.terrainSampler = null;
+    refs.drapingBindGroup = null;
 
     refs.device = null;
     refs.gpuContext = null;

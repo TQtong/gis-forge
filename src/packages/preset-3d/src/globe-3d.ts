@@ -29,6 +29,7 @@ import {
 import type {
     GlobeCamera,
 } from '../../globe/src/globe-tile-mesh.ts';
+import { tileKey } from '../../core/src/geo/tiling-scheme.ts';
 
 import { _ecefTmp } from './globe-buffers.ts';
 import {
@@ -58,6 +59,7 @@ import {
     createGlobeGPUResources,
     createGlobePipeline,
     createSkyPipeline,
+    createTerrainResources,
     destroyGlobeGPUResources,
     ensureGlobeDepthTexture,
 } from './globe-gpu.ts';
@@ -1632,6 +1634,9 @@ export class Globe3D {
             this._gpuRefs.skyPipeline = createSkyPipeline(device, this._gpuRefs.surfaceFormat);
             this._gpuRefs.atmoPipeline = createAtmoPipeline(device, this._gpuRefs.surfaceFormat, this._gpuRefs);
 
+            // ── 创建地形管线 GPU 资源（Phase 3）──
+            createTerrainResources(device, this._gpuRefs.surfaceFormat, this._gpuRefs);
+
             // ── 创建极地冰盖 GPU 资源（程序化 Natural Earth 纹理）──
             if (this._polarCapsEnabled) {
                 createPolarCapResources(device, this._gpuRefs, this._polarCapState);
@@ -1781,8 +1786,9 @@ export class Globe3D {
                         z: fallbackZoom,
                         x,
                         y,
-                        key: `${fallbackZoom}/${x}/${y}`,
+                        key: tileKey(0, fallbackZoom, x, y),
                         distToCamera: 0,
+                        schemeId: 0,
                     });
                 }
             }
