@@ -382,7 +382,7 @@ export function createDeviceManager(): DeviceManager {
       // 如果已销毁则不触发回调——避免销毁后的副作用
       if (destroyed) return;
 
-      // 构造人类可读的丢失原因
+      // 构造可读的丢失原因
       const reason = info.message || info.reason || 'unknown';
 
       // 依次通知所有注册的回调

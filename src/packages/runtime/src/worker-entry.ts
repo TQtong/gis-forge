@@ -64,7 +64,7 @@ export interface WorkerOutboundFailure {
   readonly id: string;
   /** 失败标记。 */
   readonly ok: false;
-  /** 人类可读错误信息。 */
+  /** 可读错误信息。 */
   readonly error: string;
   /** 可选稳定错误码（如 `GeoForgeError.code`）。 */
   readonly code?: string;

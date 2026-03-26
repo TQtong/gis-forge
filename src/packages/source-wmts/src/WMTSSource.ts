@@ -250,7 +250,7 @@ export interface WMTSLayerDescriptor {
     /** 图层标识符 */
     readonly identifier: string;
 
-    /** 图层标题（人类可读） */
+    /** 图层标题（可读） */
     readonly title: string;
 
     /** 图层支持的样式标识符列表 */

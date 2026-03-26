@@ -41,7 +41,7 @@ export interface ProjectionModule {
   readonly id: string;
   /** 可选：EPSG 代码字符串，如 `EPSG:3857`。 */
   readonly epsg?: string;
-  /** 面向 UI / 调试的人类可读名称。 */
+  /** 面向 UI / 调试的可读名称。 */
   readonly displayName: string;
   /**
    * WGSL 顶点阶段片段：需暴露 `projectPosition` 或文档约定入口，由 ShaderAssembler 拼接。

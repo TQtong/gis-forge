@@ -52,7 +52,7 @@ export interface GlyphMetrics {
  * const block: UnicodeBlock = { name: 'CJK Unified Ideographs', start: 0x4e00, end: 0x9fff };
  */
 export interface UnicodeBlock {
-  /** 人类可读块名称。 */
+  /** 可读块名称。 */
   readonly name: string;
   /** 起始码位（含）。 */
   readonly start: number;

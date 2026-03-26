@@ -32,7 +32,7 @@ export class GeoForgeError extends Error {
 
   /**
    * @param code - 错误码
-   * @param message - 人类可读说明
+   * @param message - 可读说明
    * @param context - 可选诊断上下文
    * @param cause - 可选底层原因（保留 Error.cause）
    */

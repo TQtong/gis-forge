@@ -12,7 +12,7 @@ export type ErrorCategory = 'network' | 'decode' | 'gpu' | 'worker' | 'unknown';
 export interface ErrorEvent {
   /** 错误类别，决定恢复路径。 */
   readonly category: ErrorCategory;
-  /** 人类可读描述（面向日志与调试）。 */
+  /** 可读描述（面向日志与调试）。 */
   readonly message: string;
   /** 可选：报告模块名（如 `TileScheduler`）。 */
   readonly source?: string;

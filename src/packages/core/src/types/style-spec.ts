@@ -43,7 +43,7 @@ export interface StyleSpec {
   readonly version: 8;
 
   /**
-   * 样式的人类可读名称。
+   * 样式的可读名称。
    * 仅用于 UI 展示和调试日志，不影响渲染。
    * 可选，默认为 undefined。
    *

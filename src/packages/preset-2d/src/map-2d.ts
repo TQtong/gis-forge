@@ -121,7 +121,7 @@ export class GeoForgeError extends Error {
 
     /**
      * @param code - 错误码枚举值
-     * @param message - 人类可读说明
+     * @param message - 可读说明
      * @param context - 可选上下文键值
      * @param cause - 可选底层原因（ES2022 cause）
      */

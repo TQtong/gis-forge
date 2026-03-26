@@ -119,7 +119,7 @@ export interface A11yManager {
   /**
    * 向屏幕阅读器播报视图变化（例如飞行动画结束）。
    *
-   * @param message - 人类可读文本
+   * @param message - 可读文本
    *
    * @example
    * mgr.announceViewChange('已缩放到级别 12');

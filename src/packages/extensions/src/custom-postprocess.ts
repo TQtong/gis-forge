@@ -41,7 +41,7 @@ export interface PostProcessIntermediateTextureSpec {
 export interface PostProcessPass {
   /** Pass 唯一 id（链内去重）。 */
   readonly id: string;
-  /** 人类可读名称（调试 UI）。 */
+  /** 可读名称（调试 UI）。 */
   readonly name: string;
   /** 链顺序：数值越小越早执行（具体排序由 Compositor 定义）。 */
   readonly order: number;

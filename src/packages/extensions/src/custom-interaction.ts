@@ -18,7 +18,7 @@ export class ExtensionInteractionError extends Error {
 
   /**
    * @param code - 机器可读错误码
-   * @param message - 人类可读说明
+   * @param message - 可读说明
    * @param context - 可选上下文键值
    */
   constructor(code: string, message: string, context: Record<string, unknown> = {}) {

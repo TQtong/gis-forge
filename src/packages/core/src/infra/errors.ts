@@ -74,7 +74,7 @@ export class GeoForgeError extends Error {
 
   /**
    * @param code - 错误码枚举值
-   * @param message - 人类可读说明（短句，勿带换行）
+   * @param message - 可读说明（短句，勿带换行）
    * @param context - 可选上下文键值
    * @param cause - 可选原因链
    *

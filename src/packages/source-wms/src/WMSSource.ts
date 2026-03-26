@@ -293,7 +293,7 @@ export interface WMSLayerDescriptor {
     /** 图层名称（用于 LAYERS 参数） */
     readonly name: string;
 
-    /** 图层标题（人类可读） */
+    /** 图层标题（可读） */
     readonly title: string;
 
     /** 图层是否可查询（支持 GetFeatureInfo） */

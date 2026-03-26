@@ -30,7 +30,7 @@ export class GeoForgeError extends Error {
 
   /**
    * @param code - 错误码
-   * @param message - 人类可读说明
+   * @param message - 可读说明
    * @param context - 可选上下文
    */
   public constructor(code: string, message: string, context?: Readonly<Record<string, unknown>>) {

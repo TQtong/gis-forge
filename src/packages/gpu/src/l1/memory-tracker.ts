@@ -52,7 +52,7 @@ export interface GPUResourceEntry {
    */
   readonly lastUsedFrame: number;
 
-  /** 可选的人类可读标签，用于调试（如 Chrome DevTools GPU 标签列）。 */
+  /** 可选的可读标签，用于调试（如 Chrome DevTools GPU 标签列）。 */
   readonly label?: string;
 
   /**
