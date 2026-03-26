@@ -1,4 +1,4 @@
-# GeoForge L0 基础层重新设计 — 零依赖，全部自研
+# GIS-Forge L0 基础层重新设计 — 零依赖，全部自研
 
 > **核心原则**：不使用任何第三方库。数学运算、坐标转换、投影算法、三角函数、矩阵分解全部自己实现。
 > 这是引擎的根基，必须完全自主可控。
@@ -15,7 +15,7 @@
 4. **Float32 + Float64 双版本**：向量/矩阵同时提供 f32（GPU 传输用）和 f64（CPU 精确计算用）版本
 5. **内联友好**：关键函数足够短小，方便 V8 JIT 内联优化
 6. **WGSL 对齐**：数据布局与 WGSL 的 `vec3<f32>`、`mat4x4<f32>` 内存布局完全对齐，CPU→GPU 零拷贝
-7. **共享类型定义权威源**：Feature、BBox2D、Viewport、CameraState、PickResult 等全局共享类型**只在 L0 定义一次**，上层全部从 `@geoforge/core` import
+7. **共享类型定义权威源**：Feature、BBox2D、Viewport、CameraState、PickResult 等全局共享类型**只在 L0 定义一次**，上层全部从 `@gis-forge/core` import
 
 ---
 
@@ -92,7 +92,7 @@ export type Mat4d = Float64Array;   // 长度 16
 
 ## 新增：types/ — 全局共享类型定义（v2.1）
 
-> **设计决策**：以下类型在 L1~L6 的多个模块中被引用。审计发现它们之前分散在各层各自定义，导致字段名/方法签名不一致。现在全部归入 L0/types/ 作为唯一定义源（Single Source of Truth），上层统一从 `@geoforge/core` import。
+> **设计决策**：以下类型在 L1~L6 的多个模块中被引用。审计发现它们之前分散在各层各自定义，导致字段名/方法签名不一致。现在全部归入 L0/types/ 作为唯一定义源（Single Source of Truth），上层统一从 `@gis-forge/core` import。
 
 ### types/geometry.ts — GeoJSON 几何类型
 

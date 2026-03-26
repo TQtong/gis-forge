@@ -1,6 +1,6 @@
 /**
  * @packageDocumentation
- * @module @geoforge/preset-3d
+ * @module @gis-forge/preset-3d
  * @description
  * **preset-3d**（L6）对外桶：导出 {@link Globe3D} 主类、构造选项、渲染统计类型，
  * 以及与球体渲染管线一致的 **对数深度** 工具（`computeLogDepthBufFC`）与 WGSL 片段（`LOG_DEPTH_WGSL`），
@@ -10,12 +10,12 @@
  *
  * @example
  * ```ts
- * import { Globe3D, computeLogDepthBufFC } from '@geoforge/preset-3d';
+ * import { Globe3D, computeLogDepthBufFC } from '@gis-forge/preset-3d';
  * ```
  */
 
 // ============================================================
-// @geoforge/preset-3d — 包公共入口（桶导出）
+// @gis-forge/preset-3d — 包公共入口（桶导出）
 // 聚合 Globe3D 核心类、对数深度辅助与相关类型。
 // ============================================================
 

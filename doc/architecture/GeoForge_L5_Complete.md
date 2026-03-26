@@ -1,4 +1,4 @@
-# GeoForge 架构设计 — L5 扩展层完整接口定义
+# GIS-Forge 架构设计 — L5 扩展层完整接口定义
 
 > **定位**：L5 是引擎与社区/用户之间的契约层。所有外部扩展通过 6 个扩展点（EP1~EP6）接入引擎。
 > **核心原则**：接口即契约（stable 后不 breaking change）、Context 注入（不暴露内部模块）、
@@ -20,10 +20,10 @@ import type {
   Vec3f, Mat4f, BBox2D,
   Viewport, CameraState, PickResult, Feature,
   FilterExpression,
-} from '@geoforge/core';
+} from '@gis-forge/core';
 
-import type { CameraController } from '@geoforge/runtime';
-import type { Layer } from '@geoforge/scene';
+import type { CameraController } from '@gis-forge/runtime';
+import type { Layer } from '@gis-forge/scene';
 ```
 
 ---

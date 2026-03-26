@@ -1,4 +1,4 @@
-// GeoForge — fragment template (assembled by ShaderAssembler)
+// GIS-Forge — fragment template (assembled by ShaderAssembler)
 struct PerFrameUniforms {
   viewMatrix: mat4x4<f32>,
   projectionMatrix: mat4x4<f32>,

@@ -1,4 +1,4 @@
-# GeoForge 瓦片 Overzoom 解决方案 v2
+# GIS-Forge 瓦片 Overzoom 解决方案 v2
 
 > 针对 18 个开源引擎 Issue 的完整解决方案
 > 与 Tile Solutions v2 统一接口，直接集成

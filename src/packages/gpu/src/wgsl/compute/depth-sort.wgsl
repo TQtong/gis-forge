@@ -1,4 +1,4 @@
-// GeoForge — depth key sort placeholder (identity on values; entry cs_main)
+// GIS-Forge — depth key sort placeholder (identity on values; entry cs_main)
 @group(0) @binding(0) var<storage, read> depthKeys: array<f32>;
 @group(0) @binding(1) var<storage, read_write> values: array<u32>;
 

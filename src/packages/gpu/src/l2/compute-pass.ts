@@ -1,5 +1,5 @@
 // ============================================================
-// l2/compute-pass.ts — ComputePassManager（GeoForge L2）
+// l2/compute-pass.ts — ComputePassManager（GIS-Forge L2）
 // 层级：L2（渲染层）
 // 职责：封装内置计算任务（视锥剔除、深度排序、标注碰撞、点聚类、地形细分）
 //       的管线与 BindGroup 构建；按依赖拓扑排序后编码 compute pass。
@@ -348,7 +348,7 @@ export function createComputePassManager(device: GPUDevice, pipelineCache: Pipel
 
       let pipeline: GPUComputePipeline;
       try {
-        pipeline = pipelineCache.getOrCreateCompute(BUILTIN_WGSL_FRUSTUM_CULL, 'geoforge-frustum-cull');
+        pipeline = pipelineCache.getOrCreateCompute(BUILTIN_WGSL_FRUSTUM_CULL, 'gis-forge-frustum-cull');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`createFrustumCullTask: pipeline creation failed: ${msg}`);
@@ -422,7 +422,7 @@ export function createComputePassManager(device: GPUDevice, pipelineCache: Pipel
 
       let pipeline: GPUComputePipeline;
       try {
-        pipeline = pipelineCache.getOrCreateCompute(BUILTIN_WGSL_RADIX_SORT, 'geoforge-depth-sort');
+        pipeline = pipelineCache.getOrCreateCompute(BUILTIN_WGSL_RADIX_SORT, 'gis-forge-depth-sort');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`createDepthSortTask: pipeline creation failed: ${msg}`);
@@ -491,7 +491,7 @@ export function createComputePassManager(device: GPUDevice, pipelineCache: Pipel
 
       let pipeline: GPUComputePipeline;
       try {
-        pipeline = pipelineCache.getOrCreateCompute(wgsl, 'geoforge-label-collision');
+        pipeline = pipelineCache.getOrCreateCompute(wgsl, 'gis-forge-label-collision');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`createLabelCollisionTask: pipeline creation failed: ${msg}`);
@@ -563,7 +563,7 @@ export function createComputePassManager(device: GPUDevice, pipelineCache: Pipel
 
       let pipeline: GPUComputePipeline;
       try {
-        pipeline = pipelineCache.getOrCreateCompute(wgsl, 'geoforge-point-cluster');
+        pipeline = pipelineCache.getOrCreateCompute(wgsl, 'gis-forge-point-cluster');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`createPointClusterTask: pipeline creation failed: ${msg}`);

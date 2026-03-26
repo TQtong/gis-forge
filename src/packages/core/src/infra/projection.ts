@@ -1,6 +1,6 @@
 // ============================================================
 // infra/projection.ts — 投影模块接口定义
-// 定义 GeoForge 引擎的投影插件接口 (ProjectionDef) 和瓦片网格定义。
+// 定义 GIS-Forge 引擎的投影插件接口 (ProjectionDef) 和瓦片网格定义。
 // 这些接口由 L5 扩展层的 CustomProjection (EP2) 实现，
 // 由 L2 ShaderAssembler 的投影 WGSL 模块使用。
 // 零外部依赖。
@@ -51,7 +51,7 @@ export interface TileGridDefinition {
 
 /**
  * 投影模块定义接口。
- * GeoForge 的每种投影（墨卡托、等距圆柱、球面等）都实现此接口。
+ * GIS-Forge 的每种投影（墨卡托、等距圆柱、球面等）都实现此接口。
  * 接口包含投影的数学参数和 GPU 端使用的 WGSL 代码。
  *
  * 通过 L5 的 ExtensionPoint EP2 (CustomProjection) 注册自定义投影。

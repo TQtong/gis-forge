@@ -1,7 +1,7 @@
 // ============================================================
 // compat-mobile/index.ts — 移动端兼容包桶文件（Barrel Export）
 // 重新导出 MobileOptimizer 及所有相关类型，
-// 上层通过 `import { MobileOptimizer, ... } from '@geoforge/compat-mobile';` 使用。
+// 上层通过 `import { MobileOptimizer, ... } from '@gis-forge/compat-mobile';` 使用。
 // ============================================================
 
 import type { MobileOptimizerOptions } from './MobileOptimizer.ts';

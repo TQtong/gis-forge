@@ -23,8 +23,8 @@
 
     "paths": {
       "@/*": ["./src/*"],
-      "@geoforge/core": ["./src/packages/core/src/index.ts"],
-      "@geoforge/core/*": ["./src/packages/core/src/*"]
+      "@gis-forge/core": ["./src/packages/core/src/index.ts"],
+      "@gis-forge/core/*": ["./src/packages/core/src/*"]
     }
   },
   "include": ["src"]

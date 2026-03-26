@@ -308,7 +308,7 @@ export class Globe3D {
         if (options.accessibleTitle) {
             this._canvas.setAttribute('aria-label', options.accessibleTitle);
         } else {
-            this._canvas.setAttribute('aria-label', 'GeoForge 3D Globe');
+            this._canvas.setAttribute('aria-label', 'GIS-Forge 3D Globe');
         }
 
         // 容器必须是定位元素，才能让 Canvas 的 100% 尺寸生效

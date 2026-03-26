@@ -1,4 +1,4 @@
-// GeoForge — label AABB collision (pixel space), tie-break: lower index wins
+// GIS-Forge — label AABB collision (pixel space), tie-break: lower index wins
 const VIEWPORT_W: f32 = {{VIEWPORT_W}};
 const VIEWPORT_H: f32 = {{VIEWPORT_H}};
 

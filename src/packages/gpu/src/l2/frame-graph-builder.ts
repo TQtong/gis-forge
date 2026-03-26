@@ -29,7 +29,7 @@ import {
 /** 场景颜色默认格式（HDR 中间缓冲常用；与后处理衔接）。 */
 const DEFAULT_SCENE_COLOR_FORMAT: GPUTextureFormat = 'rgba16float';
 
-/** 场景深度格式（GeoForge 约定 depth32float + Reversed-Z）。 */
+/** 场景深度格式（GIS-Forge 约定 depth32float + Reversed-Z）。 */
 const DEFAULT_SCENE_DEPTH_FORMAT: GPUTextureFormat = 'depth32float';
 
 /** 拾取离屏颜色格式（8-bit 足够存 color-id）。 */
@@ -483,7 +483,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
           }
         }
         // 当前帧占位：仅插入调试标记，避免空编码器在某些驱动上产生警告
-        ctx.encoder.insertDebugMarker(`geoforge:${id}:stub`);
+        ctx.encoder.insertDebugMarker(`gis-forge:${id}:stub`);
       },
     };
     this._graph.addPass(node);
@@ -514,7 +514,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
       execute: (ctx) => {
         void buf;
         void pos;
-        ctx.encoder.insertDebugMarker(`geoforge:${id}:stub`);
+        ctx.encoder.insertDebugMarker(`gis-forge:${id}:stub`);
       },
     };
     this._graph.addPass(node);
@@ -554,7 +554,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
         void boxes;
         void count;
         void vp;
-        ctx.encoder.insertDebugMarker(`geoforge:${id}:stub`);
+        ctx.encoder.insertDebugMarker(`gis-forge:${id}:stub`);
       },
     };
     this._graph.addPass(node);
@@ -596,7 +596,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
       inputs: [],
       outputs: [],
       execute: (ctx) => {
-        const cp = ctx.encoder.beginComputePass({ label: `geoforge:${pid}` });
+        const cp = ctx.encoder.beginComputePass({ label: `gis-forge:${pid}` });
         try {
           cp.setPipeline(pipeline);
           for (let i = 0; i < bindGroups.length; i++) {
@@ -667,7 +667,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
         const depthView = ctx.getTextureView(depthName);
         const cc = explicitClear ?? graphImpl.getClearColor();
         const pass = ctx.encoder.beginRenderPass({
-          label: `geoforge:scene:${sid}`,
+          label: `gis-forge:scene:${sid}`,
           colorAttachments: [
             {
               view: colorView,
@@ -777,7 +777,7 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
         const view = ctx.getTextureView(SWAPCHAIN_TEXTURE_NAME);
         const cc = graphImpl.getClearColor();
         const pass = ctx.encoder.beginRenderPass({
-          label: `geoforge:screen:${id}`,
+          label: `gis-forge:screen:${id}`,
           colorAttachments: [
             {
               view,
@@ -841,11 +841,11 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
           Number.isFinite(px) ? Math.floor(px as number) : Math.floor(vp.width * DEFAULT_PICK_CENTER);
         const iy =
           Number.isFinite(py) ? Math.floor(py as number) : Math.floor(vp.height * DEFAULT_PICK_CENTER);
-        ctx.encoder.insertDebugMarker(`geoforge:picking:${id}:pixel=${ix},${iy}`);
+        ctx.encoder.insertDebugMarker(`gis-forge:picking:${id}:pixel=${ix},${iy}`);
         const colorView = ctx.getTextureView(colorName);
         const depthView = ctx.getTextureView(depthName);
         const pass = ctx.encoder.beginRenderPass({
-          label: `geoforge:picking:${id}`,
+          label: `gis-forge:picking:${id}`,
           colorAttachments: [
             {
               view: colorView,

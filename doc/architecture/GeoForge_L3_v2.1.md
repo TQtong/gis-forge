@@ -1,7 +1,7 @@
-# GeoForge 架构设计 — L3 调度层完整接口定义（v2.1）
+# GIS-Forge 架构设计 — L3 调度层完整接口定义（v2.1）
 
 > **定位**：L3 管理引擎的"时间维度"——帧循环、瓦片调度、Worker 任务、网络限流、内存预算、错误恢复。
-> **包名**：@geoforge/runtime
+> **包名**：@gis-forge/runtime
 > **模块数**：7 + **新增 CameraController 模块 + 3 个相机实现包接口**
 >
 > **v2.1 修订**：
@@ -15,7 +15,7 @@
 ## 类型依赖声明
 
 ```typescript
-import type { Vec3f, Mat4f, Quatf, BBox2D, Viewport, CameraState } from '@geoforge/core';
+import type { Vec3f, Mat4f, Quatf, BBox2D, Viewport, CameraState } from '@gis-forge/core';
 ```
 
 ---
@@ -32,10 +32,10 @@ import type { Vec3f, Mat4f, Quatf, BBox2D, Viewport, CameraState } from '@geofor
 | 6 | RequestScheduler | `request-scheduler.ts` | 不变 |
 | 7 | ErrorRecovery | `error-recovery.ts` | 不变 |
 | 8 | **CameraController** | `camera-controller.ts` | **新增** |
-| 9 | **Camera2D** | `camera-2d.ts` | **新增**（可选包 @geoforge/camera-2d）|
-| 10 | **Camera25D** | `camera-25d.ts` | **新增**（可选包 @geoforge/camera-25d）|
-| 11 | **Camera3D** | `camera-3d.ts` | **新增**（可选包 @geoforge/camera-3d）|
-| 12 | **ViewMorph** | `view-morph.ts` | **新增**（可选包 @geoforge/view-morph）|
+| 9 | **Camera2D** | `camera-2d.ts` | **新增**（可选包 @gis-forge/camera-2d）|
+| 10 | **Camera25D** | `camera-25d.ts` | **新增**（可选包 @gis-forge/camera-25d）|
+| 11 | **Camera3D** | `camera-3d.ts` | **新增**（可选包 @gis-forge/camera-3d）|
+| 12 | **ViewMorph** | `view-morph.ts` | **新增**（可选包 @gis-forge/view-morph）|
 
 ---
 
@@ -43,7 +43,7 @@ import type { Vec3f, Mat4f, Quatf, BBox2D, Viewport, CameraState } from '@geofor
 
 FrameScheduler、ResourceManager、MemoryBudget、RequestScheduler、ErrorRecovery 与 v2.0 完全相同。
 
-TileScheduler 仅删除本地 `CameraState` / `Viewport` 定义，改为从 `@geoforge/core` import（接口方法不变）。
+TileScheduler 仅删除本地 `CameraState` / `Viewport` 定义，改为从 `@gis-forge/core` import（接口方法不变）。
 
 WorkerPool 的 `WorkerTaskType` 更新如下：
 
@@ -178,7 +178,7 @@ export interface CameraAnimation {
 ```typescript
 // ============================================================
 // camera-2d.ts — 2D 正交相机实现规格
-// 包名：@geoforge/camera-2d
+// 包名：@gis-forge/camera-2d
 // 解决问题：#7.2 惯性动画
 // ============================================================
 
@@ -210,7 +210,7 @@ export interface Camera2DOptions {
 ```typescript
 // ============================================================
 // camera-25d.ts — 2.5D 透视相机实现规格
-// 包名：@geoforge/camera-25d
+// 包名：@gis-forge/camera-25d
 // 解决问题：#7.2 惯性动画
 // ============================================================
 
@@ -238,7 +238,7 @@ export interface Camera25DOptions extends Camera2DOptions {
 ```typescript
 // ============================================================
 // camera-3d.ts — 3D 地球轨道相机实现规格
-// 包名：@geoforge/camera-3d
+// 包名：@gis-forge/camera-3d
 // 解决问题：#7.1 地形碰撞、#7.2 惯性动画
 // ============================================================
 
@@ -298,7 +298,7 @@ export interface Camera3D extends CameraController {
 ```typescript
 // ============================================================
 // view-morph.ts — 2D ↔ 2.5D ↔ 3D 视图过渡动画
-// 包名：@geoforge/view-morph
+// 包名：@gis-forge/view-morph
 // 解决问题：#7.3 视图过渡
 // ============================================================
 

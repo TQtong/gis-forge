@@ -1,4 +1,4 @@
-// GeoForge — frustum cull compute
+// GIS-Forge — frustum cull compute
 struct FrustumCullParams {
   plane0: vec4<f32>,
   plane1: vec4<f32>,

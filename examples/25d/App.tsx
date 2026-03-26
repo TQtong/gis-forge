@@ -79,7 +79,7 @@ export function App(): React.ReactElement {
                 pitch: 45,
                 bearing: 0,
                 maxPitch: 85,
-                accessibleTitle: 'GeoForge 2.5D 地图',
+                accessibleTitle: 'GIS-Forge 2.5D 地图',
             });
 
             setEngineSteps((prev) => {

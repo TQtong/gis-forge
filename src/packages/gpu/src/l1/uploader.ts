@@ -361,7 +361,7 @@ export function createGPUUploader(
 
     // 全屏三角形 + 纹理采样的 WGSL shader
     mipmapShaderModule = gpuDevice.createShaderModule({
-      label: 'geoforge-mipmap-generator',
+      label: 'gis-forge-mipmap-generator',
       code: mipmapGenWgsl,
     });
 
@@ -378,7 +378,7 @@ export function createGPUUploader(
     const shaderModule = getMipmapShaderModule();
 
     const pipeline = gpuDevice.createRenderPipeline({
-      label: `geoforge-mipmap-pipeline-${format}`,
+      label: `gis-forge-mipmap-pipeline-${format}`,
       layout: 'auto',
       vertex: {
         module: shaderModule,
@@ -406,7 +406,7 @@ export function createGPUUploader(
     if (mipmapSampler) return mipmapSampler;
 
     mipmapSampler = gpuDevice.createSampler({
-      label: 'geoforge-mipmap-sampler',
+      label: 'gis-forge-mipmap-sampler',
       magFilter: 'linear',
       minFilter: 'linear',
     });
@@ -514,7 +514,7 @@ export function createGPUUploader(
     const handle = bufferPool.acquire(
       MAT4_BYTE_SIZE,
       GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      label ?? 'geoforge-mat4-uniform'
+      label ?? 'gis-forge-mat4-uniform'
     );
 
     // 写入矩阵数据
@@ -599,13 +599,13 @@ export function createGPUUploader(
     const highBuffer = uploadBuffer(
       highData,
       GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      label ? `${label}-high` : 'geoforge-split-double-high'
+      label ? `${label}-high` : 'gis-forge-split-double-high'
     );
 
     const lowBuffer = uploadBuffer(
       lowData,
       GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      label ? `${label}-low` : 'geoforge-split-double-low'
+      label ? `${label}-low` : 'gis-forge-split-double-low'
     );
 
     return { highBuffer, lowBuffer };
@@ -639,7 +639,7 @@ export function createGPUUploader(
     // 通过 TextureManager 创建纹理
     const handle = textureMgr.create(
       {
-        label: options?.label ?? 'geoforge-uploaded-texture',
+        label: options?.label ?? 'gis-forge-uploaded-texture',
         size: { width, height },
         format,
         mipLevelCount,
@@ -710,7 +710,7 @@ export function createGPUUploader(
     // 创建纹理
     const handle = textureMgr.create(
       {
-        label: options?.label ?? 'geoforge-buffer-texture',
+        label: options?.label ?? 'gis-forge-buffer-texture',
         size: { width, height },
         format,
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
@@ -758,7 +758,7 @@ export function createGPUUploader(
     const sampler = getMipmapSampler();
 
     const encoder = gpuDevice.createCommandEncoder({
-      label: 'geoforge-mipmap-encoder',
+      label: 'gis-forge-mipmap-encoder',
     });
 
     // 计算 mip 级别数
@@ -827,7 +827,7 @@ export function createGPUUploader(
     }
 
     // 直接调用 uploadBuffer——ArrayBuffer 从 Worker 传来已是零拷贝
-    return uploadBuffer(data, usage, label ?? 'geoforge-transferable');
+    return uploadBuffer(data, usage, label ?? 'gis-forge-transferable');
   }
 
   /**
@@ -854,14 +854,14 @@ export function createGPUUploader(
 
     // 创建 MAP_READ staging buffer
     const stagingBuffer = gpuDevice.createBuffer({
-      label: 'geoforge-readback-staging',
+      label: 'gis-forge-readback-staging',
       size: readSize,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
 
     // 编码拷贝命令：源 buffer → staging buffer
     const encoder = gpuDevice.createCommandEncoder({
-      label: 'geoforge-readback-encoder',
+      label: 'gis-forge-readback-encoder',
     });
     encoder.copyBufferToBuffer(handle.buffer, offset, stagingBuffer, 0, readSize);
     gpuDevice.queue.submit([encoder.finish()]);
@@ -905,14 +905,14 @@ export function createGPUUploader(
 
     // 创建 MAP_READ staging buffer
     const stagingBuffer = gpuDevice.createBuffer({
-      label: 'geoforge-readback-texture-staging',
+      label: 'gis-forge-readback-texture-staging',
       size: totalSize,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
 
     // 编码纹理→buffer 拷贝
     const encoder = gpuDevice.createCommandEncoder({
-      label: 'geoforge-readback-texture-encoder',
+      label: 'gis-forge-readback-texture-encoder',
     });
 
     encoder.copyTextureToBuffer(

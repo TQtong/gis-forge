@@ -1,4 +1,4 @@
-// GeoForge — depth sort placeholder (identity permutation)
+// GIS-Forge — depth sort placeholder (identity permutation)
 struct DepthSortParams {
   elementCount: u32,
   _pad: vec3<u32>,

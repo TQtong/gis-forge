@@ -5,7 +5,7 @@
 //       与线性化 WGSL 函数片段，供 ShaderAssembler 注入。
 //
 // 设计要点：
-// - GeoForge 默认 Reversed-Z：clear 0.0、depthCompare「greater」
+// - GIS-Forge 默认 Reversed-Z：clear 0.0、depthCompare「greater」
 // - 深度纹理由本模块直接 device.createTexture（特殊格式，不经 TextureManager）
 // - 返回 TextureHandle 与 L1 类型对齐，便于 BindGroup / 调试标签一致
 // ============================================================
@@ -40,7 +40,7 @@ const EPS = 1.0e-6;
  * 供 FrameGraph、Compositor 与管线状态读取。
  */
 export interface DepthConfig {
-  /** 是否使用 Reversed-Z（GeoForge 默认真；为 false 时回退传统 Z）。 */
+  /** 是否使用 Reversed-Z（GIS-Forge 默认真；为 false 时回退传统 Z）。 */
   readonly useReversedZ: boolean;
 
   /** 是否启用对数深度（大场景 3D 建议开启，减轻 Z-fighting）。 */
@@ -52,7 +52,7 @@ export interface DepthConfig {
   /** 远裁剪面距离（视图空间正数，必须大于 nearPlane）。 */
   readonly farPlane: number;
 
-  /** 深度附件格式；GeoForge 固定为 depth32float。 */
+  /** 深度附件格式；GIS-Forge 固定为 depth32float。 */
   readonly depthFormat: GPUTextureFormat;
 }
 
@@ -271,7 +271,7 @@ function createDepthManagerImpl(
       // 先校验尺寸，避免在 GPU 驱动层得到晦涩错误
       assertTextureDimensions(device, width, height);
 
-      const label = `GeoForge.depth.${uniqueId('depth')}`;
+      const label = `GIS-Forge.depth.${uniqueId('depth')}`;
       let texture: GPUTexture;
       try {
         // depth32float 仅用于深度附件；保留 TEXTURE_BINDING 以便后续拷贝/调试采样

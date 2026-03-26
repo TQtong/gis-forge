@@ -75,7 +75,7 @@ export function App(): React.ReactElement {
                 container: el,
                 center: [116.3974, 39.9093],
                 zoom: 10,
-                accessibleTitle: 'GeoForge 二维地图',
+                accessibleTitle: 'GIS-Forge 二维地图',
             });
 
             setEngineSteps((prev) => {

@@ -1,4 +1,4 @@
-# GeoForge 架构设计 — L2 渲染层完整接口定义（v2.2 自包含版）
+# GIS-Forge 架构设计 — L2 渲染层完整接口定义（v2.2 自包含版）
 
 > **定位**：L2 是引擎的渲染核心——ShaderAssembler、RenderGraph、Compositor。
 > **模块数**：12 + 1 构建器（FrameGraphBuilder）= 13
@@ -11,9 +11,9 @@
 ## 类型依赖声明
 
 ```typescript
-import type { Vec3f, Mat4f, BBox2D, Viewport, CameraState, PickResult } from '@geoforge/core';
-import type { Layer } from '@geoforge/scene';
-import type { BufferHandle, TextureHandle, SurfaceConfig } from '@geoforge/gpu/l1';
+import type { Vec3f, Mat4f, BBox2D, Viewport, CameraState, PickResult } from '@gis-forge/core';
+import type { Layer } from '@gis-forge/scene';
+import type { BufferHandle, TextureHandle, SurfaceConfig } from '@gis-forge/gpu/l1';
 ```
 
 ---

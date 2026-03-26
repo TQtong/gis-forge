@@ -1,7 +1,7 @@
 // ============================================================
-// @geoforge/preset-2d — AttributionControl 工厂模块
+// @gis-forge/preset-2d — AttributionControl 工厂模块
 // 提供 createAttributionControl 工厂函数，返回版权归属控件。
-// 显示自定义归属文案或默认 '© GeoForge'。
+// 显示自定义归属文案或默认 '© GIS-Forge'。
 // ============================================================
 
 import type { ControlPosition, IControl, Map2D } from '../map-2d.ts';
@@ -9,7 +9,7 @@ import type { ControlPosition, IControl, Map2D } from '../map-2d.ts';
 // ===================== 常量 =====================
 
 /** 默认归属文案。 */
-const DEFAULT_ATTRIBUTION = '\u00A9 GeoForge';
+const DEFAULT_ATTRIBUTION = '\u00A9 GIS-Forge';
 
 /** 默认停靠位置。 */
 const DEFAULT_POSITION: ControlPosition = 'bottom-right';
@@ -29,7 +29,7 @@ export interface AttributionControlOptions {
     /** 是否使用紧凑模式（减小字号），默认 false。 */
     readonly compact?: boolean;
 
-    /** 自定义归属文案（HTML 或纯文本），默认 '© GeoForge'。 */
+    /** 自定义归属文案（HTML 或纯文本），默认 '© GIS-Forge'。 */
     readonly customAttribution?: string;
 
     /** 初始停靠角位置，默认 'bottom-right'。 */

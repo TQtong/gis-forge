@@ -6,7 +6,7 @@
 //
 // 设计要点：
 // - 模板纹理与 depth-only 的 depth32float 分离（本模块仅 D24S8）
-// - 预设与 GeoForge Reversed-Z（depthCompare greater）对齐
+// - 预设与 GIS-Forge Reversed-Z（depthCompare greater）对齐
 // - setStencilReference 在 Pass 内由调用方设置，与预设配合使用
 // ============================================================
 
@@ -100,7 +100,7 @@ function assertStencilDimensions(device: GPUDevice, width: number, height: numbe
 }
 
 /**
- * 构建与 GeoForge Reversed-Z 一致的模板正面/背面状态（对称）。
+ * 构建与 GIS-Forge Reversed-Z 一致的模板正面/背面状态（对称）。
  *
  * @param compare - 模板比较函数
  * @param passOp - 通过深度+模板测试时的操作
@@ -295,7 +295,7 @@ export function createStencilManager(device: GPUDevice): StencilManager {
         cachedTexture = null;
       }
 
-      const label = `GeoForge.stencil.${width}x${height}`;
+      const label = `GIS-Forge.stencil.${width}x${height}`;
       let texture: GPUTexture;
       try {
         texture = device.createTexture({

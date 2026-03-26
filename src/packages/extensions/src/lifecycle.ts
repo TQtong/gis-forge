@@ -169,7 +169,7 @@ export interface ExtensionLifecycle {
 }
 
 /**
- * 当前引擎版本（与 GeoForge 发布版本对齐；无 npm 读取 package.json）。
+ * 当前引擎版本（与 GIS-Forge 发布版本对齐；无 npm 读取 package.json）。
  */
 const ENGINE_VERSION = '0.1.0';
 

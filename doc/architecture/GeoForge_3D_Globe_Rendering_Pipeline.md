@@ -1,4 +1,4 @@
-# GeoForge 3D Globe 渲染管线完整实现设计 v2
+# GIS-Forge 3D Globe 渲染管线完整实现设计 v2
 
 > 基于 CesiumJS / MapLibre Globe 架构
 > 与 2.5D Pipeline v2 共享 WebGPU 管线
@@ -955,11 +955,11 @@ function onFrame3D(state: MapState, device: GPUDevice, res: RenderResources3D) {
 ### 新增包
 
 ```
-@geoforge/wgs84               → 椭球体常量 + 坐标转换
-@geoforge/camera-3d            → computeCamera3D + screenToGlobe
-@geoforge/globe-tessellation   → tessellateGlobeTile + meshToRTE + 极地处理
-@geoforge/globe-culling        → coveringTilesGlobe + horizon + frustum cull
-@geoforge/atmosphere           → sky dome + atmosphere halo
-@geoforge/morph                → 2D↔3D morph + 归一化坐标
-@geoforge/log-depth            → 对数深度 uniform 计算 + WGSL 函数
+@gis-forge/wgs84               → 椭球体常量 + 坐标转换
+@gis-forge/camera-3d            → computeCamera3D + screenToGlobe
+@gis-forge/globe-tessellation   → tessellateGlobeTile + meshToRTE + 极地处理
+@gis-forge/globe-culling        → coveringTilesGlobe + horizon + frustum cull
+@gis-forge/atmosphere           → sky dome + atmosphere halo
+@gis-forge/morph                → 2D↔3D morph + 归一化坐标
+@gis-forge/log-depth            → 对数深度 uniform 计算 + WGSL 函数
 ```

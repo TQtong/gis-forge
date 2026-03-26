@@ -1,5 +1,5 @@
 // ============================================================
-// @geoforge/preset-2d — GeolocateControl 工厂模块
+// @gis-forge/preset-2d — GeolocateControl 工厂模块
 // 提供 createGeolocateControl 工厂函数，使用浏览器 Geolocation API
 // 获取用户位置并飞行到该位置。支持一次性定位与持续跟踪模式。
 // ============================================================

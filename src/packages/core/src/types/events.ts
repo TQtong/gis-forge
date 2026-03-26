@@ -12,7 +12,7 @@ import type { PickResult } from './viewport.ts';
 
 /**
  * 地图事件类型字符串枚举。
- * 涵盖所有 GeoForge 地图实例可触发的事件，分为以下类别：
+ * 涵盖所有 GIS-Forge 地图实例可触发的事件，分为以下类别：
  *
  * **指针交互事件**：click, dblclick, contextmenu, mousedown/up/move, mouseenter/leave,
  *   touchstart/end/move, wheel
@@ -322,7 +322,7 @@ export interface AnimationOptions {
 
 /**
  * 日志级别。
- * 控制 GeoForge 内部日志的输出粒度，由 Logger 模块使用。
+ * 控制 GIS-Forge 内部日志的输出粒度，由 Logger 模块使用。
  * 级别从低到高（详细到精简）：
  *
  * - `'debug'`: 调试信息（帧率、瓦片加载详情、管线创建等）

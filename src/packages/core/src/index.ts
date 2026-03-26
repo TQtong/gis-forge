@@ -1,8 +1,8 @@
 // ============================================================
-// @geoforge/core — L0 基础层包入口
+// @gis-forge/core — L0 基础层包入口
 // 统一导出所有子模块的公共 API，上层通过以下方式导入：
-//   import { vec3, mat4, bbox, ... } from '@geoforge/core';
-//   import type { Feature, Viewport, ... } from '@geoforge/core';
+//   import { vec3, mat4, bbox, ... } from '@gis-forge/core';
+//   import type { Feature, Viewport, ... } from '@gis-forge/core';
 //
 // 子模块分类：
 //   - types/    — 全局共享类型定义（纯 TS 类型，编译后擦除）

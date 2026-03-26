@@ -3,7 +3,7 @@
  * @description L0 地理计算模块统一入口——重导出 WGS84 椭球体、Mercator 投影、
  * 大地测量（Vincenty/Haversine/方位角/中点/最近线上点）的全部公共 API。
  *
- * 上层模块通过 `import { ... } from '@geoforge/core/geo'` 一站式引入。
+ * 上层模块通过 `import { ... } from '@gis-forge/core/geo'` 一站式引入。
  */
 
 // ============================================================

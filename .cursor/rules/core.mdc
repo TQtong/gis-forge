@@ -1,12 +1,12 @@
 ---
-description: GeoForge 引擎全局规则——架构、依赖方向、14 条硬约束、帧循环、数据流。每次对话必须加载。
+description: GIS-Forge 引擎全局规则——架构、依赖方向、14 条硬约束、帧循环、数据流。每次对话必须加载。
 alwaysApply: true
 ---
 
-# GeoForge 核心规则
+# GIS-Forge 核心规则
 
 ## 项目
-GeoForge：统一 2D/2.5D/3D 纯 WebGPU GIS 引擎。零 npm 依赖，所有算法自研。
+GIS-Forge：统一 2D/2.5D/3D 纯 WebGPU GIS 引擎。零 npm 依赖，所有算法自研。
 
 # ⛔ 渲染技术栈硬性约束（最高优先级，违反即错误）
 
@@ -192,7 +192,7 @@ Shader=模块组合+Variant缓存 | CPU-GPU=流水线并行(N+1/N) | 混合=多P
 引用计数=0 → LRU → 不可见瓦片 → 远处瓦片 → 类型(纹理>Buffer>Pipeline)
 
 ## 可选分析包
-`@geoforge/analysis`（9 子模块）：boolean（交/并/差）/ buffer（缓冲区）/ interpolation（TIN/IDW/等值线）/ classification（Jenks/分位数）/ grid（Hex/Voronoi）/ raster（坡度/山影/视域）/ transform / aggregation / topology
+`@gis-forge/analysis`（9 子模块）：boolean（交/并/差）/ buffer（缓冲区）/ interpolation（TIN/IDW/等值线）/ classification（Jenks/分位数）/ grid（Hex/Voronoi）/ raster（坡度/山影/视域）/ transform / aggregation / topology
 
 ## 移动端
 `compat-mobile` 包：能力检测→降质策略→激进 LOD→`powerPreference:'high-performance'`→降渲染分辨率→减后处理 Pass

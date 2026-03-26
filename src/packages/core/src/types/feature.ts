@@ -15,7 +15,7 @@ import type { TileCoord } from './tile.ts';
  * GeoJSON Feature（RFC 7946 §3.2）。
  * 表示一个带有几何形状和属性的地理要素。
  *
- * 除标准 GeoJSON 字段外，GeoForge 引擎在运行时会附加以 `_` 前缀的内部字段，
+ * 除标准 GeoJSON 字段外，GIS-Forge 引擎在运行时会附加以 `_` 前缀的内部字段，
  * 用于跟踪要素的来源、归属和状态。这些字段不会序列化到 GeoJSON 输出中。
  *
  * @typeParam G - 几何类型约束，默认为 Geometry 联合类型。
@@ -55,7 +55,7 @@ export interface Feature<
    * 要素的几何形状。
    * 描述要素在地理空间中的位置和形状。
    * 可以是 Point、LineString、Polygon 等任意 Geometry 类型。
-   * RFC 7946 允许 null（无几何的属性要素），但 GeoForge 渲染管线
+   * RFC 7946 允许 null（无几何的属性要素），但 GIS-Forge 渲染管线
    * 会跳过 geometry 为 null 的要素。
    */
   readonly geometry: G;
@@ -64,12 +64,12 @@ export interface Feature<
    * 要素的属性集合。
    * 包含非几何的业务数据（如名称、人口、类别等）。
    * StyleEngine 通过 `['get', 'propertyName']` 表达式访问这些属性。
-   * RFC 7946 允许 null，但 GeoForge 内部始终保证为对象（至少为空对象 `{}`）。
+   * RFC 7946 允许 null，但 GIS-Forge 内部始终保证为对象（至少为空对象 `{}`）。
    */
   readonly properties: P;
 
   // ===================== 引擎运行时附加字段 =====================
-  // 以下字段为 GeoForge 引擎内部使用，不属于 GeoJSON 标准。
+  // 以下字段为 GIS-Forge 引擎内部使用，不属于 GeoJSON 标准。
   // 由引擎在数据加载/查询过程中自动填充，用户无需手动设置。
 
   /**

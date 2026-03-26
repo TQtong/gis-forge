@@ -1,10 +1,10 @@
-# GeoForge 架构设计 — L1 GPU 层完整接口定义
+# GIS-Forge 架构设计 — L1 GPU 层完整接口定义
 
 > **定位**：L1 是引擎与 WebGPU API 之间的封装层。上层（L2~L6）不直接调用 WebGPU 原生 API，而是通过 L1 的接口操作 GPU 资源。
 > **设计原则**：薄封装（不过度抽象）、资源生命周期可控、内存预算约束、与 L0 TypedArray 零拷贝对接。
 > **模块数**：8 个（原有 5 个 + 新增 3 个）
 >
-> **v2.1 修订**：修复 SurfaceConfig 缺失 sampleCount（审计不一致 #8）；所有 Viewport/CameraState/PickResult 引用统一来自 `@geoforge/core/types`。
+> **v2.1 修订**：修复 SurfaceConfig 缺失 sampleCount（审计不一致 #8）；所有 Viewport/CameraState/PickResult 引用统一来自 `@gis-forge/core/types`。
 
 ---
 
@@ -16,7 +16,7 @@ import type {
   Vec3f, Vec3d, Mat4f, Mat4d, Vec2f, BBox2D,
   Viewport, CameraState, PickResult,
   TileCoord, TileData, TileParams,
-} from '@geoforge/core';
+} from '@gis-forge/core';
 ```
 
 ---
@@ -213,7 +213,7 @@ export interface SamplerCache {
 // 连接 L0 (CPU 数据) 和 L1 (GPU 资源) 的桥梁
 // ============================================================
 
-import type { Vec3f, Vec3d, Mat4f, Mat4d, Vec2f } from '@geoforge/core';
+import type { Vec3f, Vec3d, Mat4f, Mat4d, Vec2f } from '@gis-forge/core';
 
 export interface GPUUploader {
   // === 基础上传 ===
@@ -445,4 +445,4 @@ async function initializeL1(canvas: HTMLCanvasElement, config: EngineConfig) {
 | `SurfaceConfig` 新增 `sampleCount: 1 \| 4` | 不一致 #8 | L5/CustomLayerContext 引用 sampleCount 但 SurfaceConfig 未定义 |
 | `SurfaceManager` 新增 `getMSAATextureView()` | 不一致 #8 | sampleCount > 1 时需要 MSAA 纹理 |
 | `SurfaceManager` 新增 `getViewport(): Viewport` | 不一致 #7 | Viewport 类型统一来自 L0 |
-| 所有 Viewport/CameraState 引用改为从 `@geoforge/core/types` import | — | 消除跨层类型定义冲突 |
+| 所有 Viewport/CameraState 引用改为从 `@gis-forge/core/types` import | — | 消除跨层类型定义冲突 |

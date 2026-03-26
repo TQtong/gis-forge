@@ -1,4 +1,4 @@
-# GeoForge 架构设计 — L1 GPU 层完整接口定义（v2.2 自包含版）
+# GIS-Forge 架构设计 — L1 GPU 层完整接口定义（v2.2 自包含版）
 
 > **定位**：L1 是引擎与 WebGPU API 之间的封装层。上层（L2~L6）不直接调用 WebGPU 原生 API，而是通过 L1 的接口操作 GPU 资源。
 > **设计原则**：薄封装（不过度抽象）、资源生命周期可控、内存预算约束、与 L0 TypedArray 零拷贝对接。
@@ -16,8 +16,8 @@
 import type {
   Vec3f, Vec3d, Mat4f, Mat4d, Vec2f,
   BBox2D, Viewport, CameraState, PickResult,
-} from '@geoforge/core';
-import type { EngineConfig } from '@geoforge/core/infra/config';
+} from '@gis-forge/core';
+import type { EngineConfig } from '@gis-forge/core/infra/config';
 ```
 
 ---

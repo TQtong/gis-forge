@@ -28,7 +28,7 @@ const OIT_UNIFORM_SIZE = 128 as const;
 const DEFAULT_LOG_DEPTH_C = 0.1;
 
 /** 合成管线默认标签前缀（调试）。 */
-const COMPOSITOR_LABEL = 'geoforge-compositor';
+const COMPOSITOR_LABEL = 'gis-forge-compositor';
 
 // ===================== 类型 =====================
 
@@ -49,7 +49,7 @@ export interface CompositorInput {
   readonly hasTransparentContent: boolean;
   /**
    * 深度缓冲的编码空间。
-   * - `reversed-z`：GeoForge 默认，0=远、1=近。
+   * - `reversed-z`：GIS-Forge 默认，0=远、1=近。
    * - `linear`：0=近、1=远的线性深度。
    * - `logarithmic`：对数扭曲后的 Rev-Z 深度，需对数反推视距。
    */

@@ -1,4 +1,4 @@
-# GeoForge 2.5D 渲染管线完整实现设计 v2
+# GIS-Forge 2.5D 渲染管线完整实现设计 v2
 
 > Cursor 实现 2.5D 渲染的**唯一参考**。
 > 从 `{center, zoom, pitch, bearing}` 到屏幕像素的全部计算。
@@ -945,19 +945,19 @@ function onFrame(state: MapState, device: GPUDevice, resources: RenderResources)
 
 ---
 
-## 九、与 GeoForge 架构的对接
+## 九、与 GIS-Forge 架构的对接
 
-| GeoForge 模块 | 本文档对应 | 修改内容 |
+| GIS-Forge 模块 | 本文档对应 | 修改内容 |
 |---------------|-----------|---------|
-| `@geoforge/camera-25d` (P0) | §三 computeCamera25D | 替换整个矩阵计算函数 |
-| `@geoforge/camera-25d` (P0) | §三.5 screenToWorld/worldToScreen | 新增 project/unproject |
-| `@geoforge/runtime` TileScheduler (L3) | §四 coveringTiles | 替换瓦片覆盖算法 |
-| `@geoforge/runtime` TileScheduler (L3) | §四.3 extractFrustumPlanes | 新增 frustum cull |
-| `@geoforge/layer-tile-raster` (P0) | §五 Pipeline + Shader | 替换 WGSL + Pipeline 创建 |
-| `@geoforge/renderer` RenderGraph (L2) | §五.4 renderFrame | 批量顶点 + Pass 配置 |
-| `@geoforge/renderer` DepthManager (L2) | §五.1 depthStencil | 标准 Z + depth24plus |
-| `@geoforge/runtime` TileCache (L3) | §六 getPlaceholderTile | 父瓦片占位逻辑 |
-| `@geoforge/scene` InteractionManager (L5) | §七 onFrame | state → camera → render 循环 |
+| `@gis-forge/camera-25d` (P0) | §三 computeCamera25D | 替换整个矩阵计算函数 |
+| `@gis-forge/camera-25d` (P0) | §三.5 screenToWorld/worldToScreen | 新增 project/unproject |
+| `@gis-forge/runtime` TileScheduler (L3) | §四 coveringTiles | 替换瓦片覆盖算法 |
+| `@gis-forge/runtime` TileScheduler (L3) | §四.3 extractFrustumPlanes | 新增 frustum cull |
+| `@gis-forge/layer-tile-raster` (P0) | §五 Pipeline + Shader | 替换 WGSL + Pipeline 创建 |
+| `@gis-forge/renderer` RenderGraph (L2) | §五.4 renderFrame | 批量顶点 + Pass 配置 |
+| `@gis-forge/renderer` DepthManager (L2) | §五.1 depthStencil | 标准 Z + depth24plus |
+| `@gis-forge/runtime` TileCache (L3) | §六 getPlaceholderTile | 父瓦片占位逻辑 |
+| `@gis-forge/scene` InteractionManager (L5) | §七 onFrame | state → camera → render 循环 |
 
 ### 不用 Reversed-Z 的理由
 

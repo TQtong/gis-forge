@@ -1,10 +1,10 @@
-# GeoForge 可选功能包完整接口设计 — P2 增强包（上）
+# GIS-Forge 可选功能包完整接口设计 — P2 增强包（上）
 
 > layer-heatmap / layer-pointcloud / layer-marker / layer-extrusion / interaction-draw / interaction-measure / interaction-select
 
 ---
 
-## 1. @geoforge/layer-heatmap
+## 1. @gis-forge/layer-heatmap
 
 ### 1.1 HeatmapLayerOptions
 
@@ -235,7 +235,7 @@ fn computeColor(input: FragmentInput) -> vec4<f32> {
 
 ---
 
-## 2. @geoforge/layer-pointcloud
+## 2. @gis-forge/layer-pointcloud
 
 ### 2.1 PointCloudLayerOptions
 
@@ -343,7 +343,7 @@ export function createPointCloudLayer(options: PointCloudLayerOptions): PointClo
 
 ---
 
-## 3. @geoforge/layer-marker
+## 3. @gis-forge/layer-marker
 
 ### 3.1 MarkerSpec
 
@@ -475,7 +475,7 @@ export function createMarkerLayer(options: MarkerLayerOptions): MarkerLayer;
 
 ---
 
-## 4. @geoforge/layer-extrusion
+## 4. @gis-forge/layer-extrusion
 
 ### 4.1 ExtrusionLayerOptions
 
@@ -623,7 +623,7 @@ fn computeColor(input: FragmentInput) -> vec4<f32> {
 
 ---
 
-## 5. @geoforge/interaction-draw
+## 5. @gis-forge/interaction-draw
 
 ### 5.1 DrawToolOptions
 
@@ -776,7 +776,7 @@ export function createDrawTool(options?: DrawToolOptions): DrawTool;
 
 ---
 
-## 6. @geoforge/interaction-measure
+## 6. @gis-forge/interaction-measure
 
 ### 6.1 MeasureToolOptions
 
@@ -886,7 +886,7 @@ export function createMeasureTool(options?: MeasureToolOptions): MeasureTool;
 
 ---
 
-## 7. @geoforge/interaction-select
+## 7. @gis-forge/interaction-select
 
 ### 7.1 SelectToolOptions
 

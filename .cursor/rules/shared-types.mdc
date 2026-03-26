@@ -8,7 +8,7 @@ alwaysApply: false
 > **提醒**：所有代码必须完整实现 + 逐行注释 + 完整类型注释 + 完整错误处理。禁止省略、骨架、TODO。详见 core.mdc。
 # 共享类型规范
 
-所有全局共享类型**只在 `@geoforge/core/types/` 定义一次**，其他包统一 import。
+所有全局共享类型**只在 `@gis-forge/core/types/` 定义一次**，其他包统一 import。
 
 ## types/viewport.ts
 ```typescript

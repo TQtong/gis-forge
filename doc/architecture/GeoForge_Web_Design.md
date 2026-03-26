@@ -1,11 +1,11 @@
-# GeoForge DevPlayground — 可视化测试界面设计
+# GIS-Forge DevPlayground — 可视化测试界面设计
 
 > 面向开发者的交互式测试/演示平台。用于逐项验证 91 个核心模块 + 27 个可选包。
 
 ---
 ## 1. 总体定位
 
-**GeoForge DevPlayground** — 一个面向开发者的交互式测试/演示平台。
+**GIS-Forge DevPlayground** — 一个面向开发者的交互式测试/演示平台。
 
 目的：
 1. **功能验证**：逐项测试 91 个核心模块 + 27 个可选包
@@ -20,7 +20,7 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ 顶部工具栏（TopBar）                                                │
-│ [Logo] GeoForge DevPlayground    [主题切换] [语言] [导出] [分享]      │
+│ [Logo] GIS-Forge DevPlayground    [主题切换] [语言] [导出] [分享]      │
 ├──────────┬───────────────────────────────────────┬───────────────────┤
 │ 左侧面板  │           地图视口区域                  │  右侧面板         │
 │ (280px)  │      （主渲染区，占满剩余空间）           │  (320px)         │
@@ -266,7 +266,7 @@
 ├────────────────────────────┤
 │ ```typescript              │
 │ import { Map } from        │
-│   '@geoforge/preset-2d';   │
+│   '@gis-forge/preset-2d';   │
 │                            │
 │ const map = new Map({      │
 │   container: 'map',        │
@@ -307,7 +307,7 @@
 │ 🟡 [WARN]  [14:32:05] MemoryBudget: GPU usage 480/512MB (94%)              │
 │ 🔴 [ERROR] [GPU_SHADER_COMPILE] custom hook syntax error line 12            │
 │            💡 建议：检查 vec3 对齐到 16 字节                                   │
-│            📖 https://geoforge.dev/docs/troubleshooting#shader-errors        │
+│            📖 https://gis-forge.dev/docs/troubleshooting#shader-errors        │
 │ 🟣 [PERF]  [14:32:06] frame 1240: update=1.2ms render=9.8ms total=11.0ms   │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -426,7 +426,7 @@
 | 树形导航 | 自定义（shadcn Accordion 基础）| 功能树交互需求简单 |
 | 图标 | Lucide React | 与 shadcn 统一风格 |
 | 分割面板 | react-resizable-panels | 面板拖动调整大小 |
-| 构建 | Vite | 与 GeoForge 引擎共享构建工具 |
+| 构建 | Vite | 与 GIS-Forge 引擎共享构建工具 |
 
 ## 9. 文件结构建议
 
@@ -445,7 +445,7 @@ playground/
 │   ├── components/
 │   │   ├── TopBar.tsx                   # 顶部工具栏
 │   │   ├── FeatureTree.tsx              # 左侧功能树
-│   │   ├── MapViewport.tsx              # 地图渲染区（GeoForge Canvas 容器）
+│   │   ├── MapViewport.tsx              # 地图渲染区（GIS-Forge Canvas 容器）
 │   │   ├── InspectorPanel.tsx           # 属性检查器
 │   │   ├── ConfigPanel.tsx              # 配置面板
 │   │   ├── CodePreview.tsx              # 代码预览

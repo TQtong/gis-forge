@@ -3,7 +3,7 @@
 // 层级：L3（运行时调度）
 // 职责：按任务类型调用 L0 算法（三角剖分/简化/索引/包含/相交等），
 //       返回结构化结果；真实 Worker 中可 `postMessage` 包装本模块输出。
-// 零 npm 依赖；算法全部来自 `@geoforge/core`。
+// 零 npm 依赖；算法全部来自 `@gis-forge/core`。
 // ============================================================
 
 import {
@@ -20,10 +20,10 @@ import {
   splitDouble,
   splitDoubleArray,
   visvalingam,
-} from '@geoforge/core';
+} from '@gis-forge/core';
 
-import type { BBox2D } from '@geoforge/core';
-import type { RTreeItem } from '@geoforge/core';
+import type { BBox2D } from '@gis-forge/core';
+import type { RTreeItem } from '@gis-forge/core';
 
 // ---------------------------------------------------------------------------
 // 消息协议（与 WorkerPool 提交的 `WorkerTask` 语义对齐）

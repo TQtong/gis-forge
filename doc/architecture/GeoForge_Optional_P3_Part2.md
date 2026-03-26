@@ -1,10 +1,10 @@
-# GeoForge 可选功能包完整接口设计 — P3 生态包（下）
+# GIS-Forge 可选功能包完整接口设计 — P3 生态包（下）
 
 > compat-mobile / compat-hidpi / analysis（9 子模块）
 
 ---
 
-## 5. @geoforge/compat-mobile
+## 5. @gis-forge/compat-mobile
 
 ### 5.1 MobileOptimizerOptions
 
@@ -216,7 +216,7 @@ export function createMobileOptimizer(options?: MobileOptimizerOptions): MobileO
 
 ---
 
-## 6. @geoforge/compat-hidpi
+## 6. @gis-forge/compat-hidpi
 
 ### 6.1 HiDPIAdapterOptions
 
@@ -370,7 +370,7 @@ export function createHiDPIAdapter(options?: HiDPIAdapterOptions): HiDPIAdapter;
 
 ---
 
-## 7. @geoforge/analysis
+## 7. @gis-forge/analysis
 
 ### 7.1 包结构
 
@@ -387,7 +387,7 @@ export { aggregationOps } from './aggregation';
 export { topologyOps } from './topology';
 
 // 也支持按需 import 单个子模块：
-// import { booleanOps } from '@geoforge/analysis/boolean';
+// import { booleanOps } from '@gis-forge/analysis/boolean';
 ```
 
 ### 7.2 boolean/ — 布尔运算
@@ -880,12 +880,12 @@ export interface TopologyOps {
 
 Tree-Shaking：
   // 按子模块 import（不 import 整个 analysis 包）
-  import { booleanOps } from '@geoforge/analysis/boolean';    // 只打包 boolean 模块
-  import { classificationOps } from '@geoforge/analysis/classification';  // 只打包 classification
+  import { booleanOps } from '@gis-forge/analysis/boolean';    // 只打包 boolean 模块
+  import { classificationOps } from '@gis-forge/analysis/classification';  // 只打包 classification
   // 每个子模块独立 tree-shakable
 
   // 完整 import（全部打包）
-  import { booleanOps, bufferOps, ... } from '@geoforge/analysis';
+  import { booleanOps, bufferOps, ... } from '@gis-forge/analysis';
 
 @stability：全部方法在各子模块中已标注
 

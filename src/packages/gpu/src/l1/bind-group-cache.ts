@@ -380,7 +380,7 @@ export function createBindGroupCache(
     bgMisses += 1;
 
     const bindGroup = gpuDevice.createBindGroup({
-      label: label ?? `geoforge-bg-${layoutLabel}`,
+      label: label ?? `gis-forge-bg-${layoutLabel}`,
       layout,
       entries: rawEntries as GPUBindGroupEntry[],
     });
@@ -524,7 +524,7 @@ export function createBindGroupCache(
     samplerMisses += 1;
 
     const sampler = gpuDevice.createSampler({
-      label: descriptor.label ?? `geoforge-sampler-${key.substring(0, 50)}`,
+      label: descriptor.label ?? `gis-forge-sampler-${key.substring(0, 50)}`,
       magFilter: descriptor.magFilter,
       minFilter: descriptor.minFilter,
       mipmapFilter: descriptor.mipmapFilter,

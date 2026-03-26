@@ -1,4 +1,4 @@
-# GeoForge 可选功能包完整接口设计 — P1 核心 3D 包（上）
+# GIS-Forge 可选功能包完整接口设计 — P1 核心 3D 包（上）
 
 > layer-terrain / globe
 > 质量标准与 P0 一致：每个字段有注释+范围+默认值、每个方法有参数+算法步骤、
@@ -7,18 +7,18 @@
 
 ---
 
-## 1. @geoforge/layer-terrain
+## 1. @gis-forge/layer-terrain
 
 ### 1.1 类型依赖
 
 ```typescript
-import type { Layer, LayerContext } from '@geoforge/scene';
-import type { CameraState, TileCoord, BBox2D, Viewport, Vec3f, Mat4f } from '@geoforge/core';
-import type { BufferHandle, TextureHandle } from '@geoforge/gpu';
-import type { TileScheduleResult } from '@geoforge/runtime';
-import type { InternalBus } from '@geoforge/core/infra/internal-bus';
-import type { GeoForgeError, GeoForgeErrorCode } from '@geoforge/core/infra/errors';
-import type { ObjectPool } from '@geoforge/core/infra/object-pool';
+import type { Layer, LayerContext } from '@gis-forge/scene';
+import type { CameraState, TileCoord, BBox2D, Viewport, Vec3f, Mat4f } from '@gis-forge/core';
+import type { BufferHandle, TextureHandle } from '@gis-forge/gpu';
+import type { TileScheduleResult } from '@gis-forge/runtime';
+import type { InternalBus } from '@gis-forge/core/infra/internal-bus';
+import type { GeoForgeError, GeoForgeErrorCode } from '@gis-forge/core/infra/errors';
+import type { ObjectPool } from '@gis-forge/core/infra/object-pool';
 ```
 
 ### 1.2 TerrainLayerOptions
@@ -691,18 +691,18 @@ const MAX_MESH_RESOLUTION = 128;
 
 ---
 
-## 2. @geoforge/globe
+## 2. @gis-forge/globe
 
 ### 2.1 类型依赖
 
 ```typescript
-import type { CameraState, Vec3f, Mat4f, Viewport } from '@geoforge/core';
-import type { LayerContext } from '@geoforge/scene';
-import type { TextureHandle, BufferHandle } from '@geoforge/gpu';
-import type { InternalBus } from '@geoforge/core/infra/internal-bus';
-import type { GeoForgeError } from '@geoforge/core/infra/errors';
-import { ellipsoid } from '@geoforge/core/geo/ellipsoid';
-import { mat4, vec3, quat } from '@geoforge/core/math';
+import type { CameraState, Vec3f, Mat4f, Viewport } from '@gis-forge/core';
+import type { LayerContext } from '@gis-forge/scene';
+import type { TextureHandle, BufferHandle } from '@gis-forge/gpu';
+import type { InternalBus } from '@gis-forge/core/infra/internal-bus';
+import type { GeoForgeError } from '@gis-forge/core/infra/errors';
+import { ellipsoid } from '@gis-forge/core/geo/ellipsoid';
+import { mat4, vec3, quat } from '@gis-forge/core/math';
 ```
 
 ### 2.2 GlobeOptions

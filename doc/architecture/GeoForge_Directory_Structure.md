@@ -1,4 +1,4 @@
-# GeoForge 完整项目目录结构
+# GIS-Forge 完整项目目录结构
 
 > 基于 L0~L6 v2.1 架构文档生成，覆盖全部 91 个核心模块 + 29 个可选功能包。
 > 每个文件标注所属架构层和职责。
@@ -6,7 +6,7 @@
 ---
 
 ```
-geoforge/
+gis-forge/
 ├── .cursor/
 │   └── rules/
 │       ├── core.mdc                           # AI 全局规则（alwaysApply）
@@ -30,7 +30,7 @@ geoforge/
 ├── packages/
 │   │
 │   │  ════════════════════════════════════════
-│   │  L0 基础层 — @geoforge/core (~20KB gz)
+│   │  L0 基础层 — @gis-forge/core (~20KB gz)
 │   │  ════════════════════════════════════════
 │   │
 │   ├── core/
@@ -133,7 +133,7 @@ geoforge/
 │   │           └── rtc.test.ts
 │   │
 │   │  ════════════════════════════════════════
-│   │  L1+L2 GPU/渲染层 — @geoforge/gpu (~30KB gz)
+│   │  L1+L2 GPU/渲染层 — @gis-forge/gpu (~30KB gz)
 │   │  ════════════════════════════════════════
 │   │
 │   ├── gpu/
@@ -207,7 +207,7 @@ geoforge/
 │   │           └── uniform-layout-builder.test.ts
 │   │
 │   │  ════════════════════════════════════════
-│   │  L3 调度层 — @geoforge/runtime (~15KB gz)
+│   │  L3 调度层 — @gis-forge/runtime (~15KB gz)
 │   │  ════════════════════════════════════════
 │   │
 │   ├── runtime/
@@ -233,7 +233,7 @@ geoforge/
 │   │       └── request-scheduler.test.ts
 │   │
 │   │  ════════════════════════════════════════
-│   │  L4 场景层 — @geoforge/scene (~12KB gz)
+│   │  L4 场景层 — @gis-forge/scene (~12KB gz)
 │   │  ════════════════════════════════════════
 │   │
 │   ├── scene/
@@ -262,7 +262,7 @@ geoforge/
 │   │       └── antimeridian.test.ts
 │   │
 │   │  ════════════════════════════════════════
-│   │  L5 扩展层 — @geoforge/extensions
+│   │  L5 扩展层 — @gis-forge/extensions
 │   │  ════════════════════════════════════════
 │   │
 │   ├── extensions/
@@ -288,7 +288,7 @@ geoforge/
 │   │  L6 预设层 — 4 个预设包
 │   │  ════════════════════════════════════════
 │   │
-│   ├── preset-2d/                             # @geoforge/preset-2d (~120KB gz)
+│   ├── preset-2d/                             # @gis-forge/preset-2d (~120KB gz)
 │   │   ├── package.json
 │   │   ├── src/
 │   │   │   ├── index.ts                       # export { Map2D } + 图层 + Controls
@@ -304,19 +304,19 @@ geoforge/
 │   │   └── __tests__/
 │   │       └── Map2D.test.ts
 │   │
-│   ├── preset-25d/                            # @geoforge/preset-25d (~155KB gz)
+│   ├── preset-25d/                            # @gis-forge/preset-25d (~155KB gz)
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── Map25D.ts                      # extends Map2D（+pitch/bearing/rotateTo/setLight）
 │   │
-│   ├── preset-3d/                             # @geoforge/preset-3d (~195KB gz)
+│   ├── preset-3d/                             # @gis-forge/preset-3d (~195KB gz)
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── Globe3D.ts                     # Globe3D 类（flyTo/lookAt/addImageryLayer/add3DTileset/setTerrain/setAtmosphere/morphTo*/逃生舱口）
 │   │
-│   ├── preset-full/                           # @geoforge/preset-full (~350KB gz)
+│   ├── preset-full/                           # @gis-forge/preset-full (~350KB gz)
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts                       # re-export 所有预设 + 所有可选包
@@ -326,25 +326,25 @@ geoforge/
 │   │  可选功能包 — 相机
 │   │  ════════════════════════════════════════
 │   │
-│   ├── camera-2d/                             # @geoforge/camera-2d
+│   ├── camera-2d/                             # @gis-forge/camera-2d
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── Camera2D.ts                    # implements CameraController（正交投影/惯性/边界约束）
 │   │
-│   ├── camera-25d/                            # @geoforge/camera-25d
+│   ├── camera-25d/                            # @gis-forge/camera-25d
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── Camera25D.ts                   # implements CameraController（透视/pitch+bearing/惯性）
 │   │
-│   ├── camera-3d/                             # @geoforge/camera-3d
+│   ├── camera-3d/                             # @gis-forge/camera-3d
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── Camera3D.ts                    # extends CameraController（ECEF/四元数/地形碰撞/Great Circle flyTo）
 │   │
-│   ├── view-morph/                            # @geoforge/view-morph
+│   ├── view-morph/                            # @gis-forge/view-morph
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
@@ -354,34 +354,34 @@ geoforge/
 │   │  可选功能包 — 图层
 │   │  ════════════════════════════════════════
 │   │
-│   ├── layer-tile-raster/                     # @geoforge/layer-tile-raster
+│   ├── layer-tile-raster/                     # @gis-forge/layer-tile-raster
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── RasterTileLayer.ts             # implements Layer（瓦片请求/解码/纹理上传/接缝处理/亮度对比度饱和度）
 │   │
-│   ├── layer-tile-vector/                     # @geoforge/layer-tile-vector
+│   ├── layer-tile-vector/                     # @gis-forge/layer-tile-vector
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       ├── VectorTileLayer.ts             # implements Layer（MVT→Worker→earcut/宽线→GPU/queryFeatures）
 │   │       └── mvt-decoder.ts                 # Protobuf 解码逻辑（在 Worker 中执行）
 │   │
-│   ├── layer-geojson/                         # @geoforge/layer-geojson
+│   ├── layer-geojson/                         # @gis-forge/layer-geojson
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       ├── GeoJSONLayer.ts                # implements Layer（setData/getCluster*/geojson-vt 集成）
 │   │       └── geojson-vt.ts                  # 自研 GeoJSON 瓦片切片
 │   │
-│   ├── layer-terrain/                         # @geoforge/layer-terrain
+│   ├── layer-terrain/                         # @gis-forge/layer-terrain
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       ├── TerrainLayer.ts                # implements Layer（DEM→三角网/裙边/LOD Morphing/getElevation）
 │   │       └── terrain-mesh-builder.ts        # DEM 解码 + 三角网生成 + 法线计算 + 裙边（在 Worker 中执行）
 │   │
-│   ├── layer-3dtiles/                         # @geoforge/layer-3dtiles
+│   ├── layer-3dtiles/                         # @gis-forge/layer-3dtiles
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
@@ -389,25 +389,25 @@ geoforge/
 │   │       ├── tileset-traversal.ts           # BVH 层级遍历 + SSE 计算
 │   │       └── gltf-parser.ts                 # glTF/glb 解析器
 │   │
-│   ├── layer-heatmap/                         # @geoforge/layer-heatmap
+│   ├── layer-heatmap/                         # @gis-forge/layer-heatmap
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── HeatmapLayer.ts                # 核密度估计 + 颜色映射 Shader
 │   │
-│   ├── layer-pointcloud/                      # @geoforge/layer-pointcloud
+│   ├── layer-pointcloud/                      # @gis-forge/layer-pointcloud
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── PointCloudLayer.ts             # 点云渲染 + Eye-Dome Lighting + LOD
 │   │
-│   ├── layer-marker/                          # @geoforge/layer-marker
+│   ├── layer-marker/                          # @gis-forge/layer-marker
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── MarkerLayer.ts                 # 图标/标注/HTML Marker + 聚合
 │   │
-│   ├── layer-extrusion/                       # @geoforge/layer-extrusion
+│   ├── layer-extrusion/                       # @gis-forge/layer-extrusion
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
@@ -417,7 +417,7 @@ geoforge/
 │   │  可选功能包 — 地球
 │   │  ════════════════════════════════════════
 │   │
-│   ├── globe/                                 # @geoforge/globe
+│   ├── globe/                                 # @gis-forge/globe
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
@@ -430,19 +430,19 @@ geoforge/
 │   │  可选功能包 — 交互工具
 │   │  ════════════════════════════════════════
 │   │
-│   ├── interaction-draw/                      # @geoforge/interaction-draw
+│   ├── interaction-draw/                      # @gis-forge/interaction-draw
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── DrawTool.ts                    # implements InteractionTool（点/线/面绘制 + overlay）
 │   │
-│   ├── interaction-measure/                   # @geoforge/interaction-measure
+│   ├── interaction-measure/                   # @gis-forge/interaction-measure
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── MeasureTool.ts                 # implements InteractionTool（距离/面积测量 + 标注）
 │   │
-│   ├── interaction-select/                    # @geoforge/interaction-select
+│   ├── interaction-select/                    # @gis-forge/interaction-select
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
@@ -452,19 +452,19 @@ geoforge/
 │   │  可选功能包 — 后处理
 │   │  ════════════════════════════════════════
 │   │
-│   ├── postprocess-bloom/                     # @geoforge/postprocess-bloom
+│   ├── postprocess-bloom/                     # @gis-forge/postprocess-bloom
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── BloomPass.ts                   # implements PostProcessPass（阈值提取→高斯模糊→叠加）
 │   │
-│   ├── postprocess-ssao/                      # @geoforge/postprocess-ssao
+│   ├── postprocess-ssao/                      # @gis-forge/postprocess-ssao
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── SSAOPass.ts                    # implements PostProcessPass（屏幕空间环境光遮蔽）
 │   │
-│   ├── postprocess-shadow/                    # @geoforge/postprocess-shadow
+│   ├── postprocess-shadow/                    # @gis-forge/postprocess-shadow
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
@@ -474,25 +474,25 @@ geoforge/
 │   │  可选功能包 — 数据源
 │   │  ════════════════════════════════════════
 │   │
-│   ├── source-wmts/                           # @geoforge/source-wmts
+│   ├── source-wmts/                           # @gis-forge/source-wmts
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── WMTSSource.ts                  # implements DataSource（GetTile 请求构建/TileMatrixSet 解析）
 │   │
-│   ├── source-wms/                            # @geoforge/source-wms
+│   ├── source-wms/                            # @gis-forge/source-wms
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── WMSSource.ts                   # implements DataSource（GetMap 请求/GetCapabilities 解析）
 │   │
-│   ├── source-wfs/                            # @geoforge/source-wfs
+│   ├── source-wfs/                            # @gis-forge/source-wfs
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── WFSSource.ts                   # implements DataSource（GetFeature/DescribeFeatureType/GML 解析）
 │   │
-│   ├── source-pmtiles/                        # @geoforge/source-pmtiles
+│   ├── source-pmtiles/                        # @gis-forge/source-pmtiles
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
@@ -502,13 +502,13 @@ geoforge/
 │   │  可选功能包 — 兼容层
 │   │  ════════════════════════════════════════
 │   │
-│   ├── compat-mobile/                         # @geoforge/compat-mobile
+│   ├── compat-mobile/                         # @gis-forge/compat-mobile
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
 │   │       └── MobileOptimizer.ts             # 能力检测→降质策略→激进 LOD→powerPreference
 │   │
-│   ├── compat-hidpi/                          # @geoforge/compat-hidpi
+│   ├── compat-hidpi/                          # @gis-forge/compat-hidpi
 │   │   ├── package.json
 │   │   └── src/
 │   │       ├── index.ts
@@ -518,7 +518,7 @@ geoforge/
 │   │  可选功能包 — 空间分析
 │   │  ════════════════════════════════════════
 │   │
-│   └── analysis/                              # @geoforge/analysis (~15KB gz)
+│   └── analysis/                              # @gis-forge/analysis (~15KB gz)
 │       ├── package.json
 │       ├── tsconfig.json
 │       └── src/

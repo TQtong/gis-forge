@@ -34,7 +34,7 @@ const PMTILES_MAGIC: readonly number[] = [0x50, 0x4D];
 
 /**
  * 当前支持的 PMTiles 版本号。
- * GeoForge 仅支持 v3 格式（2022+ 标准）。
+ * GIS-Forge 仅支持 v3 格式（2022+ 标准）。
  *
  * @stability stable
  */

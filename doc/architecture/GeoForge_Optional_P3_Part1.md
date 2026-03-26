@@ -1,10 +1,10 @@
-# GeoForge 可选功能包完整接口设计 — P3 生态包（上）
+# GIS-Forge 可选功能包完整接口设计 — P3 生态包（上）
 
 > source-wmts / source-wms / source-wfs / source-pmtiles
 
 ---
 
-## 1. @geoforge/source-wmts
+## 1. @gis-forge/source-wmts
 
 ### 1.1 WMTSSourceOptions
 
@@ -93,7 +93,7 @@ export interface WMTSSource extends DataSource<ImageBitmap> {
    *      b. DOMParser 解析 XML → WMTSCapabilities
    *      c. 验证 layer/matrixSet/format 在 Capabilities 中存在
    *      d. 提取 resourceUrl 模板（如果有 RESTful 支持）
-   *      e. 构建 TileMatrix → GeoForge zoom 映射表
+   *      e. 构建 TileMatrix → GIS-Forge zoom 映射表
    *   2. 如果 URL 是 RESTful 模板（含 {z}/{y}/{x}）：
    *      a. 跳过 Capabilities 解析
    *      b. 直接使用 URL 模板
@@ -149,7 +149,7 @@ export interface WMTSSource extends DataSource<ImageBitmap> {
    * Y 轴方向注意：
    *   WMTS 标准：TileRow 从 topLeftCorner 向下计数（0 = 最上面）
    *   TMS/XYZ：Y 从底部向上计数
-   *   GeoForge 内部使用 XYZ（Y 从上到下），与 WMTS 一致，无需翻转。
+   *   GIS-Forge 内部使用 XYZ（Y 从上到下），与 WMTS 一致，无需翻转。
    *   但如果数据源实际是 TMS 方案，需要：wmtsY = matrixHeight - 1 - tmsY
    *
    * @stability stable
@@ -197,7 +197,7 @@ export function createWMTSSource(options: WMTSSourceOptions): WMTSSource;
 
 ---
 
-## 2. @geoforge/source-wms
+## 2. @gis-forge/source-wms
 
 ### 2.1 WMSSourceOptions
 
@@ -275,7 +275,7 @@ export interface WMSSource extends DataSource<ImageBitmap> {
 
   /**
    * 加载瓦片。
-   * WMS 不是原生瓦片服务，需要将 GeoForge 的 TileCoord → BBox → GetMap 请求。
+   * WMS 不是原生瓦片服务，需要将 GIS-Forge 的 TileCoord → BBox → GetMap 请求。
    *
    * GetMap URL 构建：
    *   baseUrl + ?SERVICE=WMS
@@ -296,7 +296,7 @@ export interface WMSSource extends DataSource<ImageBitmap> {
    *   WMS 1.3.0：BBOX 轴序取决于 CRS 定义
    *     EPSG:4326 → lat,lon（纬度在前！）：BBOX=south,west,north,east
    *     EPSG:3857 → x,y（经度/米在前）：BBOX=west,south,east,north
-   *   GeoForge 内部始终用 [west, south, east, north]，
+   *   GIS-Forge 内部始终用 [west, south, east, north]，
    *   WMS 1.3.0 + EPSG:4326 时需要翻转为 [south, west, north, east]。
    *
    * TileCoord → BBox 转换：
@@ -353,7 +353,7 @@ export function createWMSSource(options: WMSSourceOptions): WMSSource;
 
 ---
 
-## 3. @geoforge/source-wfs
+## 3. @gis-forge/source-wfs
 
 ### 3.1 WFSSourceOptions
 
@@ -509,7 +509,7 @@ export function createWFSSource(options: WFSSourceOptions): WFSSource;
 
 ---
 
-## 4. @geoforge/source-pmtiles
+## 4. @gis-forge/source-pmtiles
 
 ### 4.1 PMTilesSourceOptions
 

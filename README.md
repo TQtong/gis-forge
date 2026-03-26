@@ -1,4 +1,4 @@
-# GeoForge
+# GIS-Forge
 
 **统一 2D / 2.5D / 3D 纯 WebGPU GIS 引擎。零 npm 依赖，所有算法自研。**
 
@@ -16,7 +16,7 @@
 ## 快速开始
 
 ```typescript
-import { Map2D } from '@geoforge/preset-2d';
+import { Map2D } from '@gis-forge/preset-2d';
 
 const map = new Map2D({
   container: 'map',
@@ -28,7 +28,7 @@ const map = new Map2D({
 3D 地球：
 
 ```typescript
-import { Globe3D } from '@geoforge/preset-3d';
+import { Globe3D } from '@gis-forge/preset-3d';
 
 const globe = new Globe3D({
   container: 'globe',
@@ -45,7 +45,7 @@ globe.flyTo({
 全功能模式切换：
 
 ```typescript
-import { MapFull } from '@geoforge/preset-full';
+import { MapFull } from '@gis-forge/preset-full';
 
 const map = new MapFull({
   container: 'map',
@@ -76,15 +76,15 @@ L0 基础层    math/ geo/ algorithm/ index/ precision/ types/ infra/
 
 | 包 | 层 | 说明 |
 |---|---|------|
-| `@geoforge/core` | L0 | 数学、地理、算法、空间索引、精度、类型、基础设施 |
-| `@geoforge/gpu` | L1+L2 | GPU 资源管理 + 渲染管线 |
-| `@geoforge/runtime` | L3 | 帧调度、瓦片调度、Worker 池、相机控制、内存预算 |
-| `@geoforge/scene` | L4 | 场景图、图层、数据源、样式引擎、标注、空间查询 |
-| `@geoforge/extensions` | L5 | 扩展注册中心 + 6 个扩展点接口 |
-| `@geoforge/preset-2d` | L6 | 2D 地图（MapLibre GL 兼容 API） |
-| `@geoforge/preset-25d` | L6 | 2.5D 倾斜地图 |
-| `@geoforge/preset-3d` | L6 | 3D 数字地球（CesiumJS 兼容 API） |
-| `@geoforge/preset-full` | L6 | 全功能 + 运行时模式切换 |
+| `@gis-forge/core` | L0 | 数学、地理、算法、空间索引、精度、类型、基础设施 |
+| `@gis-forge/gpu` | L1+L2 | GPU 资源管理 + 渲染管线 |
+| `@gis-forge/runtime` | L3 | 帧调度、瓦片调度、Worker 池、相机控制、内存预算 |
+| `@gis-forge/scene` | L4 | 场景图、图层、数据源、样式引擎、标注、空间查询 |
+| `@gis-forge/extensions` | L5 | 扩展注册中心 + 6 个扩展点接口 |
+| `@gis-forge/preset-2d` | L6 | 2D 地图（MapLibre GL 兼容 API） |
+| `@gis-forge/preset-25d` | L6 | 2.5D 倾斜地图 |
+| `@gis-forge/preset-3d` | L6 | 3D 数字地球（CesiumJS 兼容 API） |
+| `@gis-forge/preset-full` | L6 | 全功能 + 运行时模式切换 |
 
 ## 模块统计
 

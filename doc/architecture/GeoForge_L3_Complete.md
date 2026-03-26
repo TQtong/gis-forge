@@ -1,8 +1,8 @@
-# GeoForge 架构设计 — L3 调度层完整接口定义
+# GIS-Forge 架构设计 — L3 调度层完整接口定义
 
 > **定位**：L3 管理引擎的"时间维度"——谁先执行、何时加载、何时释放、出错怎么办。
 > 它调度 CPU 主线程帧循环、Worker 任务分发、瓦片优先级、网络请求限流、内存预算。
-> **包名**：@geoforge/runtime
+> **包名**：@gis-forge/runtime
 > **模块数**：7 + 新增 CameraController 模块 + 3 个相机实现包接口 + ViewMorph
 >
 > **v2.1 修订**：
@@ -16,7 +16,7 @@
 ## 类型依赖声明
 
 ```typescript
-import type { Vec3f, Mat4f, Quatf, BBox2D, Viewport, CameraState } from '@geoforge/core';
+import type { Vec3f, Mat4f, Quatf, BBox2D, Viewport, CameraState } from '@gis-forge/core';
 ```
 
 ---
@@ -33,10 +33,10 @@ import type { Vec3f, Mat4f, Quatf, BBox2D, Viewport, CameraState } from '@geofor
 | 6 | RequestScheduler | `request-scheduler.ts` | #4.3 网络限流 | 不变 |
 | 7 | ErrorRecovery | `error-recovery.ts` | 健壮性：重试/重启/恢复 | 不变 |
 | 8 | **CameraController** | `camera-controller.ts` | 缺口 #1 | **v2.1 新增** |
-| 9 | **Camera2D** | `camera-2d.ts` | #7.2 惯性动画 | **v2.1 新增**（@geoforge/camera-2d）|
-| 10 | **Camera25D** | `camera-25d.ts` | #7.2 惯性动画 | **v2.1 新增**（@geoforge/camera-25d）|
-| 11 | **Camera3D** | `camera-3d.ts` | #7.1 地形碰撞 + #7.2 惯性 | **v2.1 新增**（@geoforge/camera-3d）|
-| 12 | **ViewMorph** | `view-morph.ts` | #7.3 视图过渡 | **v2.1 新增**（@geoforge/view-morph）|
+| 9 | **Camera2D** | `camera-2d.ts` | #7.2 惯性动画 | **v2.1 新增**（@gis-forge/camera-2d）|
+| 10 | **Camera25D** | `camera-25d.ts` | #7.2 惯性动画 | **v2.1 新增**（@gis-forge/camera-25d）|
+| 11 | **Camera3D** | `camera-3d.ts` | #7.1 地形碰撞 + #7.2 惯性 | **v2.1 新增**（@gis-forge/camera-3d）|
+| 12 | **ViewMorph** | `view-morph.ts` | #7.3 视图过渡 | **v2.1 新增**（@gis-forge/view-morph）|
 
 ---
 
@@ -137,10 +137,10 @@ rAF 触发
 // ============================================================
 // tile-scheduler.ts — 瓦片加载优先级与调度
 // 解决问题 #4.3 瓦片调度、#4.4 过缩放
-// v2.1：CameraState / Viewport / TileCoord 统一从 @geoforge/core import
+// v2.1：CameraState / Viewport / TileCoord 统一从 @gis-forge/core import
 // ============================================================
 
-import type { CameraState, Viewport, TileCoord, BBox2D } from '@geoforge/core';
+import type { CameraState, Viewport, TileCoord, BBox2D } from '@gis-forge/core';
 
 export interface TilePriority {
   readonly coord: TileCoord;
@@ -317,11 +317,11 @@ export interface WorkerPool {
 // Worker 端代码结构（所有 L0 算法都打包进 Worker）
 // worker.ts
 
-import * as earcut from '@geoforge/core/algorithm/earcut';
-import * as douglasPeucker from '@geoforge/core/algorithm/simplify';
-import * as rtree from '@geoforge/core/index/rtree';
-import * as splitDouble from '@geoforge/core/precision/split-double';
-import * as mercator from '@geoforge/core/geo/mercator';
+import * as earcut from '@gis-forge/core/algorithm/earcut';
+import * as douglasPeucker from '@gis-forge/core/algorithm/simplify';
+import * as rtree from '@gis-forge/core/index/rtree';
+import * as splitDouble from '@gis-forge/core/precision/split-double';
+import * as mercator from '@gis-forge/core/geo/mercator';
 // ... 其他 L0 模块 ...
 
 self.onmessage = (event: MessageEvent<WorkerTask>) => {
@@ -740,7 +740,7 @@ export interface CameraAnimation {
 ```typescript
 // ============================================================
 // camera-2d.ts — 2D 正交相机实现规格
-// 包名：@geoforge/camera-2d
+// 包名：@gis-forge/camera-2d
 // 解决问题：#7.2 惯性动画
 // ============================================================
 
@@ -772,7 +772,7 @@ export interface Camera2DOptions {
 ```typescript
 // ============================================================
 // camera-25d.ts — 2.5D 透视相机实现规格
-// 包名：@geoforge/camera-25d
+// 包名：@gis-forge/camera-25d
 // 解决问题：#7.2 惯性动画
 // ============================================================
 
@@ -800,7 +800,7 @@ export interface Camera25DOptions extends Camera2DOptions {
 ```typescript
 // ============================================================
 // camera-3d.ts — 3D 地球轨道相机实现规格
-// 包名：@geoforge/camera-3d
+// 包名：@gis-forge/camera-3d
 // 解决问题：#7.1 地形碰撞、#7.2 惯性动画
 // ============================================================
 
@@ -860,7 +860,7 @@ export interface Camera3D extends CameraController {
 ```typescript
 // ============================================================
 // view-morph.ts — 2D ↔ 2.5D ↔ 3D 视图过渡动画
-// 包名：@geoforge/view-morph
+// 包名：@gis-forge/view-morph
 // 解决问题：#7.3 视图过渡
 // ============================================================
 
@@ -983,7 +983,7 @@ function initializeL3(l1: L1Modules, l2: L2Modules, config: EngineConfig) {
 | Worker 内算法 | earcut, simplify, rtree, splitDouble, mercator 等全部 L0 算法 |
 | SSE 计算 | `ellipsoid`, `mercator.groundResolution()` |
 | 点聚合 | `cluster.supercluster` |
-| CameraState / Viewport 类型 | `@geoforge/core/types`（★ v2.1 统一） |
+| CameraState / Viewport 类型 | `@gis-forge/core/types`（★ v2.1 统一） |
 
 ### L3 → L1
 

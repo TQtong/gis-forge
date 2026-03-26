@@ -1,5 +1,5 @@
 /**
- * @file GeoForge L5 — EP4 Shader Hook（WGSL 注入扩展点）
+ * @file GIS-Forge L5 — EP4 Shader Hook（WGSL 注入扩展点）
  *
  * @description
  * **EP4** 允许在 L2 ShaderAssembler 预置锚点插入 WGSL 片段，实现夜间模式、自定义光照等。

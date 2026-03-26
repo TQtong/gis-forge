@@ -1,5 +1,5 @@
 /**
- * @file GeoForge L5 — EP5 Post-Process Pass（自定义后处理扩展点）
+ * @file GIS-Forge L5 — EP5 Post-Process Pass（自定义后处理扩展点）
  *
  * @description
  * **EP5** 定义屏幕空间后处理链中的可插拔 Pass：`execute` 接收 `GPUCommandEncoder`，

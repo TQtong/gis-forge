@@ -1,4 +1,4 @@
-# GeoForge 架构设计 — L6 预设层完整接口定义（v2.1）
+# GIS-Forge 架构设计 — L6 预设层完整接口定义（v2.1）
 
 > **定位**：面向最终用户的便利层。"5 行代码出地图"。
 > **包数**：4 个 npm 包
@@ -17,9 +17,9 @@
 import type {
   BBox2D, Viewport, CameraState, PickResult, Feature, FeatureCollection,
   StyleSpec, SourceSpec, LayerStyleSpec, FilterExpression, LightSpec,
-} from '@geoforge/core';
+} from '@gis-forge/core';
 
-import type { CameraController, CameraAnimation, ViewMorph } from '@geoforge/runtime';
+import type { CameraController, CameraAnimation, ViewMorph } from '@gis-forge/runtime';
 ```
 
 ---
@@ -41,7 +41,7 @@ export interface MapMouseEvent extends MapEvent {
 
 ---
 
-## 包 1：@geoforge/preset-2d — Map2D 修订版
+## 包 1：@gis-forge/preset-2d — Map2D 修订版
 
 与 v2.0 完全相同的 Options 和大部分方法，仅以下变更：
 
@@ -73,7 +73,7 @@ export class Map2D {
   // ... Canvas / 生命周期 不变 ...
 
   // ★ v2.1: 逃生舱口 camera 返回 L3 CameraController
-  get camera(): CameraController;              // ★ 来自 @geoforge/runtime
+  get camera(): CameraController;              // ★ 来自 @gis-forge/runtime
 
   // 其他逃生舱口不变
   get renderer(): { /* 同 v2.0 */ };
@@ -86,13 +86,13 @@ export class Map2D {
 
 ---
 
-## 包 2：@geoforge/preset-25d — Map25D
+## 包 2：@gis-forge/preset-25d — Map25D
 
 与 v2.0 完全相同，不变（继承 Map2D 的 v2.1 变更自动生效）。
 
 ---
 
-## 包 3：@geoforge/preset-3d — Globe3D 修订版
+## 包 3：@gis-forge/preset-3d — Globe3D 修订版
 
 ```typescript
 export class Globe3D {
@@ -149,7 +149,7 @@ export class Globe3D {
 
 ---
 
-## 包 4：@geoforge/preset-full — MapFull 修订版
+## 包 4：@gis-forge/preset-full — MapFull 修订版
 
 ```typescript
 export class MapFull extends Map25D {

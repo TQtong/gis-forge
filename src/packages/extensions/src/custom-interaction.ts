@@ -1,5 +1,5 @@
 /**
- * @file GeoForge L5 — EP6 Interaction Tool（自定义交互扩展点）
+ * @file GIS-Forge L5 — EP6 Interaction Tool（自定义交互扩展点）
  *
  * @description
  * **EP6** 定义地图交互工具链：指针/键盘/滚轮事件经 `InteractionManager`（见 `interaction-manager.ts`）分发，

@@ -440,7 +440,7 @@ export function createBufferPool(
     currentStagingSizeBytes = size;
     for (let i = 0; i < stagingSlotCount; i++) {
       const buffer = gpuDevice.createBuffer({
-        label: `geoforge-staging-ring-slot-${i}`,
+        label: `gis-forge-staging-ring-slot-${i}`,
         size,
         usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
         mappedAtCreation: true,
@@ -565,7 +565,7 @@ export function createBufferPool(
     // 空闲池无匹配——创建新 Buffer
     const id = uniqueId('buf');
     const buffer = gpuDevice.createBuffer({
-      label: label ?? `geoforge-buffer-${id}`,
+      label: label ?? `gis-forge-buffer-${id}`,
       size: alignedSize,
       usage,
     });

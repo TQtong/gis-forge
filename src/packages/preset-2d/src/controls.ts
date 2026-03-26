@@ -1,5 +1,5 @@
 // ============================================================
-// @geoforge/preset-2d — 内置 UI 控件（L6 Map2D）
+// @gis-forge/preset-2d — 内置 UI 控件（L6 Map2D）
 // MVP：纯 DOM + 最小样式，无 WebGPU 依赖。
 // ============================================================
 
@@ -453,7 +453,7 @@ export class AttributionControl implements IControl {
         root.style.background = 'rgba(255,255,255,0.75)';
         root.style.borderRadius = '4px';
         root.style.pointerEvents = 'auto';
-        const text = this._custom ?? '© GeoForge';
+        const text = this._custom ?? '© GIS-Forge';
         root.textContent = text;
         this._root = root;
         return root;

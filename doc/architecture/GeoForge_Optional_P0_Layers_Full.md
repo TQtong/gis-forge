@@ -1,20 +1,20 @@
-# GeoForge 可选功能包完整接口设计 — P0 图层包（layer-tile-raster / layer-tile-vector / layer-geojson）
+# GIS-Forge 可选功能包完整接口设计 — P0 图层包（layer-tile-raster / layer-tile-vector / layer-geojson）
 
 > **完整版**：每个接口的每个字段、每个方法的每个参数、每种错误、每个算法步骤全部展开。
 
 ---
 
-## 4. @geoforge/layer-tile-raster
+## 4. @gis-forge/layer-tile-raster
 
 ### 4.1 类型依赖
 
 ```typescript
-import type { Layer, LayerContext, LayerSpec } from '@geoforge/scene';
-import type { CameraState, TileCoord, BBox2D, Viewport, Feature, FilterExpression } from '@geoforge/core';
-import type { BufferHandle, TextureHandle } from '@geoforge/gpu';
-import type { TileScheduleResult } from '@geoforge/runtime';
-import type { InternalBus } from '@geoforge/core/infra/internal-bus';
-import type { GeoForgeError, GeoForgeErrorCode } from '@geoforge/core/infra/errors';
+import type { Layer, LayerContext, LayerSpec } from '@gis-forge/scene';
+import type { CameraState, TileCoord, BBox2D, Viewport, Feature, FilterExpression } from '@gis-forge/core';
+import type { BufferHandle, TextureHandle } from '@gis-forge/gpu';
+import type { TileScheduleResult } from '@gis-forge/runtime';
+import type { InternalBus } from '@gis-forge/core/infra/internal-bus';
+import type { GeoForgeError, GeoForgeErrorCode } from '@gis-forge/core/infra/errors';
 ```
 
 ### 4.2 RasterTileLayerOptions
@@ -429,7 +429,7 @@ fn computeColor(input: FragmentInput) -> vec4<f32> {
 
 ---
 
-## 5. @geoforge/layer-tile-vector
+## 5. @gis-forge/layer-tile-vector
 
 ### 5.1 VectorTileLayerOptions
 
@@ -707,7 +707,7 @@ Worker 内部：
 
 ---
 
-## 6. @geoforge/layer-geojson
+## 6. @gis-forge/layer-geojson
 
 ### 6.1 GeoJSONLayerOptions
 
@@ -949,7 +949,7 @@ Worker 内部（接收到 'init' 或 'load' 完成后）：
   vtIndex 缓存在 Worker 内存中，后续 getTile 直接查表。
 
 2b. Supercluster 聚合（如果 cluster=true）
-  import { Supercluster } from '@geoforge/core/algorithm/cluster';
+  import { Supercluster } from '@gis-forge/core/algorithm/cluster';
 
   const points = geojson.features
     .filter(f => f.geometry.type === 'Point')
@@ -1432,7 +1432,7 @@ import './side-effect-registration';         // 禁止顶层副作用 import
 // 不在包入口执行注册（否则 import 即产生副作用）：
 //
 // ✅ 正确（在 preset-2d/init.ts 中集中注册）：
-//   import { createRasterTileLayer } from '@geoforge/layer-tile-raster';
+//   import { createRasterTileLayer } from '@gis-forge/layer-tile-raster';
 //   layerManager.registerLayerType('raster', createRasterTileLayer);
 //
 // ❌ 错误（在 layer-tile-raster/index.ts 中自动注册）：
@@ -1448,7 +1448,7 @@ layer-tile-raster/vector/geojson 是引擎内部包，不是 EP1~EP6 扩展。
 因此：
   ✅ 服务注入通过 onAdd(context: LayerContext)，不是 CustomLayerContext
   ✅ 不需要 safeExecute 包裹（引擎内部代码，错误直接向上传播）
-  ✅ 可以 import 引擎内部模块（如 @geoforge/core/algorithm/earcut）
+  ✅ 可以 import 引擎内部模块（如 @gis-forge/core/algorithm/earcut）
 
 但如果用户通过 EP1 注册的自定义图层，则：
   ❌ 不能 import 引擎内部模块

@@ -1,4 +1,4 @@
-// GeoForge — vertex template (assembled by ShaderAssembler)
+// GIS-Forge — vertex template (assembled by ShaderAssembler)
 struct PerFrameUniforms {
   viewMatrix: mat4x4<f32>,
   projectionMatrix: mat4x4<f32>,

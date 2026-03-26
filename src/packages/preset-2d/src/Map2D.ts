@@ -1,5 +1,5 @@
 // ============================================================
-// @geoforge/preset-2d — Map2D PascalCase 别名模块
+// @gis-forge/preset-2d — Map2D PascalCase 别名模块
 // 从 kebab-case 源文件 re-export，使两种命名风格均可 import。
 // ============================================================
 

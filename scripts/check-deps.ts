@@ -1,8 +1,8 @@
 /**
- * @file GeoForge seven-layer dependency checker for `src/packages/**`.
+ * @file GIS-Forge seven-layer dependency checker for `src/packages/**`.
  *
  * Scans TypeScript sources, maps each file and resolved import to architecture layers L0–L6,
- * and reports violations of GeoForge layering: no **upward** imports, and no **skip-layer**
+ * and reports violations of GIS-Forge layering: no **upward** imports, and no **skip-layer**
  * downward jumps (e.g. L6→L4). Direct imports to **L0 (`core`)** are always allowed so shared
  * types/math can live in L0 without forcing every package through intermediate layers.
  *
@@ -171,13 +171,13 @@ function resolveSpecifier(fromFile: string, spec: string): string | null {
     const mapped = join(PROJECT_ROOT, 'src', sub);
     return tryResolveTsFile(normalize(mapped));
   }
-  if (spec === '@geoforge/core') {
+  if (spec === '@gis-forge/core') {
     return tryResolveTsFile(
       join(PROJECT_ROOT, 'src', 'packages', 'core', 'src', 'index.ts'),
     );
   }
-  if (spec.startsWith('@geoforge/core/')) {
-    const rest = spec.slice('@geoforge/core/'.length);
+  if (spec.startsWith('@gis-forge/core/')) {
+    const rest = spec.slice('@gis-forge/core/'.length);
     const mapped = join(PROJECT_ROOT, 'src', 'packages', 'core', 'src', rest);
     return tryResolveTsFile(normalize(mapped));
   }
@@ -294,7 +294,7 @@ function main(): number {
   }
 
   console.log(
-    `${BOLD}GeoForge layer dependency check${RESET} ${DIM}(${files.length} .ts files scanned)${RESET}`,
+    `${BOLD}GIS-Forge layer dependency check${RESET} ${DIM}(${files.length} .ts files scanned)${RESET}`,
   );
 
   if (violations.length === 0) {

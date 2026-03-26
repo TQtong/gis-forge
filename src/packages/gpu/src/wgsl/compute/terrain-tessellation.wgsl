@@ -1,4 +1,4 @@
-// GeoForge — per-patch tessellation factor (placeholder LOD)
+// GIS-Forge — per-patch tessellation factor (placeholder LOD)
 struct Patch {
   center: vec4<f32>,
   extent: vec4<f32>,

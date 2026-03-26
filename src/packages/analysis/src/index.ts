@@ -1,7 +1,7 @@
 // ============================================================
 // analysis/index.ts — 可选分析包桶文件（Barrel Export）
 // 重新导出全部 9 个分析子模块，上层通过以下方式导入：
-//   import { BooleanOps, BufferOps, ... } from '@geoforge/analysis';
+//   import { BooleanOps, BufferOps, ... } from '@gis-forge/analysis';
 // ============================================================
 
 // --- 布尔空间运算（交集/并集/差集/异或/自相交检测/修复） ---

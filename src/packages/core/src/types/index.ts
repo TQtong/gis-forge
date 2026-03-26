@@ -1,9 +1,9 @@
 // ============================================================
 // types/index.ts — L0 共享类型桶文件（Barrel Export）
 // 重新导出所有子模块的类型定义，上层通过以下方式导入：
-//   import type { Feature, Viewport, ... } from '@geoforge/core/types/index.ts';
+//   import type { Feature, Viewport, ... } from '@gis-forge/core/types/index.ts';
 // 或通过包级别入口：
-//   import type { Feature, Viewport, ... } from '@geoforge/core';
+//   import type { Feature, Viewport, ... } from '@gis-forge/core';
 //
 // 使用 `export type *` 语法以满足 TypeScript verbatimModuleSyntax 要求。
 // ============================================================

@@ -1,5 +1,5 @@
 /**
- * @file GeoForge L5 — EP3 Data Source（自定义数据源扩展点）
+ * @file GIS-Forge L5 — EP3 Data Source（自定义数据源扩展点）
  *
  * @description
  * **EP3** 抽象矢量/栅格/流式数据入口：`DataSource` 负责元数据、瓦片或要素加载；

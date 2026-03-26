@@ -1,6 +1,6 @@
 // ============================================================
 // types/math-types.ts — 数学 TypedArray 类型别名
-// GeoForge 引擎统一的向量/矩阵底层类型，所有数学模块基于这些别名。
+// GIS-Forge 引擎统一的向量/矩阵底层类型，所有数学模块基于这些别名。
 // 好处：1) 零 GC 压力  2) 直传 GPU Buffer  3) Worker transferable
 // ============================================================
 
@@ -146,7 +146,7 @@ export type Mat4d = Float64Array;
  * 2D 轴对齐包围盒（Axis-Aligned Bounding Box）。
  * 使用地理坐标命名约定（west/south/east/north），
  * 也可作为通用 2D 矩形使用（west=minX, south=minY, east=maxX, north=maxY）。
- * 此类型为全局共享，上层统一从 @geoforge/core import。
+ * 此类型为全局共享，上层统一从 @gis-forge/core import。
  *
  * @example
  * const bbox: BBox2D = { west: -180, south: -85, east: 180, north: 85 };

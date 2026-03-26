@@ -372,7 +372,7 @@ export function createSurfaceManager(): SurfaceManager {
 
     // 创建多重采样纹理——尺寸必须与 Canvas 物理尺寸匹配
     msaaTexture = device.createTexture({
-      label: 'geoforge-msaa-render-target',
+      label: 'gis-forge-msaa-render-target',
       size: {
         width: currentConfig.physicalWidth,
         height: currentConfig.physicalHeight,
@@ -386,7 +386,7 @@ export function createSurfaceManager(): SurfaceManager {
 
     // 预创建纹理视图——避免每帧分配
     msaaTextureView = msaaTexture.createView({
-      label: 'geoforge-msaa-render-target-view',
+      label: 'gis-forge-msaa-render-target-view',
     });
   }
 

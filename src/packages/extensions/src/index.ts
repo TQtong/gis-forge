@@ -1,5 +1,5 @@
 /**
- * @file GeoForge L5 — Extensions 层入口（Registry + Lifecycle + 初始化）
+ * @file GIS-Forge L5 — Extensions 层入口（Registry + Lifecycle + 初始化）
  *
  * @description
  * 本文件实现 **ExtensionRegistry**（EP1~EP6 统一注册表）与 **ExtensionLifecycle**（实例状态、

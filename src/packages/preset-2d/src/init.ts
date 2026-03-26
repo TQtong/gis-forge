@@ -1,5 +1,5 @@
 // ============================================================
-// @geoforge/preset-2d — 引擎初始化编排器
+// @gis-forge/preset-2d — 引擎初始化编排器
 // L0→L1→L2→L3→L4→L5 按层初始化全部管理器。
 // 导出 initializeEngine(canvas, config) 工厂函数，返回 EngineContext。
 // 依赖层级：L6 预设层，消费 L0~L5 各包的工厂/管理器接口。
@@ -169,7 +169,7 @@ export interface EngineContext {
 function initL0(): L0Handle {
     if (__DEV__) {
         // eslint-disable-next-line no-console
-        console.debug('[GeoForge] L0 基础层就绪');
+        console.debug('[GIS-Forge] L0 基础层就绪');
     }
     return { ready: true };
 }
@@ -187,7 +187,7 @@ async function initL1(
 ): Promise<L1Handle> {
     // 检查 WebGPU 可用性
     if (typeof navigator === 'undefined' || navigator.gpu === undefined) {
-        throw new Error('[GeoForge L1] WebGPU 不可用：navigator.gpu 未定义');
+        throw new Error('[GIS-Forge L1] WebGPU 不可用：navigator.gpu 未定义');
     }
 
     // 请求 GPU 适配器
@@ -195,7 +195,7 @@ async function initL1(
         powerPreference: config.powerPreference ?? 'high-performance',
     });
     if (adapter === null) {
-        throw new Error('[GeoForge L1] 无法获取 GPU Adapter');
+        throw new Error('[GIS-Forge L1] 无法获取 GPU Adapter');
     }
 
     // 请求 GPU Device
@@ -207,7 +207,7 @@ async function initL1(
     // 配置 Canvas Surface
     const ctx = canvas.getContext('webgpu');
     if (ctx === null) {
-        throw new Error('[GeoForge L1] 无法获取 WebGPU 上下文');
+        throw new Error('[GIS-Forge L1] 无法获取 WebGPU 上下文');
     }
     const format = navigator.gpu.getPreferredCanvasFormat();
     ctx.configure({
@@ -218,7 +218,7 @@ async function initL1(
 
     if (__DEV__) {
         // eslint-disable-next-line no-console
-        console.debug('[GeoForge] L1 GPU 层就绪', {
+        console.debug('[GIS-Forge] L1 GPU 层就绪', {
             adapterInfo: adapter.info,
             format,
         });
@@ -228,7 +228,7 @@ async function initL1(
     device.lost.then((info) => {
         if (__DEV__) {
             // eslint-disable-next-line no-console
-            console.error('[GeoForge L1] Device Lost:', info.message, info.reason);
+            console.error('[GIS-Forge L1] Device Lost:', info.message, info.reason);
         }
     });
 
@@ -257,7 +257,7 @@ function initL2(l1: L1Handle, _config: EngineConfig): L2Handle {
         ready = true;
         if (__DEV__) {
             // eslint-disable-next-line no-console
-            console.debug('[GeoForge] L2 渲染层就绪');
+            console.debug('[GIS-Forge] L2 渲染层就绪');
         }
     });
 
@@ -287,7 +287,7 @@ function initL3(_l2: L2Handle, config: EngineConfig): L3Handle {
 
     if (__DEV__) {
         // eslint-disable-next-line no-console
-        console.debug('[GeoForge] L3 调度层就绪', {
+        console.debug('[GIS-Forge] L3 调度层就绪', {
             workerCount: _workerCount,
             requestConcurrency: _concurrency,
             targetFPS: _targetFPS,
@@ -333,7 +333,7 @@ function initL3(_l2: L2Handle, config: EngineConfig): L3Handle {
 function initL4(_l3: L3Handle, _config: EngineConfig): L4Handle {
     if (__DEV__) {
         // eslint-disable-next-line no-console
-        console.debug('[GeoForge] L4 场景层就绪');
+        console.debug('[GIS-Forge] L4 场景层就绪');
     }
     return {
         destroy(): void {
@@ -352,7 +352,7 @@ function initL4(_l3: L3Handle, _config: EngineConfig): L4Handle {
 function initL5(_l4: L4Handle, _config: EngineConfig): L5Handle {
     if (__DEV__) {
         // eslint-disable-next-line no-console
-        console.debug('[GeoForge] L5 扩展层就绪');
+        console.debug('[GIS-Forge] L5 扩展层就绪');
     }
     return {
         destroy(): void {
@@ -383,10 +383,10 @@ export async function initializeEngine(
 ): Promise<EngineContext> {
     // 参数校验
     if (canvas === null || canvas === undefined) {
-        throw new Error('[GeoForge] initializeEngine: canvas 不能为 null');
+        throw new Error('[GIS-Forge] initializeEngine: canvas 不能为 null');
     }
     if (!(canvas instanceof HTMLCanvasElement)) {
-        throw new Error('[GeoForge] initializeEngine: canvas 必须是 HTMLCanvasElement');
+        throw new Error('[GIS-Forge] initializeEngine: canvas 必须是 HTMLCanvasElement');
     }
 
     // L0 — 纯模块，无异步
@@ -409,7 +409,7 @@ export async function initializeEngine(
 
     if (__DEV__) {
         // eslint-disable-next-line no-console
-        console.debug('[GeoForge] 引擎初始化完成 ✓');
+        console.debug('[GIS-Forge] 引擎初始化完成 ✓');
     }
 
     return {
@@ -433,7 +433,7 @@ export async function initializeEngine(
             // L0 无需销毁
             if (__DEV__) {
                 // eslint-disable-next-line no-console
-                console.debug('[GeoForge] 引擎已销毁');
+                console.debug('[GIS-Forge] 引擎已销毁');
             }
         },
     };

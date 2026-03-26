@@ -38,7 +38,7 @@ const DEFAULT_PIXEL_RATIO = 1;
 const DEFAULT_PLACEHOLDER_BUFFER_BYTES = 256;
 
 /** 资源名：当前帧 swapchain 颜色纹理（由 execute 动态解析）。 */
-export const SWAPCHAIN_TEXTURE_NAME = 'geoforge-swapchain-current';
+export const SWAPCHAIN_TEXTURE_NAME = 'gis-forge-swapchain-current';
 
 /** 内部标记：已合并 Pass 的前缀，便于 DOT / 调试识别。 */
 const MERGED_PASS_PREFIX = 'merged-render::';

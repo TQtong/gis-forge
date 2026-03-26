@@ -24,7 +24,7 @@ export function TopToolbar(): React.ReactElement {
                     <div className="flex items-center gap-2">
                         <Map aria-hidden className="text-[var(--accent)]" strokeWidth={2} size={20} />
                         <span className="whitespace-nowrap text-base font-semibold text-[var(--text-primary)]">
-                            GeoForge
+                            GIS-Forge
                         </span>
                     </div>
                     <ViewModeSwitch />

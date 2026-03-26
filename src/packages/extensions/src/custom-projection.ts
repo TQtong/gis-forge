@@ -1,5 +1,5 @@
 /**
- * @file GeoForge L5 — EP2 Projection Module（自定义投影扩展点）
+ * @file GIS-Forge L5 — EP2 Projection Module（自定义投影扩展点）
  *
  * @description
  * **EP2** 将「投影数学 + WGSL 顶点变换片段」封装为可注册模块：CPU 侧 `project`/`unproject`

@@ -82,7 +82,7 @@ export function App(): React.ReactElement {
                 enableZoom: true,
                 enableTilt: true,
                 maxPixelRatio: 2,
-                accessibleTitle: 'GeoForge 3D Globe',
+                accessibleTitle: 'GIS-Forge 3D Globe',
             });
 
             setEngineSteps((prev) => {

@@ -535,7 +535,7 @@ export function createTextureManager(
     if (!tileSamplerStandard) {
       try {
         tileSamplerStandard = gpuDevice.createSampler({
-          label: 'geoforge-tile-sampler-standard',
+          label: 'gis-forge-tile-sampler-standard',
           magFilter: 'linear',
           minFilter: 'linear',
           mipmapFilter: 'linear',
@@ -567,7 +567,7 @@ export function createTextureManager(
 
     try {
       tileSamplerAnisotropic = gpuDevice.createSampler({
-        label: 'geoforge-tile-sampler-anisotropic',
+        label: 'gis-forge-tile-sampler-anisotropic',
         magFilter: 'linear',
         minFilter: 'linear',
         mipmapFilter: 'linear',
@@ -764,7 +764,7 @@ export function createTextureManager(
     const id = uniqueId('tex-atlas');
 
     const texture = gpuDevice.createTexture({
-      label: `geoforge-atlas-${atlasId}`,
+      label: `gis-forge-atlas-${atlasId}`,
       size: { width, height },
       format: 'rgba8unorm',
       usage:
@@ -774,7 +774,7 @@ export function createTextureManager(
     });
 
     const view = texture.createView({
-      label: `geoforge-atlas-${atlasId}-view`,
+      label: `gis-forge-atlas-${atlasId}-view`,
     });
 
     const handle: TextureHandle = Object.freeze({
@@ -899,7 +899,7 @@ export function createTextureManager(
 
     const texture = gpuDevice.createTexture(desc);
     const view = texture.createView({
-      label: label ? `${label}-view` : `geoforge-tex-${id}-view`,
+      label: label ? `${label}-view` : `gis-forge-tex-${id}-view`,
     });
 
     // 提取尺寸信息——GPUExtent3DStrict 可能是 dict 或 iterable

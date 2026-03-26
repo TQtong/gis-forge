@@ -132,15 +132,15 @@ NASA CASEI 团队测试了 Mapbox Globe View、MapLibre 和 Deck.GL 三种方案
 | **Mapbox GL** | ⚠️ 部分 | 类似 MapLibre，有极地裁剪/接缝/polyline 膨胀问题 | 极地多种渲染缺陷 |
 | **Deck.GL** | ❌ 有洞 | 依赖 Mercator 瓦片源，无极地特殊处理 | 极地 ~5° 孔洞 |
 | **iTowns** | ❌ 不可用 | 极地细分产生畸变，官方声明不可用 | 极地纯色填充 |
-| **GeoForge** | ⚠️ 南极有洞 | 扇形三角形替代退化网格 + 裙边，但南极扇形绕序错误 | 北极正确，南极被 cull |
+| **GIS-Forge** | ⚠️ 南极有洞 | 扇形三角形替代退化网格 + 裙边，但南极扇形绕序错误 | 北极正确，南极被 cull |
 
 **CesiumJS 能做到极地完美覆盖的核心原因**：它默认使用 GeographicTilingScheme（EPSG:4326）而非 WebMercatorTilingScheme。EPSG:4326 的经纬度网格天然覆盖 ±90°，没有 Mercator 在 85° 的截断问题。
 
 ---
 
-## 四、GeoForge 南极黑洞根因分析
+## 四、GIS-Forge 南极黑洞根因分析
 
-截图显示 GeoForge 的 3D 地球南极出现圆形黑洞，但北极完整无缺。这个问题与上述行业通用的 Mercator 极地截断无关——它是 GeoForge 自身的三角形绕序 bug。
+截图显示 GIS-Forge 的 3D 地球南极出现圆形黑洞，但北极完整无缺。这个问题与上述行业通用的 Mercator 极地截断无关——它是 GIS-Forge 自身的三角形绕序 bug。
 
 ### 4.1 根因：南极扇形三角形绕序错误
 
@@ -254,7 +254,7 @@ if (mnLat < -MERCATOR_LAT_LIMIT || camera.altitude > 5_000_000) {
 
 ---
 
-## 六、与 GeoForge 文档的交叉引用
+## 六、与 GIS-Forge 文档的交叉引用
 
 | 本文内容 | 相关文档 | 交叉点 |
 |---------|---------|--------|
@@ -264,4 +264,4 @@ if (mnLat < -MERCATOR_LAT_LIMIT || camera.altitude > 5_000_000) {
 | §五 coveringTilesGlobe 极地扩展 | **Globe Pipeline v2 §四.4** | `MERCATOR_LAT_LIMIT` 检查和极地行包含逻辑 |
 | §五 方案 A 纯色填充 | **Globe Pipeline v2 §七 P2 #8** | "Pure ellipsoid mode"——无纹理时用 baseColor 渲染 |
 | §二.1 CesiumJS Stereographic | **Globe Shape Issues v2 §七 P2 #10** | 极地多边形三角剖分需要保角投影 |
-| §二.4 OpenGlobus 三区域 | **Globe Shape Issues v2 §三** | 三区域架构作为 GeoForge 极地长期方案参考 |
+| §二.4 OpenGlobus 三区域 | **Globe Shape Issues v2 §三** | 三区域架构作为 GIS-Forge 极地长期方案参考 |

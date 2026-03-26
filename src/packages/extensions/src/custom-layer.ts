@@ -1,5 +1,5 @@
 /**
- * @file GeoForge L5 — EP1 Custom Layer（自定义图层扩展点）
+ * @file GIS-Forge L5 — EP1 Custom Layer（自定义图层扩展点）
  *
  * @description
  * 本模块定义 **EP1：CustomLayer** 的引擎契约：扩展通过 `CustomLayerFactory` 产出图层实例，
@@ -11,7 +11,7 @@
 
 /**
  * 引擎在 `onAdd` / 每帧渲染前注入给自定义图层的只读上下文。
- * L1/L2 具体服务类型用 `any` 保持 EP1 文件自洽（避免 `@geoforge/gpu` 等包耦合）。
+ * L1/L2 具体服务类型用 `any` 保持 EP1 文件自洽（避免 `@gis-forge/gpu` 等包耦合）。
  */
 export interface CustomLayerContext {
   /** WebGPU 设备句柄（来自 L1 DeviceManager）。 */

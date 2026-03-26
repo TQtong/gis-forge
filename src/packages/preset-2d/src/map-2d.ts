@@ -1,7 +1,7 @@
 // ============================================================
-// @geoforge/preset-2d — Map2D（L6 最简 2D 地图入口）
+// @gis-forge/preset-2d — Map2D（L6 最简 2D 地图入口）
 // MVP：不初始化 WebGPU / L1~L5，仅维护状态与 DOM，便于 API 联调。
-// 零 npm 依赖；类型从 L0（@geoforge/core）引用。
+// 零 npm 依赖；类型从 L0（@gis-forge/core）引用。
 // ============================================================
 
 import type { BBox2D } from '../../core/src/math/bbox.ts';
@@ -84,11 +84,11 @@ async function requestGpuAdapterWithFallback(gpu: GPU): Promise<GPUAdapter | nul
     return null;
 }
 
-// ===================== 结构化错误（对齐 GeoForge 约定）=====================
+// ===================== 结构化错误（对齐 GIS-Forge 约定）=====================
 // 使用 const 对象而非 enum，以符合 `erasableSyntaxOnly`（TS 5.8+）。
 
 /**
- * GeoForge 错误码（L6 预设层子集）。
+ * GIS-Forge 错误码（L6 预设层子集）。
  * 用于 `instanceof GeoForgeError` 与 `code` 分支处理。
  */
 export const GeoForgeErrorCode = {
@@ -173,7 +173,7 @@ export interface FlyToOptions {
     center?: [number, number];
     /** 目标缩放级别。 */
     zoom?: number;
-    /** 目标方位角（弧度，GeoForge 内部统一 bearing）。 */
+    /** 目标方位角（弧度，GIS-Forge 内部统一 bearing）。 */
     bearing?: number;
     /** 目标俯仰角（弧度）。 */
     pitch?: number;
@@ -824,7 +824,7 @@ export class Map2D {
         this._maxZoom = clampZoom(options.maxZoom ?? MAX_ZOOM_LEVEL, this._minZoom, MAX_ZOOM_LEVEL);
         this._container = this._resolveContainer(options.container);
         this._canvas = document.createElement('canvas');
-        const title = options.accessibleTitle ?? 'GeoForge Map2D';
+        const title = options.accessibleTitle ?? 'GIS-Forge Map2D';
         this._canvas.setAttribute('role', 'application');
         this._canvas.setAttribute('aria-label', title);
         this._canvas.style.display = 'block';

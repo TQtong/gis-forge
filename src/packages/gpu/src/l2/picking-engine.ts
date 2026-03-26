@@ -36,7 +36,7 @@ const BYTES_DEPTH32 = 4 as const;
 /** WebGPU copy 行对齐（字节）。 */
 const BYTES_PER_ROW_ALIGN = 256 as const;
 
-const PICKING_LABEL = 'geoforge-picking';
+const PICKING_LABEL = 'gis-forge-picking';
 
 // ===================== 前向类型 =====================
 

@@ -459,7 +459,7 @@ export type { Globe3DOptions, EntitySpec, GlobeRendererStats } from './globe-typ
 export { computeLogDepthBufFC, LOG_DEPTH_WGSL } from './globe-shaders.ts';
 ```
 
-外部消费者只需 `import { Globe3D } from '@geoforge/preset-3d'`，不感知内部拆分。
+外部消费者只需 `import { Globe3D } from '@gis-forge/preset-3d'`，不感知内部拆分。
 
 ---
 
@@ -534,12 +534,12 @@ Step 9: globe-render.ts
 Step 10: index.ts + 精简 globe-3d.ts
   创建 barrel export
   删除 globe-3d.ts 中所有已搬出的代码
-  ✅ 验证：外部 import { Globe3D } from '@geoforge/preset-3d' 正常工作
+  ✅ 验证：外部 import { Globe3D } from '@gis-forge/preset-3d' 正常工作
 ```
 
 ---
 
-## 六、与 GeoForge 文档的交叉引用
+## 六、与 GIS-Forge 文档的交叉引用
 
 | 本文内容 | 相关文档 |
 |---------|---------|

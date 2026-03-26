@@ -1,4 +1,4 @@
-# GeoForge GIS 算法完整清单
+# GIS-Forge GIS 算法完整清单
 
 > 参考来源：Turf.js 全部 API、CGAL 算法库、JTS/GEOS 拓扑套件、JSTS、计算几何教材、
 > CesiumJS/MapLibre/deck.gl/OpenLayers 内部算法、PostGIS 函数列表
@@ -298,7 +298,7 @@ vec2, vec3, vec4, mat3, mat4, quat, bbox, frustum, interpolate, trigonometry, el
 ### 建议的 L0 包拆分策略
 
 ```
-@geoforge/core
+@gis-forge/core
 ├── math/           向量/矩阵/四元数/bbox/frustum/插值/三角函数（必选）
 ├── geo/            椭球体/墨卡托/坐标变换/距离/面积/方位/中心（必选）
 ├── algorithm/      earcut/douglas-peucker/convex-hull/clip/intersect/
@@ -307,7 +307,7 @@ vec2, vec3, vec4, mat3, mat4, quat, bbox, frustum, interpolate, trigonometry, el
 ├── precision/      split-double/RTC（精度管理）
 └── infra/          event/id/logger/config/types（基础设施）
 
-@geoforge/analysis（可选分析包）
+@gis-forge/analysis（可选分析包）
 ├── boolean/        intersection/union/difference/kinks/valid（布尔运算）
 ├── buffer/         point-buffer/line-buffer/polygon-buffer（缓冲区）
 ├── interpolation/  tin/idw/isolines/kriging（插值）
@@ -318,4 +318,4 @@ vec2, vec3, vec4, mat3, mat4, quat, bbox, frustum, interpolate, trigonometry, el
 └── projection/     utm/lambert/equirectangular/gcj02/bd09（扩展投影）
 ```
 
-这样用户只需要 `@geoforge/core` 就能做基本地图渲染，需要空间分析时再引入 `@geoforge/analysis` 的子模块。
+这样用户只需要 `@gis-forge/core` 就能做基本地图渲染，需要空间分析时再引入 `@gis-forge/analysis` 的子模块。

@@ -437,7 +437,7 @@ export function createRenderStats(
     }
     try {
       const buf = device.createBuffer({
-        label: 'geoforge-render-stats-query-resolve',
+        label: 'gis-forge-render-stats-query-resolve',
         size: aligned,
         usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.MAP_READ,
       });
@@ -819,7 +819,7 @@ export function createRenderStats(
 
       let encoder: GPUCommandEncoder;
       try {
-        encoder = device.createCommandEncoder({ label: 'geoforge-render-stats-resolve' });
+        encoder = device.createCommandEncoder({ label: 'gis-forge-render-stats-resolve' });
       } catch (e) {
         return Promise.reject(new Error(`[RenderStats] createCommandEncoder failed: ${String(e)}`));
       }

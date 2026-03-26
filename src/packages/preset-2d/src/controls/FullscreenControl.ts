@@ -1,5 +1,5 @@
 // ============================================================
-// @geoforge/preset-2d — FullscreenControl 工厂模块
+// @gis-forge/preset-2d — FullscreenControl 工厂模块
 // 提供 createFullscreenControl 工厂函数，请求地图容器或全页
 // 进入/退出 Fullscreen API。兼容标准与 webkit 前缀。
 // ============================================================

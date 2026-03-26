@@ -1,4 +1,4 @@
-# GeoForge 2.5D 视口填充完整修复方案
+# GIS-Forge 2.5D 视口填充完整修复方案
 
 > **问题**：pitch 倾斜后地图没铺满视口，上方大片黑色。
 > 本文档覆盖从 clearColor 到大气散射的 7 层修复 + 瓦片 LOD + Z 精度 + 各向异性过滤。
@@ -73,7 +73,7 @@ export interface ClearColorConfig {
  * 当此角 ≥ 90° 时射线指向天空 → far 取最大可见地面范围。
  *
  * 同时考虑近裁面比值约束（far/near 不能太大，否则 Z 精度下降）。
- * GeoForge 使用 Reversed-Z，far/near 比值容忍度远高于标准 Z（可达 10^6）。
+ * GIS-Forge 使用 Reversed-Z，far/near 比值容忍度远高于标准 Z（可达 10^6）。
  */
 _computeFarPlane(): number {
   const halfFov = this._fov / 2;
@@ -435,7 +435,7 @@ export interface AnisotropicFilterConfig {
 #### 6.2 Z-Fighting 防护（Reversed-Z 验证）
 
 ```
-GeoForge 已采用 Reversed-Z，这是核心优势：
+GIS-Forge 已采用 Reversed-Z，这是核心优势：
 
 标准 Z-Buffer（depth=[0,1], near=0, far=1）：
   远处精度 ≈ 1 / (2^24 × near/far)
@@ -447,7 +447,7 @@ Reversed-Z（depth=[1,0], near→depth=1, far→depth=0）：
   由于浮点在 0 附近精度最高，远处精度大幅提升
   当 far/near = 100000 时仍可接受（标准 Z 在 far/near = 1000 时就崩了）
 
-验证：GeoForge 的 DepthManager 已实现 Reversed-Z。
+验证：GIS-Forge 的 DepthManager 已实现 Reversed-Z。
   _computeFarPlane 扩大 far 后，Z 精度仍然足够。
   如果在极端 pitch（>80°, far/near > 50000）下出现 Z-fighting：
     → 启用对数深度写入（logarithmic depth buffer）作为 fallback

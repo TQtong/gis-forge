@@ -1,5 +1,5 @@
 /**
- * @geoforge/layer-flatgeobuf — FlatGeobuf 随机访问图层（可选包）。
+ * @gis-forge/layer-flatgeobuf — FlatGeobuf 随机访问图层（可选包）。
  *
  * @packageDocumentation
  */

@@ -152,7 +152,7 @@ export interface CameraState {
    * 将相机坐标变换到裁剪空间（Clip Space）。
    * Float32Array 长度 16，列主序存储。
    * 2D 模式使用正交投影（ortho），3D 模式使用透视投影（perspective）。
-   * GeoForge 默认使用 Reversed-Z 投影以获得更好的深度精度。
+   * GIS-Forge 默认使用 Reversed-Z 投影以获得更好的深度精度。
    */
   readonly projectionMatrix: Float32Array;
 
@@ -292,7 +292,7 @@ export interface PickResult {
   /**
    * 归一化深度值。
    * 从 GPU depth buffer 读取的原始深度。
-   * GeoForge 使用 Reversed-Z：1.0 = 最近平面，0.0 = 最远平面。
+   * GIS-Forge 使用 Reversed-Z：1.0 = 最近平面，0.0 = 最远平面。
    * 范围 [0.0, 1.0]。
    * 可用于深度排序（同一像素多图层命中时按深度排序）。
    */

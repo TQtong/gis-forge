@@ -1,4 +1,4 @@
-# GeoForge 架构设计 — L5 扩展层完整接口定义（v2.1）
+# GIS-Forge 架构设计 — L5 扩展层完整接口定义（v2.1）
 
 > **定位**：L5 是引擎与社区/用户之间的契约层。
 > **模块数**：8 个（ExtensionRegistry + ExtensionLifecycle + 6 个 EP 接口）
@@ -18,10 +18,10 @@ import type {
   Vec3f, Mat4f, BBox2D,
   Viewport, CameraState, PickResult, Feature,
   FilterExpression,
-} from '@geoforge/core';
+} from '@gis-forge/core';
 
-import type { CameraController } from '@geoforge/runtime';
-import type { Layer } from '@geoforge/scene';
+import type { CameraController } from '@gis-forge/runtime';
+import type { Layer } from '@gis-forge/scene';
 ```
 
 ---

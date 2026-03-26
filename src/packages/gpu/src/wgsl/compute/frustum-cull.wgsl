@@ -1,4 +1,4 @@
-// GeoForge — builtin frustum cull (ComputePassManager)
+// GIS-Forge — builtin frustum cull (ComputePassManager)
 struct ObjectBounds {
   min: vec4<f32>,
   max: vec4<f32>,

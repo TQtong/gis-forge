@@ -1,8 +1,8 @@
 /**
- * @file GeoForge bundle size monitor (CI / local quality gate).
+ * @file GIS-Forge bundle size monitor (CI / local quality gate).
  *
  * Runs `vite build`, parses Rollup/Vite size lines from stdout, aggregates JS and CSS
- * gzip totals, compares against GeoForge gzipped budgets, writes `dist/bundle-report.json`,
+ * gzip totals, compares against GIS-Forge gzipped budgets, writes `dist/bundle-report.json`,
  * and exits with code 1 when any aggregate exceeds its budget by more than 5%.
  *
  * @remarks
@@ -44,7 +44,7 @@ const DIST_DIR = join(PROJECT_ROOT, 'dist');
 const REPORT_PATH = join(DIST_DIR, 'bundle-report.json');
 
 /**
- * Maximum gzipped size for the full JS output (bytes). GeoForge tree-shake target ~350KB gz.
+ * Maximum gzipped size for the full JS output (bytes). GIS-Forge tree-shake target ~350KB gz.
  */
 const BUDGET_JS_GZIP_BYTES = 350 * 1024;
 

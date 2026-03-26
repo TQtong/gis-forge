@@ -13,7 +13,7 @@ import type { Feature } from '../../core/src/types/feature.ts';
 // ---------------------------------------------------------------------------
 
 /**
- * GeoForge 场景模块结构化错误。
+ * GIS-Forge 场景模块结构化错误。
  * 携带机器可读 `code` 与可选 `context`，便于日志与上层恢复策略。
  *
  * @example

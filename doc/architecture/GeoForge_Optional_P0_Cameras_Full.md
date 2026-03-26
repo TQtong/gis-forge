@@ -1,20 +1,20 @@
-# GeoForge 可选功能包完整接口设计 — P0 相机包（camera-2d / camera-25d / camera-3d）
+# GIS-Forge 可选功能包完整接口设计 — P0 相机包（camera-2d / camera-25d / camera-3d）
 
 > **完整版**：每个接口的每个字段、每个方法的每个参数、每种错误情况、每个对接点全部展开。
 
 ---
 
-## 1. @geoforge/camera-2d
+## 1. @gis-forge/camera-2d
 
 ### 1.1 类型依赖
 
 ```typescript
-import type { Mat4f, Vec3f, BBox2D, Viewport, CameraState } from '@geoforge/core';
-import type { CameraController, CameraAnimation, CameraConstraints } from '@geoforge/runtime';
-import type { InternalBus } from '@geoforge/core/infra/internal-bus';
-import { mat4, vec3 } from '@geoforge/core/math';
-import { mapSize, lngLatToMerc, mercToLngLat } from '@geoforge/core/geo/mercator';
-import { lerp as lerpScalar } from '@geoforge/core/math/interpolate';
+import type { Mat4f, Vec3f, BBox2D, Viewport, CameraState } from '@gis-forge/core';
+import type { CameraController, CameraAnimation, CameraConstraints } from '@gis-forge/runtime';
+import type { InternalBus } from '@gis-forge/core/infra/internal-bus';
+import { mat4, vec3 } from '@gis-forge/core/math';
+import { mapSize, lngLatToMerc, mercToLngLat } from '@gis-forge/core/geo/mercator';
+import { lerp as lerpScalar } from '@gis-forge/core/math/interpolate';
 ```
 
 ### 1.2 Camera2DOptions — 创建配置
@@ -877,13 +877,13 @@ export { createCamera3D } from './Camera3D';
 export type { Camera3D, Camera3DOptions } from './Camera3D';
 
 // 效果：
-// import { createCamera2D } from '@geoforge/camera-2d';  // 只打包 camera-2d
+// import { createCamera2D } from '@gis-forge/camera-2d';  // 只打包 camera-2d
 // 如果用户不 import camera-3d，整个包被 tree-shake 移除
 ```
 
 ---
 
-## 2. @geoforge/camera-25d
+## 2. @gis-forge/camera-25d
 
 ### 2.1 与 Camera2D 的关系
 
@@ -1078,7 +1078,7 @@ export function createCamera25D(options?: Camera25DOptions): Camera25D;
 
 ---
 
-## 3. @geoforge/camera-3d
+## 3. @gis-forge/camera-3d
 
 ### 3.1 Camera3DOptions
 
@@ -1390,7 +1390,7 @@ export function createCamera3D(options?: Camera3DOptions): Camera3D;
 ## Context / safeExecute 适用性说明
 
 ```
-camera-2d/25d/3d 是引擎内部包（@geoforge/camera-*），不是 EP1~EP6 扩展。
+camera-2d/25d/3d 是引擎内部包（@gis-forge/camera-*），不是 EP1~EP6 扩展。
 它们通过 FrameScheduler 直接实例化，不经过 ExtensionRegistry。
 
 因此：

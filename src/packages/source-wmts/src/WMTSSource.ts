@@ -40,7 +40,7 @@ const DEFAULT_STYLE = 'default';
 
 /**
  * WMTS 协议版本号。
- * GeoForge 当前仅支持 WMTS 1.0.0（OGC 06-042r4）。
+ * GIS-Forge 当前仅支持 WMTS 1.0.0（OGC 06-042r4）。
  *
  * @stability stable
  */

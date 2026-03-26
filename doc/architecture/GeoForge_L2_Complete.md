@@ -1,4 +1,4 @@
-# GeoForge 架构设计 — L2 渲染层完整接口定义
+# GIS-Forge 架构设计 — L2 渲染层完整接口定义
 
 > **定位**：L2 是引擎的渲染核心——管理每帧如何将场景数据转化为像素。
 > 它消费 L1 的 GPU 资源，被 L4 的图层/场景驱动，是 Shader Assembler、Render Graph、Compositor 三大支柱的所在层。
@@ -15,8 +15,8 @@
 ## 类型依赖声明
 
 ```typescript
-import type { Mat4f, Vec3f, BBox2D, Viewport, CameraState, PickResult, Feature } from '@geoforge/core';
-import type { Layer } from '@geoforge/scene';  // L4 定义的 Layer 接口
+import type { Mat4f, Vec3f, BBox2D, Viewport, CameraState, PickResult, Feature } from '@gis-forge/core';
+import type { Layer } from '@gis-forge/scene';  // L4 定义的 Layer 接口
 ```
 
 ---
@@ -170,7 +170,7 @@ export interface Compositor {
 // 这消除了 L2 和 L4 之间的接口分裂
 // ============================================================
 
-import type { Layer } from '@geoforge/scene';
+import type { Layer } from '@gis-forge/scene';
 
 export interface FrameGraphBuilder {
   // 开始构建新一帧的渲染图
@@ -254,10 +254,10 @@ export interface FrameGraphBuilder {
 // ============================================================
 // PickingEngine — 补充深度读取 + 3D 坐标反算
 // v2.1 变更：PickResult 统一使用 L0/types/viewport.ts 中的定义
-// 删除 L2 本地的 PickResult 定义，统一从 @geoforge/core import
+// 删除 L2 本地的 PickResult 定义，统一从 @gis-forge/core import
 // ============================================================
 
-import type { PickResult } from '@geoforge/core';
+import type { PickResult } from '@gis-forge/core';
 
 export interface PickingEngine {
   // 渲染 Picking 帧
@@ -932,7 +932,7 @@ async function initializeL2(l1: L1Modules, config: EngineConfig) {
 | 射线-椭球求交 | `intersect.rayEllipsoid()` (Picking) |
 | 矩阵运算 | `mat4.multiply`, `mat4.invert` |
 | WGSL 对齐规则 | `UniformLayoutBuilder` 内部硬编码对齐常量 |
-| Viewport/CameraState/PickResult | 统一来自 `@geoforge/core/types`（★ v2.1） |
+| Viewport/CameraState/PickResult | 统一来自 `@gis-forge/core/types`（★ v2.1） |
 
 ---
 

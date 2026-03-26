@@ -3,7 +3,7 @@
 // 被引用于：L4/SpatialQuery, L4/AntiMeridianHandler, L5/DataSource,
 //          L6/queryRenderedFeatures, L0/types/feature.ts
 // 所有几何类型的唯一定义源（Single Source of Truth），
-// L1~L6 全部从 @geoforge/core 的 types/ 中 import。
+// L1~L6 全部从 @gis-forge/core 的 types/ 中 import。
 // ============================================================
 
 /**

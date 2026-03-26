@@ -1,4 +1,4 @@
-// GeoForge — spatial hash cluster id per point
+// GIS-Forge — spatial hash cluster id per point
 const CELL_SIZE: f32 = {{CELL_SIZE}};
 
 @group(0) @binding(0) var<storage, read> positions: array<vec4<f32>>;

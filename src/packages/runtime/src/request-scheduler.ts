@@ -137,7 +137,7 @@ export interface RequestScheduler {
   onQueueEmpty(callback: () => void): () => void;
 }
 
-/** 默认配置，与 GeoForge L3 文档一致。 */
+/** 默认配置，与 GIS-Forge L3 文档一致。 */
 const DEFAULT_REQUEST_CONFIG: RequestConfig = {
   maxConcurrent: 6,
   maxPerHost: 6,

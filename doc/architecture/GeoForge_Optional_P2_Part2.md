@@ -1,10 +1,10 @@
-# GeoForge 可选功能包完整接口设计 — P2 增强包（下）
+# GIS-Forge 可选功能包完整接口设计 — P2 增强包（下）
 
 > postprocess-bloom / postprocess-ssao / postprocess-shadow
 
 ---
 
-## 8. @geoforge/postprocess-bloom
+## 8. @gis-forge/postprocess-bloom
 
 ### 8.1 BloomPassOptions
 
@@ -218,7 +218,7 @@ struct CompositeParams {
 
 ---
 
-## 9. @geoforge/postprocess-ssao
+## 9. @gis-forge/postprocess-ssao
 
 ### 9.1 SSAOPassOptions
 
@@ -415,7 +415,7 @@ export function createSSAOPass(options?: SSAOPassOptions): SSAOPass;
 
 ---
 
-## 10. @geoforge/postprocess-shadow
+## 10. @gis-forge/postprocess-shadow
 
 ### 10.1 ShadowPassOptions
 

@@ -1,5 +1,5 @@
 // ============================================================
-// @geoforge/preset-2d — NavigationControl 工厂模块
+// @gis-forge/preset-2d — NavigationControl 工厂模块
 // 提供 createNavigationControl 工厂函数，返回增强型导航控件实例。
 // 在 IControl 协议基础上补充 enable/disable/setPosition 便捷方法。
 // ============================================================

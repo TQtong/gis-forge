@@ -69,7 +69,7 @@ export function WebGPUError(): ReactElement {
       <AlertTriangle className="mb-4 h-12 w-12 text-[var(--warning)]" aria-hidden size={48} strokeWidth={1.75} />
       <h1 className="mb-2 text-xl font-semibold text-[var(--text-primary)]">不支持 WebGPU</h1>
       <p className="mb-6 max-w-md text-sm leading-relaxed text-[var(--text-secondary)]">
-        GeoForge 需要 WebGPU 才能在浏览器中进行 GPU 加速渲染。请使用支持 WebGPU 的浏览器版本，或在设置中启用实验性
+        GIS-Forge 需要 WebGPU 才能在浏览器中进行 GPU 加速渲染。请使用支持 WebGPU 的浏览器版本，或在设置中启用实验性
         WebGPU 功能后重试。
       </p>
 

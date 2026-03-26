@@ -2,7 +2,7 @@ import type { ReactElement } from 'react';
 import { Check, Loader2, Map } from 'lucide-react';
 
 /**
- * Props for the full-screen GeoForge engine initialization overlay.
+ * Props for the full-screen GIS-Forge engine initialization overlay.
  */
 export interface InitLoadingProps {
   /** Progress percentage from 0 through 100 (inclusive); values outside this range are clamped for display. */
@@ -12,7 +12,7 @@ export interface InitLoadingProps {
 }
 
 /**
- * Full-screen loading screen displayed while the GeoForge engine initializes (GPU, shaders, basemap).
+ * Full-screen loading screen displayed while the GIS-Forge engine initializes (GPU, shaders, basemap).
  * Centers branding, a determinate progress bar, and a per-step status list with Lucide icons.
  *
  * @param props - {@link InitLoadingProps}
@@ -40,12 +40,12 @@ export function InitLoading(props: InitLoadingProps): ReactElement {
       role="status"
       aria-live="polite"
       aria-busy="true"
-      aria-label="GeoForge 正在初始化"
+      aria-label="GIS-Forge 正在初始化"
     >
       <div className="mb-10 flex flex-col items-center gap-3">
         <div className="flex items-center gap-3">
           <Map className="h-12 w-12 shrink-0 text-[var(--accent)]" aria-hidden size={48} strokeWidth={1.75} />
-          <span className="text-2xl font-bold text-[var(--text-primary)]">GeoForge</span>
+          <span className="text-2xl font-bold text-[var(--text-primary)]">GIS-Forge</span>
         </div>
 
         <div className="w-full max-w-sm">

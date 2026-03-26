@@ -1,5 +1,5 @@
 /**
- * Shared TypeScript types for the GeoForge Web GIS application (QGIS / ArcGIS Online–style UX).
+ * Shared TypeScript types for the GIS-Forge Web GIS application (QGIS / ArcGIS Online–style UX).
  * All exports are `export type` for compatibility with `verbatimModuleSyntax: true`.
  */
 

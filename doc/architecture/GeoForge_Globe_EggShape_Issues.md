@@ -1,8 +1,8 @@
 # 3D GIS 引擎地球形状"鸡蛋化"问题汇编 v2
 
 > 症状：3D 地球在屏幕上不是正圆而是椭圆/蛋形/偏移
-> 涉及：CesiumJS / cesium-native / cesium-unreal / cesium-unity / MapLibre Globe / GeoForge
-> 7 个根因 + 决策树 + GeoForge 两轮实际调试时间线
+> 涉及：CesiumJS / cesium-native / cesium-unreal / cesium-unity / MapLibre Globe / GIS-Forge
+> 7 个根因 + 决策树 + GIS-Forge 两轮实际调试时间线
 
 ---
 
@@ -121,7 +121,7 @@ RTE 的解法：
   ULP = 5000 / 8,388,608 ≈ 0.0006m（亚毫米级）✅
 ```
 
-### GeoForge 实际调试（第二轮，修改诊断代码后）
+### GIS-Forge 实际调试（第二轮，修改诊断代码后）
 
 ```
 日志：
@@ -146,7 +146,7 @@ RTE 的解法：
 - **cesium-native 社区论坛**（2025-05）：OpenGL + cesium-native，Ellipsoid 畸变+偏移，根因完全一致
 - **cesium-unreal #6**：Unreal Float32 model-view → jitter+变形，解法：`SetNewWorldOrigin()` 动态 rebasing
 - **cesium-unity #20**：Unity 无 Float64 → 手动 dynamic rebasing
-- **GeoForge**（Session 6 第二轮诊断）：`viewRTE[14] = -26369352` 确认
+- **GIS-Forge**（Session 6 第二轮诊断）：`viewRTE[14] = -26369352` 确认
 
 ---
 
@@ -156,7 +156,7 @@ RTE 的解法：
 
 Globe 构建了正确的 vpMatrix，但 GPU 收到了完全不同的矩阵。典型表征：projMatrix[0] 和 [5] 是**负数**。
 
-### GeoForge 实际调试（第一轮，初始诊断）
+### GIS-Forge 实际调试（第一轮，初始诊断）
 
 ```
 日志：
@@ -308,7 +308,7 @@ console.log(`[EggDiag] CSS:${canvas.clientWidth}×${canvas.clientHeight} Phys:${
 
 ---
 
-## GeoForge 调试时间线
+## GIS-Forge 调试时间线
 
 ```
 Session 6 调试轨迹（两轮诊断定位根因）：
@@ -330,7 +330,7 @@ Session 6 调试轨迹（两轮诊断定位根因）：
 
 ---
 
-## 与 GeoForge 文档的对接
+## 与 GIS-Forge 文档的对接
 
 | 根因 | 解决方案出处 | 具体位置 |
 |------|------------|---------|

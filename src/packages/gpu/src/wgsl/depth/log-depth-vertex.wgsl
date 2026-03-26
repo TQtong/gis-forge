@@ -1,5 +1,5 @@
 
-/// GeoForge 对数深度参数（放入 uniform buffer，16 字节对齐）。
+/// GIS-Forge 对数深度参数（放入 uniform buffer，16 字节对齐）。
 struct GeoForgeLogDepthParams {
   near: f32,
   far: f32,

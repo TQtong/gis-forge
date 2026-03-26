@@ -10,7 +10,7 @@
 // ===================== 顶层 StyleSpec =====================
 
 /**
- * GeoForge 样式文档（对标 MapLibre Style Spec v8）。
+ * GIS-Forge 样式文档（对标 MapLibre Style Spec v8）。
  * 完整描述地图的视觉表现：数据源、图层渲染规则、字形/精灵图资源、
  * 初始视口状态和全局光照参数。
  *
@@ -20,7 +20,7 @@
  * @example
  * const style: StyleSpec = {
  *   version: 8,
- *   name: 'GeoForge Dark',
+ *   name: 'GIS-Forge Dark',
  *   sources: {
  *     openmaptiles: {
  *       type: 'vector',
@@ -47,7 +47,7 @@ export interface StyleSpec {
    * 仅用于 UI 展示和调试日志，不影响渲染。
    * 可选，默认为 undefined。
    *
-   * @example 'GeoForge Dark Mode'
+   * @example 'GIS-Forge Dark Mode'
    */
   readonly name?: string;
 
@@ -176,7 +176,7 @@ export interface SourceSpec {
    * - `'geojson'`: 内嵌或远程 GeoJSON 数据
    * - `'image'`: 静态地理参考图片
    * - `'video'`: 静态地理参考视频
-   * - `'3dtiles'`: OGC 3D Tiles（GeoForge 扩展）
+   * - `'3dtiles'`: OGC 3D Tiles（GIS-Forge 扩展）
    * 允许 string 以支持 ExtensionRegistry 注册的自定义数据源类型。
    */
   readonly type: 'vector' | 'raster' | 'raster-dem' | 'geojson' | 'image' | 'video' | '3dtiles' | string;
@@ -222,7 +222,7 @@ export interface SourceSpec {
    * 瓦片像素尺寸。
    * 单位：像素。常用值 256 或 512。
    * 影响 LOD 计算和地面分辨率换算。
-   * 可选，默认 512（GeoForge 默认值，比传统 256 减少请求数）。
+   * 可选，默认 512（GIS-Forge 默认值，比传统 256 减少请求数）。
    */
   readonly tileSize?: number;
 
@@ -338,7 +338,7 @@ export interface LayerStyleSpec {
    * - `'raster'`: 栅格影像
    * - `'hillshade'`: 山影
    * - `'background'`: 背景色
-   * - `'sky'`: 天空/大气（GeoForge 扩展）
+   * - `'sky'`: 天空/大气（GIS-Forge 扩展）
    * 允许 string 以支持 ExtensionRegistry 注册的自定义图层类型。
    */
   readonly type:
@@ -479,7 +479,7 @@ export interface LightSpec {
 
 /**
  * 样式表达式（Style Expression）。
- * GeoForge 样式系统的核心，用于在样式规格中定义数据驱动和缩放级别相关的动态值。
+ * GIS-Forge 样式系统的核心，用于在样式规格中定义数据驱动和缩放级别相关的动态值。
  * 支持以下运算符类别：
  *
  * **属性访问**：`['get', name]`, `['has', name]`

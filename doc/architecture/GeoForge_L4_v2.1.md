@@ -1,7 +1,7 @@
-# GeoForge 架构设计 — L4 场景层完整接口定义（v2.1）
+# GIS-Forge 架构设计 — L4 场景层完整接口定义（v2.1）
 
 > **定位**：L4 是引擎的"语义层"——图层/数据源/样式/标注/空间查询。
-> **包名**：@geoforge/scene
+> **包名**：@gis-forge/scene
 > **模块数**：11 个核心模块（不变）
 >
 > **v2.1 修订**：
@@ -22,9 +22,9 @@ import type {
   Feature, Geometry, FeatureCollection,
   TileCoord, TileData, TileParams, TileState,
   StyleExpression, FilterExpression, StyleSpec, LayerStyleSpec, SourceSpec,
-} from '@geoforge/core';
+} from '@gis-forge/core';
 
-import type { CameraController, CameraAnimation } from '@geoforge/runtime';
+import type { CameraController, CameraAnimation } from '@gis-forge/runtime';
 ```
 
 ---
@@ -37,16 +37,16 @@ import type { CameraController, CameraAnimation } from '@geoforge/runtime';
 
 ```typescript
 // v2.0: Feature 在 L4/SpatialQuery 本地定义
-// v2.1: 删除本地定义，从 @geoforge/core import
-import type { Feature } from '@geoforge/core';
+// v2.1: 删除本地定义，从 @gis-forge/core import
+import type { Feature } from '@gis-forge/core';
 ```
 
 ### 变更 2：StyleExpression / FilterExpression 引用 L0
 
 ```typescript
 // v2.0: StyleExpression 在 L4/StyleEngine 本地定义
-// v2.1: 删除本地定义，从 @geoforge/core/types/style-spec import
-import type { StyleExpression, FilterExpression } from '@geoforge/core';
+// v2.1: 删除本地定义，从 @gis-forge/core/types/style-spec import
+import type { StyleExpression, FilterExpression } from '@gis-forge/core';
 ```
 
 ### 变更 3：AnimationManager.flyTo 委托给 CameraController
@@ -108,7 +108,7 @@ export interface Layer {
 ### layer-tile-raster — 栅格瓦片图层
 
 ```typescript
-// @geoforge/layer-tile-raster — 解决 #4.1 瓦片接缝
+// @gis-forge/layer-tile-raster — 解决 #4.1 瓦片接缝
 
 export interface RasterTileLayerOptions {
   readonly id: string;
@@ -135,7 +135,7 @@ export interface RasterTileLayer extends Layer {
 ### layer-tile-vector — 矢量瓦片图层
 
 ```typescript
-// @geoforge/layer-tile-vector — 解决 #5.1 三角剖分、#5.2 宽线渲染
+// @gis-forge/layer-tile-vector — 解决 #5.1 三角剖分、#5.2 宽线渲染
 
 export interface VectorTileLayerOptions {
   readonly id: string;
@@ -161,7 +161,7 @@ export interface VectorTileLayer extends Layer {
 ### layer-geojson — GeoJSON 图层
 
 ```typescript
-// @geoforge/layer-geojson — 解决 #9.3 大 GeoJSON
+// @gis-forge/layer-geojson — 解决 #9.3 大 GeoJSON
 
 export interface GeoJSONLayerOptions {
   readonly id: string;
@@ -190,7 +190,7 @@ export interface GeoJSONLayer extends Layer {
 ### layer-terrain — 地形图层
 
 ```typescript
-// @geoforge/layer-terrain — 解决 #4.2 LOD 裂缝、#8.3 地形叠加
+// @gis-forge/layer-terrain — 解决 #4.2 LOD 裂缝、#8.3 地形叠加
 
 export interface TerrainLayerOptions {
   readonly source: string;
@@ -214,7 +214,7 @@ export interface TerrainLayer extends Layer {
 ### globe — 地球渲染器
 
 ```typescript
-// @geoforge/globe — 解决 #8.1 大气散射、#8.4 阴影
+// @gis-forge/globe — 解决 #8.1 大气散射、#8.4 阴影
 
 export interface GlobeOptions {
   readonly atmosphere?: boolean;

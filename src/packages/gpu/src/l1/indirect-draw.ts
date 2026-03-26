@@ -223,7 +223,7 @@ export function createIndirectDrawManager(
     const handle = bufferPool.acquire(
       totalSize,
       GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      label ?? 'geoforge-indirect-draw'
+      label ?? 'gis-forge-indirect-draw'
     );
 
     return handle;
@@ -239,7 +239,7 @@ export function createIndirectDrawManager(
     }
 
     cachedWriteLayout = gpuDevice.createBindGroupLayout({
-      label: 'geoforge-indirect-write-layout',
+      label: 'gis-forge-indirect-write-layout',
       entries: [
         {
           binding: 0,
@@ -272,7 +272,7 @@ export function createIndirectDrawManager(
     }
 
     return gpuDevice.createBindGroup({
-      label: label ?? `geoforge-indirect-write-bg-${indirectBuffer.id}`,
+      label: label ?? `gis-forge-indirect-write-bg-${indirectBuffer.id}`,
       layout,
       entries: [
         {

@@ -1,6 +1,6 @@
 // ============================================================
 // L5 extensions — ExtensionRegistry：六类扩展点统一注册表
-// 依赖：无（零 npm）；错误模型与 GeoForge 结构化错误对齐
+// 依赖：无（零 npm）；错误模型与 GIS-Forge 结构化错误对齐
 // ============================================================
 
 /**
@@ -54,7 +54,7 @@ export interface ExtensionMeta {
   readonly version?: string;
 
   /**
-   * 兼容的 GeoForge 引擎版本范围（semver range，可选）。
+   * 兼容的 GIS-Forge 引擎版本范围（semver range，可选）。
    */
   readonly engineVersionRange?: string;
 
@@ -90,7 +90,7 @@ interface RegistryEntry {
 }
 
 /**
- * GeoForge 扩展层结构化错误：携带机器可读错误码与可选上下文。
+ * GIS-Forge 扩展层结构化错误：携带机器可读错误码与可选上下文。
  *
  * @example
  * throw new GeoForgeError('EXT_REGISTRY_INVALID_ID', 'extension id must be non-empty', { id: '' });

@@ -12,10 +12,10 @@ import type { Feature } from '../../core/src/types/feature.ts';
 // ---------------------------------------------------------------------------
 
 /** 高对比模式在 documentElement 上使用的 className */
-const HIGH_CONTRAST_CLASS = 'geoforge-a11y-high-contrast';
+const HIGH_CONTRAST_CLASS = 'gis-forge-a11y-high-contrast';
 
 /** Live region 元素 ID，便于单例复用 */
-const LIVE_REGION_ID = 'geoforge-a11y-live-region';
+const LIVE_REGION_ID = 'gis-forge-a11y-live-region';
 
 /** 屏幕阅读器轮播要素时最大缓存条数，防止内存增长 */
 const MAX_FOCUS_RING = 512;

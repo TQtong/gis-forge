@@ -8,11 +8,11 @@ import type { Feature } from '../../core/src/types/feature.ts';
 import type { TileCoord } from '../../core/src/types/tile.ts';
 
 // ---------------------------------------------------------------------------
-// 结构化错误（与 GeoForge 规范对齐；scene 包内自包含最小实现）
+// 结构化错误（与 GIS-Forge 规范对齐；scene 包内自包含最小实现）
 // ---------------------------------------------------------------------------
 
 /**
- * GeoForge 场景层结构化错误：携带机器可读错误码与可选上下文。
+ * GIS-Forge 场景层结构化错误：携带机器可读错误码与可选上下文。
  *
  * @example
  * throw new GeoForgeError('SOURCE_DUPLICATE', 'source id already exists', { id: 'roads' });

@@ -1,5 +1,5 @@
 /**
- * @file GeoForge L5 — InteractionManager（EP6 事件路由实现）
+ * @file GIS-Forge L5 — InteractionManager（EP6 事件路由实现）
  *
  * @description
  * 维护「当前激活工具」与「默认工具」两条链；指针/键盘/滚轮事件优先派发到激活工具，

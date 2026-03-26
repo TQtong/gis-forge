@@ -237,7 +237,7 @@ export function rayAABB(
  * 检测两个 2D 轴对齐包围盒（BBox2D）是否重叠。
  * 使用分离轴定理的简化版本：如果在任何轴上两个盒子没有重叠，则不相交。
  *
- * BBox2D 使用 { west, south, east, north } 格式（与 GeoForge 类型定义一致）。
+ * BBox2D 使用 { west, south, east, north } 格式（与 GIS-Forge 类型定义一致）。
  *
  * @param a - 第一个包围盒 { west, south, east, north }
  * @param b - 第二个包围盒 { west, south, east, north }

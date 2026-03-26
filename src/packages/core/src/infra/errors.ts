@@ -53,7 +53,7 @@ export type GeoForgeErrorCodeType = (typeof GeoForgeErrorCode)[keyof typeof GeoF
 // ======================== GeoForgeError ========================
 
 /**
- * GeoForge 结构化错误。
+ * GIS-Forge 结构化错误。
  * 在标准 Error 上附加 `code` 与可选 `context`，便于上层按类型恢复或降级。
  */
 export class GeoForgeError extends Error {

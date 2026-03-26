@@ -1,5 +1,5 @@
 // ============================================================
-// l2/pipeline-cache.ts — 渲染 / 计算管线缓存（GeoForge L2）
+// l2/pipeline-cache.ts — 渲染 / 计算管线缓存（GIS-Forge L2）
 // 层级：L2（渲染层）
 // 职责：按 PipelineDescriptor 与 WGSL 源码缓存 GPURenderPipeline /
 //       GPUComputePipeline；统计命中、未命中与编译耗时；支持异步创建与预热。
@@ -16,10 +16,10 @@ declare const __DEV__: boolean | undefined;
 /** 顶点输入步长（字节）：vec3+vec3+vec2+vec4，与 wgsl-templates VertexInput 一致。 */
 const VERTEX_INPUT_STRIDE_BYTES = 48;
 
-/** 默认顶点着色器入口名（GeoForge 模板约定）。 */
+/** 默认顶点着色器入口名（GIS-Forge 模板约定）。 */
 const VERTEX_ENTRY_POINT = 'vs_main';
 
-/** 默认片元着色器入口名（GeoForge 模板约定）。 */
+/** 默认片元着色器入口名（GIS-Forge 模板约定）。 */
 const FRAGMENT_ENTRY_POINT = 'fs_main';
 
 /** 计算着色器默认入口名（ComputePassManager 与 getOrCreateCompute 约定）。 */
@@ -29,7 +29,7 @@ const COMPUTE_ENTRY_POINT = 'cs_main';
 const MAX_WORKGROUP_COUNT_PER_DIMENSION = 65535;
 
 /** localStorage 中保存「上次会话最常用的管线描述键」的键名（与 DevPlayground / 回顾文档 O2 一致）。 */
-const LOCAL_STORAGE_PIPELINE_WARMUP_STATS_KEY = 'geoforge:pipeline-warmup-stats';
+const LOCAL_STORAGE_PIPELINE_WARMUP_STATS_KEY = 'gis-forge:pipeline-warmup-stats';
 
 /** `saveSessionStats` 持久化的条数上限（取使用次数最多的前 N 条描述键）。 */
 const SESSION_STATS_PERSIST_TOP_N = 20;
@@ -40,7 +40,7 @@ const SESSION_STATS_PERSIST_TOP_N = 20;
 const DEFAULT_WARMUP_COLOR_FORMAT: GPUTextureFormat = 'bgra8unorm';
 
 /**
- * 默认预热用的深度附件格式（GeoForge Reversed-Z 约定）。
+ * 默认预热用的深度附件格式（GIS-Forge Reversed-Z 约定）。
  */
 const DEFAULT_WARMUP_DEPTH_FORMAT: GPUTextureFormat = 'depth32float';
 
@@ -89,7 +89,7 @@ export interface PipelineDescriptor {
   /** 面剔除模式。 */
   readonly cullMode: GPUCullMode;
 
-  /** 深度比较函数（GeoForge 默认 Reversed-Z 为 `greater`）。 */
+  /** 深度比较函数（GIS-Forge 默认 Reversed-Z 为 `greater`）。 */
   readonly depthCompare: GPUCompareFunction;
 
   /** 是否写入深度缓冲。 */
@@ -273,7 +273,7 @@ export interface PipelineCache {
   getOrCreateComputeAsync(shaderCode: string, label?: string): Promise<GPUComputePipeline>;
 }
 
-/** 与 GeoForge 顶点模板一致的 `GPUVertexBufferLayout`（单流交错属性）。 */
+/** 与 GIS-Forge 顶点模板一致的 `GPUVertexBufferLayout`（单流交错属性）。 */
 const STANDARD_VERTEX_BUFFER_LAYOUT: GPUVertexBufferLayout = {
   arrayStride: VERTEX_INPUT_STRIDE_BYTES,
   stepMode: 'vertex',
@@ -356,7 +356,7 @@ function validatePipelineDescriptor(descriptor: PipelineDescriptor): void {
  * 构造默认固定功能状态 + 给定着色变体的 `PipelineDescriptor`，供自动预热与默认四类墨卡托组合使用。
  *
  * @param shaderVariant - 投影 / 几何 / 样式 / 特性四元组
- * @returns 与 GeoForge 默认场景 Pass 一致的渲染管线描述
+ * @returns 与 GIS-Forge 默认场景 Pass 一致的渲染管线描述
  */
 function createBaseWarmupPipelineDescriptor(shaderVariant: ShaderVariantKey): PipelineDescriptor {
   return {

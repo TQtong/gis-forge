@@ -1,4 +1,4 @@
-# GeoForge 架构设计 — L6 预设层完整接口定义
+# GIS-Forge 架构设计 — L6 预设层完整接口定义
 
 > **定位**：L6 是面向最终用户的便利层。"5 行代码出地图"的承诺在这里实现。
 > **核心原则**：零新逻辑（只组装 L0~L5）、默认值合理（开箱即用）、逃生舱口（暴露底层）、可拆解（用户可渐进替换为底层模块）。
@@ -18,9 +18,9 @@
 import type {
   BBox2D, Viewport, CameraState, PickResult, Feature, FeatureCollection,
   StyleSpec, SourceSpec, LayerStyleSpec, FilterExpression, LightSpec,
-} from '@geoforge/core';
+} from '@gis-forge/core';
 
-import type { CameraController, CameraAnimation, ViewMorph } from '@geoforge/runtime';
+import type { CameraController, CameraAnimation, ViewMorph } from '@gis-forge/runtime';
 ```
 
 ---
@@ -29,10 +29,10 @@ import type { CameraController, CameraAnimation, ViewMorph } from '@geoforge/run
 
 | # | 包名 | 入口类 | 继承 | gzipped |
 |---|------|--------|------|---------|
-| 1 | @geoforge/preset-2d | Map2D | — | ~120KB |
-| 2 | @geoforge/preset-25d | Map25D | extends Map2D | ~155KB |
-| 3 | @geoforge/preset-3d | Globe3D | — | ~195KB |
-| 4 | @geoforge/preset-full | MapFull | 包含所有 | ~350KB |
+| 1 | @gis-forge/preset-2d | Map2D | — | ~120KB |
+| 2 | @gis-forge/preset-25d | Map25D | extends Map2D | ~155KB |
+| 3 | @gis-forge/preset-3d | Globe3D | — | ~195KB |
+| 4 | @gis-forge/preset-full | MapFull | 包含所有 | ~350KB |
 
 ---
 
@@ -128,11 +128,11 @@ export interface SourceSpec {
 
 ---
 
-## 包 1：@geoforge/preset-2d — Map2D
+## 包 1：@gis-forge/preset-2d — Map2D
 
 ```typescript
 // ============================================================
-// @geoforge/preset-2d
+// @gis-forge/preset-2d
 // 最简 2D 地图，对标 MapLibre GL 的核心 API
 // ============================================================
 
@@ -314,7 +314,7 @@ export class Map2D {
   };
 
   // ★ v2.1: 逃生舱口 camera 返回 L3 CameraController
-  get camera(): CameraController;              // ★ 来自 @geoforge/runtime
+  get camera(): CameraController;              // ★ 来自 @gis-forge/runtime
 
   get config(): EngineConfig;
 }
@@ -366,11 +366,11 @@ export class FullscreenControl implements IControl {
 
 ---
 
-## 包 2：@geoforge/preset-25d — Map25D
+## 包 2：@gis-forge/preset-25d — Map25D
 
 ```typescript
 // ============================================================
-// @geoforge/preset-25d
+// @gis-forge/preset-25d
 // 在 Map2D 基础上增加 pitch/bearing/建筑拉伸
 // ============================================================
 
@@ -412,11 +412,11 @@ export interface LightSpec {
 
 ---
 
-## 包 3：@geoforge/preset-3d — Globe3D
+## 包 3：@gis-forge/preset-3d — Globe3D
 
 ```typescript
 // ============================================================
-// @geoforge/preset-3d
+// @gis-forge/preset-3d
 // 3D 数字地球，对标 CesiumJS 的核心 API
 // ============================================================
 
@@ -596,11 +596,11 @@ export interface EntitySpec {
 
 ---
 
-## 包 4：@geoforge/preset-full — MapFull
+## 包 4：@gis-forge/preset-full — MapFull
 
 ```typescript
 // ============================================================
-// @geoforge/preset-full
+// @gis-forge/preset-full
 // 所有功能 + 运行时模式切换
 // ============================================================
 
@@ -737,7 +737,7 @@ const camera = createCamera3D({
 ```typescript
 // 场景：用户从 preset-2d 起步，发现需要自定义 Shader
 
-import { Map } from '@geoforge/preset-2d';
+import { Map } from '@gis-forge/preset-2d';
 
 const map = new Map({ container: 'map', center: [116.4, 39.9], zoom: 10 });
 
@@ -756,7 +756,7 @@ shaderAssembler.registerHook({
 });
 
 // 第三步：如果需要更深的控制，直接使用底层模块
-import { createCustomLayer } from '@geoforge/core';
+import { createCustomLayer } from '@gis-forge/core';
 
 map.addLayer({
   id: 'particle-layer',
@@ -792,7 +792,7 @@ map.addLayer({
 |------|-------------|------|
 | `queryRenderedFeatures` 返回 `Promise<Feature[]>` | 不一致 #11 | L2 Picking 是异步的 |
 | Globe3D heading → bearing | 不一致 #3 | 统一使用 bearing（弧度） |
-| `get camera()` 返回 CameraController | 缺口 #1 对接 | 来自 @geoforge/runtime |
+| `get camera()` 返回 CameraController | 缺口 #1 对接 | 来自 @gis-forge/runtime |
 | Feature / PickResult / CameraState 引用 L0 | 不一致 #3 #4 #6 | 消除跨层类型定义 |
 | MapMouseEvent.features 类型为 PickResult[] | 不一致 #6 | 来自 L0 定义 |
 | 初始化流程补充 CameraController 创建 | 缺口 #1 | Map2D 用 Camera2D，Globe3D 用 Camera3D |

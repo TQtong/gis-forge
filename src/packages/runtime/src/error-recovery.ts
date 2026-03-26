@@ -169,7 +169,7 @@ export interface ErrorRecovery {
   onRecovery(callback: (resourceId: string) => void): () => void;
 }
 
-/** 默认重试策略，与 GeoForge L3 文档默认值对齐。 */
+/** 默认重试策略，与 GIS-Forge L3 文档默认值对齐。 */
 const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxRetries: 3,
   baseDelay: 1000,
