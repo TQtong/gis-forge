@@ -415,6 +415,7 @@ export class Globe3D {
             { isDestroyed: () => this._destroyed },
             (sx, sy) => this._pickGlobeSync(sx, sy),
             () => ({ width: this._viewport.width, height: this._viewport.height }),
+            this._canvas
         );
         this._boundMouseDown = _handlers.onMouseDown;
         this._boundMouseMove = _handlers.onMouseMove;
