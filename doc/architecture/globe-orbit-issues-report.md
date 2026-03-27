@@ -13,19 +13,10 @@
 
 ### 1.2 根因
 
-```typescript
-// globe-interaction.ts 当前代码
-if (state.dragButton === 1) {
-    const bearingDelta = e.movementX * ROTATE_SENSITIVITY;
-    const pitchDelta = e.movementY * ROTATE_SENSITIVITY;
-    camera3D.handleRotate(bearingDelta, pitchDelta);  // ← 问题在这里
-}
-```
-
-`handleRotate` 做的是：**相机位置不变，只改变朝向（视线方向）**。
+`handleRotate(bearingDelta, pitchDelta)` 做的是：**相机位置不变，只改变朝向（视线方向）**。
 
 ```
-GeoForge（相机原地扭头）：
+GeoForge 旧实现（相机原地扭头）：
 
   拖拽前：  ●（相机）──────→ 看向地球中心     地球在屏幕中央
   拖拽后：  ●（相机）────→ 视线偏左上方       地球在屏幕上滑走了
@@ -33,14 +24,14 @@ GeoForge（相机原地扭头）：
 
 视线偏了，地球的投影位置自然跟着变——所以地球往反方向「跑」。
 
-### 1.3 CesiumJS 的正确做法
+### 1.3 正确做法（CesiumJS / 已实现）
 
 CesiumJS 中键 = `tilt`（`CameraEventType.MIDDLE_DRAG`），对应 `tilt3D` / `tilt3DOnTerrain`。
 
-它做的是：**相机物理移动到新位置，但始终看向地球上同一个 pivot 点**。
+**相机物理移动到新位置，但始终看向地球上同一个 pivot 点**。
 
 ```
-CesiumJS（相机绕 pivot 轨道运动）：
+Pivot Orbit（相机绕 pivot 轨道运动）：
 
   拖拽前：  ●（相机）
             │╲
@@ -58,7 +49,28 @@ CesiumJS 源码关键 API：
 - **mouseDown**：`pickGlobe(startPosition)` → `_tiltCenter`（ECEF pivot）
 - **mouseMove**：`camera.rotateUp(angle)` / `camera.rotateRight(angle)` — 改变的是**相机位置**，不是朝向；相机始终看向 transform 中心
 
-### 1.4 各引擎中键行为对比
+### 1.4 GeoForge 已实现的修复
+
+`globe-interaction.ts` 中的 `applyCameraOrbit` 函数已替换旧的 `handleRotate`：
+
+```
+mouseDown（中键）：
+  pickGlobeECEF → pivot ECEF → computeENUBasis（缓存 9 float）
+  → cam-pivot 向量在 ENU 中投影 → 初始 bearing/pitch
+  → orbitDistance = max(|cam - pivot|, 100)
+
+mouseMove（中键，每帧）：
+  movementX/Y → 帧间增量累加到 bearing/pitch
+  → pitch clamp [ORBIT_PITCH_MIN, ORBIT_PITCH_MAX]
+  → pivot + ENU + bearing/pitch/distance → 新相机 ECEF
+  → Bowring 2 次迭代 → 经纬高
+  → setPosition + setOrientation 原子更新
+
+未命中球面：
+  → 回退到 handleRotate（屏幕空间旋转）
+```
+
+### 1.5 各引擎中键行为对比
 
 | 引擎 | 中键行为 | 旋转中心 | 地球是否移动 |
 |------|---------|---------|-------------|
@@ -67,7 +79,7 @@ CesiumJS 源码关键 API：
 | **iTowns** | GlobeControls orbit | spherical 坐标系中心 | **不移动** |
 | **Three.js OrbitControls** | orbit | controls.target | **不移动** |
 | **Mapbox GL JS** | dragRotate | map center（屏幕中心） | **不移动** |
-| **GeoForge（当前）** | handleRotate（改朝向） | 无（相机原地扭头） | **移动** ← BUG |
+| **GeoForge（已修复）** | applyCameraOrbit | mouseDown pick 的表面点 | **不移动** ✓ |
 
 ---
 
@@ -186,53 +198,22 @@ https://github.com/maplibre/maplibre-gl-js/issues/5104
 
 ---
 
-## 四、修复方案
+## 四、防御检查表（全部 ✓ 已实现）
 
-将 `handleRotate` 替换为 pivot orbit：
+| # | 防御点 | 来源 | 状态 | 实现位置 |
+|---|--------|------|------|---------|
+| 1 | Pivot mouseDown 锁定，拖拽中不重新 pick | #12560 | ✓ | `onMouseDown` 中 `pickGlobeECEF` 一次，`onMouseMove` 不调 |
+| 2 | Bearing/Pitch 一次性应用（不分两步旋转） | PR #9562 | ✓ | `applyCameraOrbit` 在 ENU 空间单步算 ECEF 位置 |
+| 3 | orbitDistance ≥ 100m | #6783, #7094 | ✓ | `globe-interaction.ts` `Math.max(sqrt(...), 100)` |
+| 4 | mouseUp 监听 window 而非 canvas | #1855 | ✓ | `globe-3d.ts` `window.addEventListener('mouseup')` |
+| 5 | 拖拽期间不切换交互模式 | #7232 | ✓ | mouseDown 确定 orbit/fallback 后锁定 |
+| 6 | Orbit distance 拖拽中不变 | #11353 | ✓ | `orbitDistance` 在 mouseDown 锁定，mouseMove 不修改 |
+| 7 | ENU 基向量 mouseDown 缓存 | #12560 | ✓ | `computeENUBasis` 只在 mouseDown 调一次，写入 `_orbitENUBuf` |
+| 8 | 极地 pitch clamp | #9689 | ✓ | `ORBIT_PITCH_MIN = -0.49π`（≈-88.2°），`ORBIT_PITCH_MAX = -0.0175`（≈-1°） |
+| 9 | camAlt 下限 | #12137 | ✓ | `applyCameraOrbit` 末尾 `Math.max(camAlt, 100)` |
+| 10 | Bowring ECEF→LLH（不用球面近似） | — | ✓ | `applyCameraOrbit` 中 2 次 Bowring 迭代，精度 < 1m |
+| 11 | cam≈pivot 退化：`atan2(0,0)` 防护 | #6783, #5104 | ✓ | `ORBIT_CAM_PIVOT_DEGENERATE_DIST_SQ_M2` 下用 `getOrientation` 种子；否则 `horizSafe=max(horizDist,1e-15)` |
+| 12 | `setPosition`/`setOrientation` 前 `Number.isFinite` | PR #3605 | ✓ | `applyCameraOrbit` 内非有限则 `return` |
+| 13 | 失焦/隐藏页签时结束拖拽 | #1855, #5083 | ✓ | `globe-3d.ts` `window blur` + `document visibilitychange` → 合成 `mouseup` |
 
-```
-mouseDown（中键）：
-  ┌─ pickGlobeECEF(e.clientX, e.clientY) → pivot ECEF
-  ├─ computeENUBasis(pivot) → 缓存 9 float（拖拽中不变）
-  ├─ cam-pivot 向量投影到 ENU → 初始 bearing/pitch
-  └─ orbitDistance = |cam - pivot|，clamp ≥ 100m
-
-mouseMove（中键，每帧）：
-  ┌─ movementX/Y → 帧间增量累加到 bearing/pitch
-  ├─ pitch clamp [-88°, -1°]
-  ├─ pivot + ENU + bearing/pitch/distance → 新相机 ECEF
-  ├─ ECEF → 经纬高（Bowring 2 次迭代）
-  └─ setPosition + setOrientation 原子更新
-
-未命中球面：
-  └─ 回退到 handleRotate（屏幕空间旋转）
-```
-
-完整代码实现见 `middle-button-orbit-fix.md`。
-
----
-
-## 五、防御检查表
-
-| # | 防御点 | 来源 | 状态 | 措施 |
-|---|--------|------|------|------|
-| 1 | Pivot mouseDown 锁定，拖拽中不重新 pick | #12560 | ✓ | `orbitPivot` 在 mouseDown 设置 |
-| 2 | Bearing/Pitch 一次性应用（不分两步旋转） | PR #9562 | ✓ | ENU 空间单步算 ECEF 位置 |
-| 3 | **orbitDistance ≥ 100m** | #6783, #7094 | **⚠ 需修复** | `Math.max(dist, 100)` |
-| 4 | mouseUp 监听 window 而非 canvas | #1855 | ✓ | `window.addEventListener('mouseup')` |
-| 5 | 拖拽期间不切换交互模式 | #7232 | ✓ | mouseDown 确定后锁定 |
-| 6 | Orbit distance 拖拽中不变 | #11353 | ✓ | mouseDown 锁定 |
-| 7 | ENU 基向量 mouseDown 缓存 | #12560 | ✓ | `computeENUBasis` 只调一次 |
-| 8 | 极地 pitch clamp | #9689 | ✓ | `ORBIT_PITCH_MIN = -0.49π` |
-| 9 | camAlt 下限 | #12137 | ✓ | `Math.max(camAlt, 100)` |
-| 10 | Bowring ECEF→LLH | — | ✓ | 2 次迭代，精度 < 1m |
-
-唯一缺失的一行代码：
-
-```typescript
-// mouseDown 计算 orbitDistance 后
-state.orbitDistance = Math.max(
-    Math.sqrt(dx * dx + dy * dy + dz * dz),
-    100, // 防止零向量 → NaN → 渲染崩溃（CesiumJS #6783/#7094/PR #3605）
-);
-```
+所有防御点均在 `globe-interaction.ts`、`globe-constants.ts` 和 `globe-3d.ts` 中实现。

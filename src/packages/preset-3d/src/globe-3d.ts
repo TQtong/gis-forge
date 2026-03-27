@@ -294,6 +294,25 @@ export class Globe3D {
     private readonly _boundWheel: (e: WheelEvent) => void;
     private readonly _boundContextMenu: (e: Event) => void;
 
+    /**
+     * 窗口失焦时结束拖拽（中键/左键），避免「鼠标已在别处松开但 isDragging 仍为 true」
+     * （CesiumJS #1855：拖出 iframe 松手；MapLibre #5083：中断后状态残留）。
+     */
+    private readonly _onWindowBlurEndDrag = (): void => {
+        if (this._destroyed || !this._interactionState.isDragging) { return; }
+        this._boundMouseUp(
+            new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: 0, clientY: 0 }),
+        );
+    };
+
+    /**
+     * 页签隐藏或系统锁屏时结束拖拽，与 blur 互补（部分浏览器 blur 不触发）。
+     */
+    private readonly _onDocumentVisibilityEndDrag = (): void => {
+        if (document.visibilityState !== 'hidden') { return; }
+        this._onWindowBlurEndDrag();
+    };
+
     // ════════════════════════════════════════════════════════════
     // 构造函数
     // ════════════════════════════════════════════════════════════
@@ -395,7 +414,7 @@ export class Globe3D {
             this._interactionState,
             { isDestroyed: () => this._destroyed },
             (sx, sy) => this._pickGlobeSync(sx, sy),
-            () => this._viewport.height,
+            () => ({ width: this._viewport.width, height: this._viewport.height }),
         );
         this._boundMouseDown = _handlers.onMouseDown;
         this._boundMouseMove = _handlers.onMouseMove;
@@ -552,6 +571,8 @@ export class Globe3D {
         this._canvas.removeEventListener('mousedown', this._boundMouseDown);
         window.removeEventListener('mousemove', this._boundMouseMove);
         window.removeEventListener('mouseup', this._boundMouseUp);
+        window.removeEventListener('blur', this._onWindowBlurEndDrag);
+        document.removeEventListener('visibilitychange', this._onDocumentVisibilityEndDrag);
         this._canvas.removeEventListener('wheel', this._boundWheel);
         this._canvas.removeEventListener('contextmenu', this._boundContextMenu);
 
@@ -1934,6 +1955,8 @@ export class Globe3D {
         // mousemove/mouseup 在 window 上监听（拖拽可能溢出 Canvas）
         window.addEventListener('mousemove', this._boundMouseMove);
         window.addEventListener('mouseup', this._boundMouseUp);
+        window.addEventListener('blur', this._onWindowBlurEndDrag);
+        document.addEventListener('visibilitychange', this._onDocumentVisibilityEndDrag);
 
         // 滚轮缩放
         this._canvas.addEventListener('wheel', this._boundWheel, { passive: false });

@@ -254,3 +254,10 @@ export const ORBIT_PITCH_MAX = -0.0175;  // ≈ -1°
  * 设为 -0.49π（≈ -88.2°）而非 -π/2，避免万向锁导致方位角丢失。
  */
 export const ORBIT_PITCH_MIN = -Math.PI * 0.49;  // ≈ -88.2°
+
+/**
+ * 判定「相机–pivot ECEF 向量是否退化」的距离平方阈值（米²）。
+ * 小于此值时 `eastProj/northProj/upProj` 全接近零，`atan2(0,0)` → NaN → VP 矩阵污染（CesiumJS #6783 同类）。
+ * 取 (1mm)²：正常轨道不可能短于此，仅数值重合或故障路径会触发。
+ */
+export const ORBIT_CAM_PIVOT_DEGENERATE_DIST_SQ_M2 = 1e-6;

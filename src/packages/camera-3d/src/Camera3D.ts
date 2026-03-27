@@ -1373,7 +1373,10 @@ class Camera3DImpl implements Camera3D {
         }
 
         const zoomDelta = zNew - oldZoom;
-        const moveFactor = 1 - Math.pow(2, -zoomDelta * 0.1);
+        // moveFactor = 沿射线移动的高度比例，使一个 zoom 级对应高度减半
+        // zoom 数学推导：altNew/altOld = 2^(-delta) → moveFraction = 1 - 2^(-delta)
+        // delta=1.0 → moveFactor=0.5（高度减半），delta=0.5 → moveFactor≈0.293
+        const moveFactor = 1 - Math.pow(2, -zoomDelta);
         const step = tHit * moveFactor;
         if (!Number.isFinite(step)) {
             this.setZoom(zNew);
