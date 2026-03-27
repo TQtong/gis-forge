@@ -20,6 +20,7 @@ import {
     geodeticToECEF,
     WGS84_A,
 } from '../../core/src/geo/ellipsoid.ts';
+import type { Vec3d } from '../../core/src/geo/ellipsoid.ts';
 import { createCamera3D } from '../../camera-3d/src/Camera3D.ts';
 import type { Camera3D } from '../../camera-3d/src/Camera3D.ts';
 import {
@@ -166,10 +167,17 @@ export class Globe3D {
         viewMode: '3d',
     };
 
-    /** 鼠标拖拽键位与进行中标志 */
+    /** 鼠标拖拽键位与 pivot orbit 状态 */
     private readonly _interactionState: GlobeInteractionState = {
         isDragging: false,
         dragButton: -1,
+        orbitPivot: null,
+        orbitDistance: 0,
+        orbitBearing: 0,
+        orbitPitch: 0,
+        orbitENU: null,
+        orbitPivotLngRad: 0,
+        orbitPivotLatRad: 0,
     };
 
     // ─── 图层与实体（占位）───────────────────────────────────
@@ -268,6 +276,14 @@ export class Globe3D {
 
     /** 上一帧 `_renderFrame` 耗时（毫秒） */
     private _statsFrameTimeMs = 0;
+
+    // ─── 同步球面拾取（中键 orbit 用）──────────────────────
+
+    /**
+     * 拾取输出缓冲——复用，不分配。
+     * `_pickGlobeSync` 写入后调用方在同一同步回调中消费；下次调用会覆盖。
+     */
+    private readonly _pickECEFBuf = new Float64Array(3);
 
     // ─── 事件处理器引用（供 remove 时 removeEventListener）──
 
@@ -378,6 +394,8 @@ export class Globe3D {
             },
             this._interactionState,
             { isDestroyed: () => this._destroyed },
+            (sx, sy) => this._pickGlobeSync(sx, sy),
+            () => this._viewport.height,
         );
         this._boundMouseDown = _handlers.onMouseDown;
         this._boundMouseMove = _handlers.onMouseMove;
@@ -1286,6 +1304,44 @@ export class Globe3D {
 
         // screenToGlobe 返回地表交点，alt=0
         return [hit[0], hit[1], 0];
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // 同步球面拾取（中键 Pivot Orbit 用）
+    // ════════════════════════════════════════════════════════════
+
+    /**
+     * 同步球面拾取——返回 ECEF 坐标的**预分配缓冲引用**。
+     * 调用方必须在同一同步回调中消费值（下次调用会覆盖 `_pickECEFBuf`）。
+     *
+     * 流程：`screenToGlobe` 射线-椭球求交 → [lng°, lat°] → `geodeticToECEF` → ECEF [x,y,z]。
+     *
+     * @param screenX - 屏幕 X（CSS 像素）
+     * @param screenY - 屏幕 Y（CSS 像素）
+     * @returns `Float64Array(3)` 引用（ECEF 米），或 `null`（未命中球面 / 首帧无 GlobeCamera）
+     *
+     * @stability internal
+     */
+    private _pickGlobeSync(screenX: number, screenY: number): Float64Array | null {
+        // 首帧尚未渲染时无 GlobeCamera，无法计算射线
+        if (!this._lastGlobeCam) { return null; }
+
+        const gc = this._lastGlobeCam;
+
+        // 射线-椭球求交（返回 [lng°, lat°] 或 null）
+        const hit = screenToGlobe(
+            screenX, screenY,
+            gc.inverseVP_ECEF,
+            gc.viewportWidth, gc.viewportHeight,
+        );
+        if (!hit) { return null; }
+
+        // 经纬度 → ECEF（地表交点，alt=0）
+        const lonRad = hit[0] * DEG2RAD;
+        const latRad = hit[1] * DEG2RAD;
+        geodeticToECEF(this._pickECEFBuf as unknown as Vec3d, lonRad, latRad, 0);
+
+        return this._pickECEFBuf;
     }
 
     // ════════════════════════════════════════════════════════════

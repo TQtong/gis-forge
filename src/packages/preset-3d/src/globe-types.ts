@@ -454,4 +454,51 @@ export interface GlobeInteractionState {
      * 激活的键：`0` 左键平移轨道，`1` 中键旋转，` -1` 无。
      */
     dragButton: number;
+
+    // ═══ 中键 Pivot Orbit 状态 ═══
+
+    /**
+     * pivot ECEF [x,y,z]（米）。`null` 表示未命中球面，走屏幕空间回退。
+     * mouseDown 时由 `screenToGlobe` 射线求交填入；拖拽期间不变。
+     * mouseUp 后保留缓冲供下次覆盖，避免不必要的 GC。
+     */
+    orbitPivot: Float64Array | null;
+
+    /**
+     * 相机到 pivot 的距离（米）。mouseDown 时锁定，拖拽期间不变，
+     * 保证轨道运动在固定半径球壳上进行。
+     */
+    orbitDistance: number;
+
+    /**
+     * 累积方位角（弧度）。帧间 movementX 增量叠加。
+     * bearing=0 → 相机在 pivot 正北方；bearing=π/2 → 正东方。
+     */
+    orbitBearing: number;
+
+    /**
+     * 累积仰角（弧度，负值=俯视）。帧间 movementY 增量叠加。
+     * pitch=0 → 水平看 pivot；pitch=-π/4 → 45° 俯视 pivot。
+     * 范围由 `ORBIT_PITCH_MIN` 和 `ORBIT_PITCH_MAX` 限制。
+     */
+    orbitPitch: number;
+
+    /**
+     * pivot 点的 ENU 基向量（ECEF 表达），mouseDown 时算一次。
+     * 9 个 float：[E.x, E.y, E.z, N.x, N.y, N.z, U.x, U.y, U.z]。
+     * 拖拽期间 pivot 不变 → ENU 不变 → 不重算。
+     */
+    orbitENU: Float64Array | null;
+
+    /**
+     * pivot 点的经度（弧度），mouseDown 时由 `computeENUBasis` 算出。
+     * 用于 `applyCameraOrbit` 中 lookAt 计算。
+     */
+    orbitPivotLngRad: number;
+
+    /**
+     * pivot 点的纬度（弧度），mouseDown 时由 `computeENUBasis` 算出。
+     * 用于 `applyCameraOrbit` 中 lookAt 计算。
+     */
+    orbitPivotLatRad: number;
 }

@@ -221,5 +221,36 @@ export const MIN_CANVAS_DIM = 1;
  */
 export const ZOOM_SENSITIVITY = 0.05;
 
-/** 鼠标像素位移 → bearing/pitch 弧度的灵敏度（中键拖拽） */
+/** 鼠标像素位移 → bearing/pitch 弧度的灵敏度（中键拖拽，屏幕空间回退时使用） */
 export const ROTATE_SENSITIVITY = 0.003;
+
+// ─── 中键 Pivot Orbit ──────────────────────────────────────
+
+/**
+ * 中键 orbit 灵敏度系数（无量纲）。
+ * 实际灵敏度 = `(ORBIT_FACTOR × π) / viewportHeight` 弧度/像素。
+ *
+ * factor=1.0 → 拖满整个视口高度 = 180° 旋转。
+ * factor=0.8 → 拖满整个视口高度 ≈ 144° 旋转。
+ *
+ * 与 CesiumJS 的 NDC 归一化方案等价（NDC delta = pixel delta / viewport size），
+ * 不依赖相机到 pivot 的距离——距离适配由轨道几何天然提供。
+ *
+ * @see globe-interaction.ts — `applyCameraOrbit`
+ */
+export const ORBIT_FACTOR = 0.8;
+
+/**
+ * 中键 orbit 最大俯仰角（弧度），接近水平视角。
+ * 设为 -1° 而非 0°，防止相机下穿地面或 ENU 投影退化为零向量。
+ *
+ * 约束：`ORBIT_PITCH_MAX > ORBIT_PITCH_MIN`（pitch 为负值=俯视，
+ * 数值更大=更接近水平）。
+ */
+export const ORBIT_PITCH_MAX = -0.0175;  // ≈ -1°
+
+/**
+ * 中键 orbit 最小俯仰角（弧度），接近垂直俯视。
+ * 设为 -0.49π（≈ -88.2°）而非 -π/2，避免万向锁导致方位角丢失。
+ */
+export const ORBIT_PITCH_MIN = -Math.PI * 0.49;  // ≈ -88.2°

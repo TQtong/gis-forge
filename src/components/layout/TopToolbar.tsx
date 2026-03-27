@@ -5,11 +5,19 @@ import { ExportMenu } from '@/components/toolbar/ExportMenu';
 import { SearchBox } from '@/components/toolbar/SearchBox';
 import { ToolGroup } from '@/components/toolbar/ToolGroup';
 import { ViewModeSwitch } from '@/components/toolbar/ViewModeSwitch';
+import type { MapViewMode } from '@/components/toolbar/ViewModeSwitch';
+
+export interface TopToolbarProps {
+    /** 当前激活的视图模式 */
+    viewMode: MapViewMode;
+    /** 用户点击模式切换按钮时触发 */
+    onViewModeChange: (next: MapViewMode) => void;
+}
 
 /**
  * 顶栏：品牌、视图模式、搜索、工具与导出。交互状态用本地 React state（不接 store）。
  */
-export function TopToolbar(): React.ReactElement {
+export function TopToolbar({ viewMode, onViewModeChange }: TopToolbarProps): React.ReactElement {
     const [historyPanelOpen, setHistoryPanelOpen] = React.useState(false);
     const [splitViewEnabled, setSplitViewEnabled] = React.useState(false);
     const [settingsOpen, setSettingsOpen] = React.useState(false);
@@ -27,7 +35,7 @@ export function TopToolbar(): React.ReactElement {
                             GIS-Forge
                         </span>
                     </div>
-                    <ViewModeSwitch />
+                    <ViewModeSwitch mode={viewMode} onModeChange={onViewModeChange} />
                 </div>
 
                 <div className="flex min-w-0 flex-1 justify-center px-2">

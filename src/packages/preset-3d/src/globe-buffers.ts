@@ -95,3 +95,19 @@ export const _drapingParamsData = new Float32Array(4);
  * Phase 3 地形管线使用。
  */
 export const _terrainParamsData = new Float32Array(4);
+
+// ─── 中键 Orbit 预分配缓冲 ─────────────────────────────────
+
+/**
+ * orbit 计算用临时 ECEF 缓冲（mouseDown 相机位置）。
+ * 由 `createGlobeMouseHandlers` 闭包的 `onMouseDown` 写入，
+ * 在同一同步回调中立即消费——不持久化。
+ */
+export const _orbitCamECEF = new Float64Array(3);
+
+/**
+ * orbit ENU 缓冲（9 float：E/N/U 各 3 分量）。
+ * mouseDown 时由 `computeENUBasis` 写入，拖拽期间不变。
+ * 通过 `state.orbitENU` 引用此缓冲——拖拽期间零分配。
+ */
+export const _orbitENUBuf = new Float64Array(9);
