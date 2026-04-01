@@ -335,11 +335,97 @@ export interface Camera3D extends CameraController {
         anchorLngLat: [number, number],
         newZoom: number,
     ): void;
+
+    // ── ECEF 直接旋转接口（极点安全）──────────────────────────────
+
+    /**
+     * 直接获取相机 ECEF 位置向量（Float64，只读引用）。
+     *
+     * 返回内部缓冲的**只读**引用，调用方不得修改。
+     * 每帧 `update()` 执行后刷新。
+     * 用途：传给 {@link rotate}/{@link rotateHorizontal}/{@link rotateVertical} 的调用方，
+     * 避免 `getPosition()` → `toECEF()` 的大地坐标往返。
+     *
+     * @returns ECEF 位置（Float64Array[3]，米）
+     */
+    getPositionECEF(): Float64Array;
+
+    /**
+     * 绕任意 ECEF 单位轴旋转相机位置（Rodrigues，Float64 精度）。
+     * 旋转后自动同步内部大地坐标（lon/lat/alt）。
+     *
+     * @param axisECEF - 单位旋转轴（ECEF，Float64Array[3]）
+     * @param angle    - 旋转角（弧度）
+     */
+    rotate(axisECEF: Float64Array, angle: number): void;
+
+    /**
+     * 水平旋转：绕地球极轴 UNIT_Z（constrainedAxis）旋转。
+     * 等价于 Cesium `rotateHorizontal`。
+     * 极点无奇异性——任意纬度永远稳定。
+     *
+     * @param angle - 旋转角（弧度）
+     */
+    rotateHorizontal(angle: number): void;
+
+    /**
+     * 垂直旋转：绕切线轴旋转，极点前自动 clamp。
+     *
+     * 移植自 Cesium `Camera.rotateVertical`（constrainedAxis = UNIT_Z）：
+     * - 计算相机位置到北/南极的角距
+     * - `angle` 超过该角距时截断为 `(angleToAxis − EPSILON4)`
+     * - 精确在极点时：离开方向允许，深入方向阻止
+     *
+     * @param angle - 旋转角（弧度，正值向北极倾斜）
+     */
+    rotateVertical(angle: number): void;
 }
+
+// ---------------------------------------------------------------------------
+// ECEF 旋转常量（Cesium CesiumMath.EPSILON 系列等价）
+// ---------------------------------------------------------------------------
+
+/**
+ * 极点方向并行判定阈值（Cesium CesiumMath.EPSILON2）。
+ * `rotateVertical` 中用于判断相机位置是否在极点邻域内（|px|≤ε && |py|≤ε）。
+ */
+const CAM_ROT_EPSILON2 = 1e-2;
+
+/**
+ * 极点 clamp 安全余量（Cesium CesiumMath.EPSILON4，弧度）。
+ * `rotateVertical` 旋转到极点前留出 ε4 安全距离，防止 ENU 帧退化。
+ */
+const CAM_ROT_EPSILON4 = 1e-4;
 
 // ---------------------------------------------------------------------------
 // 工具函数
 // ---------------------------------------------------------------------------
+
+/**
+ * Rodrigues 旋转（Float64）：将向量 v 绕**单位轴** k 旋转 θ 弧度，结果写入 out。
+ *
+ * 公式：v_rot = v·cosθ + (k×v)·sinθ + k·(k·v)·(1−cosθ)
+ *
+ * **in-place 安全**：`out === v` 时结果正确（k×v、k·v 均在写入前完成计算）。
+ *
+ * @param v     - 被旋转向量（Float64Array[3]）
+ * @param k     - 单位旋转轴（Float64Array[3]）
+ * @param theta - 旋转角（弧度）
+ * @param out   - 输出（可与 v 相同）
+ */
+function rodrigues64(
+    v: Float64Array, k: Float64Array, theta: number, out: Float64Array,
+): void {
+    const c  = Math.cos(theta);
+    const s  = Math.sin(theta);
+    const kv = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];     // dot(k, v)
+    const kx0 = k[1] * v[2] - k[2] * v[1];                   // cross(k,v).x
+    const kx1 = k[2] * v[0] - k[0] * v[2];                   // cross(k,v).y
+    const kx2 = k[0] * v[1] - k[1] * v[0];                   // cross(k,v).z
+    out[0] = v[0] * c + kx0 * s + k[0] * kv * (1 - c);
+    out[1] = v[1] * c + kx1 * s + k[1] * kv * (1 - c);
+    out[2] = v[2] * c + kx2 * s + k[2] * kv * (1 - c);
+}
 
 /**
  * 将数值限制在闭区间 [lo, hi]；若任一参数非有限则返回安全值。
@@ -444,6 +530,8 @@ function wrapBearing(bearing: number): number {
  */
 function shortestAngleDiff(from: number, to: number): number {
     let diff = to - from;
+    // 防御 NaN/Infinity：while 循环对 Infinity 永不终止 → 死循环
+    if (!Number.isFinite(diff)) { return 0; }
     // 将差值归一化到 [-π, π]
     while (diff > Math.PI) { diff -= Math.PI * 2; }
     while (diff < -Math.PI) { diff += Math.PI * 2; }
@@ -799,8 +887,37 @@ class Camera3DImpl implements Camera3D {
     /** zoomAround：归一化视线方向（ECEF） */
     private readonly _zrDir: Float32Array;
 
+    /** rotateVertical 用：切线轴（Float64，预分配复用） */
+    private readonly _rotTan64: Float64Array;
+
+    // ── Cesium 架构：ECEF 朝向向量（Float64，primary state for rotate）────
+    /** 相机观察方向（ECEF，单位向量），等同 Cesium Camera.direction */
+    private readonly _dirECEF: Float64Array;
+    /** 相机上方向（ECEF，单位向量），等同 Cesium Camera.up */
+    private readonly _upECEF: Float64Array;
+
     /** 是否已至少执行过一次 {@link Camera3DImpl.update}（inverseVP 有效） */
     private _hasUpdatedFrame: boolean = false;
+
+    /**
+     * ECEF 向量权威标志（Cesium 架构核心）。
+     *
+     * - `true`：`rotate()` 刚修改了 `_ecefPosD` + `_dirECEF` + `_upECEF`（刚体旋转），
+     *   `update()` 必须从这些 ECEF 向量反算 geodetic + bearing/pitch，
+     *   **不得** 用旧的 geodetic/bearing/pitch 覆写 ECEF 向量。
+     * - `false`（默认）：geodetic + bearing/pitch 为权威源。
+     *
+     * 每次 `update()` 消费后重置为 `false`。
+     */
+    private _ecefAuthoritative: boolean = false;
+
+    /**
+     * bearing/pitch 脏标志。
+     * 当 setOrientation / handleRotate / animation / inertia 修改了 bearing/pitch 时设为 true。
+     * update() 非 ECEF 路径只在此标志为 true 时才调 _syncECEFVectorsFromBearingPitch()。
+     * 空闲帧（什么都没改）不同步 → _dirECEF/_upECEF 保持 rotate() 设置的正确值。
+     */
+    private _orientationDirty: boolean = true;  // 构造后第一帧需要同步
 
     /**
      * 构造 Camera3D 实例。
@@ -890,6 +1007,11 @@ class Camera3DImpl implements Camera3D {
         this._zrNear = vec3.create();
         this._zrFar = vec3.create();
         this._zrDir = vec3.create();
+        this._rotTan64 = new Float64Array(3);
+        // Cesium 架构：ECEF 朝向向量初始化
+        // 初始值在第一次 update() 中由 bearing/pitch + ENU 帧计算得出
+        this._dirECEF = new Float64Array(3);
+        this._upECEF = new Float64Array(3);
     }
 
     // ===================================================================
@@ -1092,15 +1214,244 @@ class Camera3DImpl implements Camera3D {
         this._lonRad = (Number.isFinite(lon) ? lon : 0) * DEG_TO_RAD;
         this._latRad = clamp((Number.isFinite(lat) ? lat : 0) * DEG_TO_RAD, -HALF_PI, HALF_PI);
         this._alt = clamp(Number.isFinite(alt) ? alt : DEFAULT_ALTITUDE, this._minZoomDist, this._maxZoomDist);
+        // 同步 ECEF，确保 _ecefPosD 与 geodetic 一致
+        geodeticToECEF(this._ecefPosD, this._lonRad, this._latRad, this._alt);
+        this._ecefAuthoritative = false;
+        this._orientationDirty = true;  // 位置变了 → ENU 帧变了 → 需要重算 dir/up
     }
 
     /** @inheritdoc */
     getPosition(): { lon: number; lat: number; alt: number } {
+        // 若 ECEF 为权威源（rotate*() 后尚未 update()），先按需同步 geodetic
+        if (this._ecefAuthoritative) {
+            ecefToGeodetic(this._tempGeoD, this._ecefPosD[0], this._ecefPosD[1], this._ecefPosD[2]);
+            this._lonRad = this._tempGeoD[0];
+            this._latRad = clamp(this._tempGeoD[1], -HALF_PI, HALF_PI);
+            this._alt    = this._tempGeoD[2];
+            // 注意：不重置 _ecefAuthoritative，update() 仍需知道 ECEF 是权威
+        }
         return {
             lon: this._lonRad * RAD_TO_DEG,
             lat: this._latRad * RAD_TO_DEG,
             alt: this._alt,
         };
+    }
+
+    // ── ECEF 直接旋转接口（Cesium 架构移植）────────────────────────
+
+    /** @inheritdoc */
+    getPositionECEF(): Float64Array {
+        // _ecefPosD 在每次 update() step-5 以及 rotate*() 后均保持最新。
+        return this._ecefPosD;
+    }
+
+    /** @inheritdoc */
+    rotate(axisECEF: Float64Array, angle: number): void {
+        this._checkDestroyed();
+        // ═══════════════════════════════════════════════════════════
+        // 完全移植 Cesium Camera.rotate (Camera.js lines 2027-2048)
+        //
+        //   quaternion = Quaternion.fromAxisAngle(axis, -angle);
+        //   rotation = Matrix3.fromQuaternion(quaternion);
+        //   rotation × position → position
+        //   rotation × direction → direction
+        //   rotation × up → up
+        //   right = cross(direction, up)
+        //   up = cross(right, direction)   // 重正交化
+        //
+        // 核心：position + direction + up 三个持久 ECEF 向量用同一旋转 = 刚体运动。
+        // _dirECEF/_upECEF 是持久存储，不从 bearing/pitch 重建——
+        // 这样即使越过极点，朝向也自然跟随，不会因 ENU 退化而翻转。
+        // ═══════════════════════════════════════════════════════════
+
+        const negAngle = -angle;  // Cesium 约定：内部取反
+
+        // 首次调用前确保 _dirECEF/_upECEF 已从 bearing/pitch 初始化
+        if (!this._hasUpdatedFrame) {
+            this._syncECEFVectorsFromBearingPitch();
+        }
+
+        // 同时旋转三个 ECEF 向量（刚体运动，和 Cesium Camera.rotate 完全一致）
+        rodrigues64(this._ecefPosD, axisECEF, negAngle, this._ecefPosD);
+        rodrigues64(this._dirECEF, axisECEF, negAngle, this._dirECEF);
+        rodrigues64(this._upECEF, axisECEF, negAngle, this._upECEF);
+
+        // 重正交化 up（Cesium: right = cross(dir, up); up = cross(right, dir)）
+        // 用 _rotTan64 作为临时 right 向量
+        const r = this._rotTan64;
+        const d = this._dirECEF, u = this._upECEF;
+        r[0] = d[1] * u[2] - d[2] * u[1];  // right = cross(dir, up)
+        r[1] = d[2] * u[0] - d[0] * u[2];
+        r[2] = d[0] * u[1] - d[1] * u[0];
+        u[0] = r[1] * d[2] - r[2] * d[1];  // up = cross(right, dir)
+        u[1] = r[2] * d[0] - r[0] * d[2];
+        u[2] = r[0] * d[1] - r[1] * d[0];
+
+        this._ecefAuthoritative = true;
+
+        // ═════════════════════════════════════════════════════════════
+        // 关键：立即重建 inverseVP，让同一帧内下一次 pickGlobeECEF 使用最新相机。
+        //
+        // 不这么做的后果：一帧内多次 mousemove 共用同一个过时 inverseVP，
+        // 相机越过极点后屏幕→ECEF 映射完全反转 → 旋转方向反复跳变（振荡/翻转）。
+        //
+        // Cesium 不存在此问题因为 updateMembers() 在每次属性访问前自动重算；
+        // 我们的架构需要手动触发。
+        // ═════════════════════════════════════════════════════════════
+        this._rebuildVP();
+    }
+
+    /**
+     * 从当前 _ecefPosD + _dirECEF + _upECEF 快速重建 view matrix → VP → inverseVP。
+     * 不涉及 geodetic、ENU、bearing/pitch——纯 ECEF 向量 → 矩阵。
+     * 由 rotate() 在每次旋转后调用，确保同帧内下一次 pick 用最新相机。
+     */
+    private _rebuildVP(): void {
+        // 1. 拷贝到 Float32
+        this._eye[0] = this._ecefPosD[0];
+        this._eye[1] = this._ecefPosD[1];
+        this._eye[2] = this._ecefPosD[2];
+        this._lookDir[0] = this._dirECEF[0];
+        this._lookDir[1] = this._dirECEF[1];
+        this._lookDir[2] = this._dirECEF[2];
+        this._camUp[0] = this._upECEF[0];
+        this._camUp[1] = this._upECEF[1];
+        this._camUp[2] = this._upECEF[2];
+        this._camRight[0] = this._dirECEF[1] * this._upECEF[2] - this._dirECEF[2] * this._upECEF[1];
+        this._camRight[1] = this._dirECEF[2] * this._upECEF[0] - this._dirECEF[0] * this._upECEF[2];
+        this._camRight[2] = this._dirECEF[0] * this._upECEF[1] - this._dirECEF[1] * this._upECEF[0];
+
+        // 2. view matrix
+        this._buildViewMatrix();
+
+        // 3. VP = P × V（projection 不变）
+        mat4.multiply(this._mutable.vpMatrix, this._mutable.projectionMatrix, this._mutable.viewMatrix);
+
+        // 4. 逆 VP（pick 用）
+        if (mat4.invert(this._mutable.inverseVPMatrix, this._mutable.vpMatrix) === null) {
+            mat4.identity(this._mutable.inverseVPMatrix);
+        }
+    }
+
+    /**
+     * 从当前 bearing/pitch + ENU 帧 初始化持久的 _dirECEF 和 _upECEF。
+     * 在 rotate() 首次调用前、或 setOrientation() 后调用。
+     */
+    private _syncECEFVectorsFromBearingPitch(): void {
+        // 确保 _ecefPosD 有效
+        geodeticToECEF(this._ecefPosD, this._lonRad, this._latRad, this._alt);
+
+        const ex = this._ecefPosD[0], ey = this._ecefPosD[1], ez = this._ecefPosD[2];
+        const rho = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        if (rho < 1e-10) { return; }
+
+        // ENU 帧
+        const uX = ex / rho, uY = ey / rho, uZ = ez / rho;
+        let eX = -uY, eY = uX, eZ = 0;
+        const eLen = Math.sqrt(eX * eX + eY * eY);
+        if (eLen < 1e-10) { eX = 1; eY = 0; } else { eX /= eLen; eY /= eLen; }
+        const nX = uY * eZ - uZ * eY;
+        const nY = uZ * eX - uX * eZ;
+        const nZ = uX * eY - uY * eX;
+
+        // fwdH = cos(bearing)·north + sin(bearing)·east
+        const cB = Math.cos(this._bearing), sB = Math.sin(this._bearing);
+        const fX = cB * nX + sB * eX, fY = cB * nY + sB * eY, fZ = cB * nZ + sB * eZ;
+
+        // direction = cos(pitch)·fwdH + sin(pitch)·up
+        const cP = Math.cos(this._pitch), sP = Math.sin(this._pitch);
+        this._dirECEF[0] = cP * fX + sP * uX;
+        this._dirECEF[1] = cP * fY + sP * uY;
+        this._dirECEF[2] = cP * fZ + sP * uZ;
+
+        // camUp = -sin(pitch)·fwdH + cos(pitch)·up
+        this._upECEF[0] = -sP * fX + cP * uX;
+        this._upECEF[1] = -sP * fY + cP * uY;
+        this._upECEF[2] = -sP * fZ + cP * uZ;
+    }
+
+    /** @inheritdoc */
+    rotateHorizontal(angle: number): void {
+        this._checkDestroyed();
+        if (!this._hasUpdatedFrame) { this._syncECEFVectorsFromBearingPitch(); }
+
+        // 绕 UNIT_Z = (0,0,1) 旋转 position + direction + up（刚体运动）
+        // 对 Z 轴旋转简化为 2D：x'=x·c-y·s, y'=x·s+y·c, z'=z
+        // Cesium 约定：内部取反角度
+        const c = Math.cos(-angle);
+        const s = Math.sin(-angle);
+
+        // position
+        const px = this._ecefPosD[0], py = this._ecefPosD[1];
+        this._ecefPosD[0] = px * c - py * s;
+        this._ecefPosD[1] = px * s + py * c;
+
+        // direction
+        const dx = this._dirECEF[0], dy = this._dirECEF[1];
+        this._dirECEF[0] = dx * c - dy * s;
+        this._dirECEF[1] = dx * s + dy * c;
+
+        // up
+        const ux = this._upECEF[0], uy = this._upECEF[1];
+        this._upECEF[0] = ux * c - uy * s;
+        this._upECEF[1] = ux * s + uy * c;
+
+        this._ecefAuthoritative = true;
+        this._rebuildVP();
+    }
+
+    /** @inheritdoc */
+    rotateVertical(angle: number): void {
+        this._checkDestroyed();
+        if (!this._hasUpdatedFrame) { this._syncECEFVectorsFromBearingPitch(); }
+
+        // 归一化当前位置方向 p̂
+        const ex = this._ecefPosD[0], ey = this._ecefPosD[1], ez = this._ecefPosD[2];
+        const rho = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        if (rho < 1e-10) { return; }
+        const px = ex / rho, py = ey / rho, pz = ez / rho;
+
+        // 极点并行判定（Cesium equalsEpsilon(p, ±UNIT_Z, EPSILON2)）
+        const nearPole = Math.abs(px) <= CAM_ROT_EPSILON2 && Math.abs(py) <= CAM_ROT_EPSILON2;
+        const northParallel = nearPole && pz > 0;
+        const southParallel = nearPole && pz < 0;
+
+        if (!northParallel && !southParallel) {
+            // ── 常规情况：clamp 后绕切线轴旋转 ────────────────────
+            let angleToNorth = Math.acos(Math.max(-1, Math.min(1, pz)));
+            if (angle > 0 && angle > angleToNorth) {
+                angle = angleToNorth - CAM_ROT_EPSILON4;
+            }
+            const angleToSouth = Math.acos(Math.max(-1, Math.min(1, -pz)));
+            if (angle < 0 && -angle > angleToSouth) {
+                angle = -angleToSouth + CAM_ROT_EPSILON4;
+            }
+            if (Math.abs(angle) < 1e-14) { return; }
+
+            // 切线轴 = normalize(cross(UNIT_Z, p̂)) = normalize((-py, px, 0))
+            const tx = -py, ty = px;
+            const tLen = Math.sqrt(tx * tx + ty * ty);
+            this._rotTan64[0] = tx / tLen;
+            this._rotTan64[1] = ty / tLen;
+            this._rotTan64[2] = 0;
+
+            // 刚体旋转 position + direction + up（Cesium 约定：取反角度）
+            rodrigues64(this._ecefPosD, this._rotTan64, -angle, this._ecefPosD);
+            rodrigues64(this._dirECEF, this._rotTan64, -angle, this._dirECEF);
+            rodrigues64(this._upECEF, this._rotTan64, -angle, this._upECEF);
+
+        } else if ((northParallel && angle < 0) || (southParallel && angle > 0)) {
+            // 精确在极点，离开方向 → 绕任意水平轴
+            this._rotTan64[0] = 1; this._rotTan64[1] = 0; this._rotTan64[2] = 0;
+            rodrigues64(this._ecefPosD, this._rotTan64, -angle, this._ecefPosD);
+            rodrigues64(this._dirECEF, this._rotTan64, -angle, this._dirECEF);
+            rodrigues64(this._upECEF, this._rotTan64, -angle, this._upECEF);
+        } else {
+            return; // 在极点且试图深入 → 不旋转
+        }
+
+        this._ecefAuthoritative = true;
+        this._rebuildVP();
     }
 
     /** @inheritdoc */
@@ -1109,6 +1460,8 @@ class Camera3DImpl implements Camera3D {
         this._bearing = wrapBearing(Number.isFinite(bearing) ? bearing : 0);
         this._pitch = clamp(Number.isFinite(pitch) ? pitch : DEFAULT_PITCH_3D, MIN_PITCH_INTERNAL, MAX_PITCH_INTERNAL);
         this._roll = Number.isFinite(roll ?? 0) ? (roll ?? 0) : 0;
+        // 同步 ECEF 朝向向量，供 rotate() 使用
+        this._syncECEFVectorsFromBearingPitch();
     }
 
     /** @inheritdoc */
@@ -1482,10 +1835,10 @@ class Camera3DImpl implements Camera3D {
             this._bearing = wrapBearing(this._bearing + bearingDelta);
         }
         if (Number.isFinite(pitchDelta) && pitchDelta !== 0) {
-            // pitchDelta 使用 CameraState 约定（正值向地平线倾斜）
-            // 转换为内部约定后叠加（但增量相同，因为 d(internal) = d(csaPitch)）
             this._pitch = clamp(this._pitch + pitchDelta, MIN_PITCH_INTERNAL, MAX_PITCH_INTERNAL);
         }
+        // 同步 ECEF 朝向向量（bearing/pitch 变了 → _dirECEF/_upECEF 必须更新）
+        this._syncECEFVectorsFromBearingPitch();
     }
 
     // ===================================================================
@@ -1526,20 +1879,20 @@ class Camera3DImpl implements Camera3D {
         // ---- 1. 动画处理 ----
         if (this._fly) {
             this._updateAnimation();
+            this._orientationDirty = true;  // 动画修改了 bearing/pitch/position
         } else if (this._inertiaEnabled && !this._panning) {
             // ---- 2. 惯性处理 ----
             const hasOrbitInertia = Math.abs(this._velLon) > INERTIA_EPS || Math.abs(this._velLat) > INERTIA_EPS;
             if (hasOrbitInertia && dt > 0) {
-                // 指数衰减：decay 与帧时长相关
                 const decay = Math.pow(this._orbitDecay, dt * 60);
                 this._lonRad += this._velLon * dt;
                 this._latRad = clamp(this._latRad + this._velLat * dt, -HALF_PI, HALF_PI);
                 this._velLon *= decay;
                 this._velLat *= decay;
-                // 低于阈值则归零
                 if (Math.abs(this._velLon) < INERTIA_EPS) { this._velLon = 0; }
                 if (Math.abs(this._velLat) < INERTIA_EPS) { this._velLat = 0; }
                 if (this._constraints.maxBounds) { this._clampToBounds(this._constraints.maxBounds); }
+                this._orientationDirty = true;  // 惯性修改了 position → ENU 变了
             }
         }
 
@@ -1548,26 +1901,62 @@ class Camera3DImpl implements Camera3D {
             this._processTerrainCollision(dt);
         }
 
-        // ---- 4. 钳制 ----
-        this._alt = clamp(this._alt, this._minZoomDist, this._maxZoomDist);
-        this._latRad = clamp(this._latRad, -HALF_PI, HALF_PI);
+        // ---- 4 & 5. 位置同步 ──────────────────────────────────────
+        if (this._ecefAuthoritative) {
+            // rotate() 修改了 _ecefPosD + _dirECEF + _upECEF（刚体旋转）。
+            // 反算 geodetic（给 terrain/fillCameraState 消费），不覆写 ECEF。
+            ecefToGeodetic(this._tempGeoD, this._ecefPosD[0], this._ecefPosD[1], this._ecefPosD[2]);
+            this._lonRad = this._tempGeoD[0];
+            this._latRad = clamp(this._tempGeoD[1], -HALF_PI, HALF_PI);
+            this._alt = clamp(this._tempGeoD[2], this._minZoomDist, this._maxZoomDist);
+            this._ecefAuthoritative = false;
+            // _dirECEF/_upECEF 已被 rotate() 正确设置，不做任何操作
+        } else {
+            // geodetic 为权威源（setPosition / animation / inertia）
+            this._alt = clamp(this._alt, this._minZoomDist, this._maxZoomDist);
+            this._latRad = clamp(this._latRad, -HALF_PI, HALF_PI);
+            geodeticToECEF(this._ecefPosD, this._lonRad, this._latRad, this._alt);
+            // 只在 bearing/pitch 实际被修改时才同步 _dirECEF/_upECEF。
+            // 空闲帧不同步 → rotate() 设置的正确朝向被保留，不被极点退化的 bearing/pitch 覆盖。
+            if (this._orientationDirty) {
+                this._syncECEFVectorsFromBearingPitch();
+                this._orientationDirty = false;
+            }
+        }
 
-        // ---- 5. 大地坐标 → ECEF（Float64 精度） ----
-        geodeticToECEF(this._ecefPosD, this._lonRad, this._latRad, this._alt);
-
-        // 拷贝到 Float32 供视图矩阵使用
+        // ---- 6. 从 _dirECEF/_upECEF 构建相机轴（永远，无分支）────
+        // _dirECEF/_upECEF 始终是朝向的 primary state：
+        //   - rotate() 直接旋转它们
+        //   - 非 rotate 路径由 _syncECEFVectorsFromBearingPitch() 保持同步
+        // 这样永远不会因 ENU 退化（极点）导致朝向错误。
         this._eye[0] = this._ecefPosD[0];
         this._eye[1] = this._ecefPosD[1];
         this._eye[2] = this._ecefPosD[2];
 
-        // ---- 6. 构建 ENU 帧 ----
-        this._computeENUFromEye();
+        this._lookDir[0] = this._dirECEF[0];
+        this._lookDir[1] = this._dirECEF[1];
+        this._lookDir[2] = this._dirECEF[2];
+        this._camUp[0] = this._upECEF[0];
+        this._camUp[1] = this._upECEF[1];
+        this._camUp[2] = this._upECEF[2];
+        // right = cross(direction, up)
+        this._camRight[0] = this._dirECEF[1] * this._upECEF[2] - this._dirECEF[2] * this._upECEF[1];
+        this._camRight[1] = this._dirECEF[2] * this._upECEF[0] - this._dirECEF[0] * this._upECEF[2];
+        this._camRight[2] = this._dirECEF[0] * this._upECEF[1] - this._dirECEF[1] * this._upECEF[0];
 
-        // ---- 7. 构建相机轴（bearing → pitch → roll）----
-        this._computeCameraAxes();
-
-        // ---- 8. 构建视图矩阵（手动构建，避免 lookAt 的精度损失）----
+        // ---- 7. 构建视图矩阵 ────
         this._buildViewMatrix();
+
+        // 反算 bearing/pitch 给 fillCameraState（metadata only，不影响渲染）
+        this._computeENUFromEye();
+        {
+            const eN = this._northVec, eE = this._eastVec, eU = this._upVec;
+            const dotU = this._dirECEF[0] * eU[0] + this._dirECEF[1] * eU[1] + this._dirECEF[2] * eU[2];
+            this._pitch = clamp(Math.asin(Math.max(-1, Math.min(1, dotU))), MIN_PITCH_INTERNAL, MAX_PITCH_INTERNAL);
+            const dotE = this._dirECEF[0] * eE[0] + this._dirECEF[1] * eE[1] + this._dirECEF[2] * eE[2];
+            const dotN = this._dirECEF[0] * eN[0] + this._dirECEF[1] * eN[1] + this._dirECEF[2] * eN[2];
+            this._bearing = wrapBearing(Math.atan2(dotE, dotN));
+        }
 
         // ---- 9. 投影矩阵 ----
         const aspect = this._vpW / Math.max(this._vpH, 1);
