@@ -13,6 +13,9 @@ export type Mat3f = Float32Array;
 /** Float32 4x4 矩阵类型前向声明（fromMat4/normalFromMat4 用） */
 export type Mat4f = Float32Array;
 
+/** Float32 三维向量类型前向声明（multiplyVec3 用） */
+export type Vec3f = Float32Array;
+
 /** Float32 二维向量类型前向声明（fromScaling/fromTranslation 用） */
 export type Vec2f = Float32Array;
 
@@ -290,6 +293,101 @@ export function fromTranslation(out: Mat3f, v: Vec2f): Mat3f {
     out[3] = 0; out[4] = 1; out[5] = 0;
     // 列主序下，平移在索引 6, 7
     out[6] = v[0]; out[7] = v[1]; out[8] = 1;
+    return out;
+}
+
+/**
+ * 用 3x3 矩阵（列主序）变换 3D 向量：out = M × v。
+ * 热路径函数（旋转管线每帧调用），手动内联避免函数调用开销。
+ *
+ * @param out - 结果向量（预分配，可与 v 相同）
+ * @param m - 3x3 列主序矩阵
+ * @param v - 源 3D 向量
+ * @returns out 引用
+ *
+ * @example
+ * const rotated = new Float32Array(3);
+ * mat3.multiplyVec3(rotated, rotationMat, position);
+ */
+export function multiplyVec3(out: Vec3f, m: Mat3f, v: Vec3f): Vec3f {
+    // 缓存输入以支持 out === v
+    const x = v[0], y = v[1], z = v[2];
+    // 列主序矩阵 × 列向量
+    // | m[0] m[3] m[6] |   | x |
+    // | m[1] m[4] m[7] | × | y |
+    // | m[2] m[5] m[8] |   | z |
+    out[0] = m[0] * x + m[3] * y + m[6] * z;
+    out[1] = m[1] * x + m[4] * y + m[7] * z;
+    out[2] = m[2] * x + m[5] * y + m[8] * z;
+    return out;
+}
+
+/** Float64 三维向量 */
+export type Vec3d = Float64Array;
+
+/** Float64 3x3 矩阵（列主序），长度为 9 的 Float64Array */
+export type Mat3d = Float64Array;
+
+/**
+ * 用 3x3 矩阵（列主序，Float64）变换 Float64 3D 向量：out = M × v。
+ * 用于 ECEF 空间的高精度旋转（Camera3D 核心路径）。
+ *
+ * @param out - 结果向量（预分配，可与 v 相同）
+ * @param m - 3x3 列主序矩阵（Float64）
+ * @param v - 源 3D 向量（Float64）
+ * @returns out 引用
+ *
+ * @example
+ * const rotated = new Float64Array(3);
+ * mat3.multiplyVec3d(rotated, rotMat64, ecefPos);
+ */
+export function multiplyVec3d(out: Vec3d, m: Mat3d, v: Vec3d): Vec3d {
+    const x = v[0], y = v[1], z = v[2];
+    out[0] = m[0] * x + m[3] * y + m[6] * z;
+    out[1] = m[1] * x + m[4] * y + m[7] * z;
+    out[2] = m[2] * x + m[5] * y + m[8] * z;
+    return out;
+}
+
+/**
+ * 从四元数 [x,y,z,w] 构建 3x3 旋转矩阵（列主序，Float64）。
+ * 匹配 Cesium Camera.rotate 的核心路径：axis-angle → quaternion → rotation matrix → apply。
+ *
+ * 公式推导：对于单位四元数 q = (x,y,z,w)，对应旋转矩阵为：
+ *   R = I + 2w·[q×] + 2·[q×]²
+ * 展开后得到标准的 9 元素公式。
+ *
+ * @param out - 结果 3x3 矩阵（预分配，Float64Array(9)）
+ * @param x - 四元数虚部 x
+ * @param y - 四元数虚部 y
+ * @param z - 四元数虚部 z
+ * @param w - 四元数实部 w
+ * @returns out 引用
+ *
+ * @example
+ * const rot = new Float64Array(9);
+ * mat3.fromQuatd(rot, qx, qy, qz, qw);
+ */
+export function fromQuatd(out: Mat3d, x: number, y: number, z: number, w: number): Mat3d {
+    // 预计算二倍交叉项（避免重复乘法）
+    const x2 = x + x, y2 = y + y, z2 = z + z;
+    const xx = x * x2, xy = x * y2, xz = x * z2;
+    const yy = y * y2, yz = y * z2, zz = z * z2;
+    const wx = w * x2, wy = w * y2, wz = w * z2;
+
+    // 列 0
+    out[0] = 1 - (yy + zz);
+    out[1] = xy + wz;
+    out[2] = xz - wy;
+    // 列 1
+    out[3] = xy - wz;
+    out[4] = 1 - (xx + zz);
+    out[5] = yz + wx;
+    // 列 2
+    out[6] = xz + wy;
+    out[7] = yz - wx;
+    out[8] = 1 - (xx + yy);
+
     return out;
 }
 
