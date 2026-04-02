@@ -528,4 +528,21 @@ export interface GlobeInteractionState {
     rotating: boolean;
     /** 正在 look3D（低空自由观察） */
     looking: boolean;
+
+    // ═══ 中键 tilt 状态（对标 Cesium tilt3D）═══
+
+    /** tilt 枢轴点 ECEF [x,y,z]（米）。由 tilt3DOnTerrain 在首帧 pick。 */
+    tiltCenter: Float64Array | null;
+    /** tilt 枢轴确定时的起始屏幕 X（用于判断是否同一次拖拽） */
+    tiltCenterMouseSX: number;
+    /** tilt 枢轴确定时的起始屏幕 Y */
+    tiltCenterMouseSY: number;
+    /** tilt 上一帧屏幕坐标 X */
+    tiltLastScreenX: number;
+    /** tilt 上一帧屏幕坐标 Y */
+    tiltLastScreenY: number;
+    /** 是否锁定在 ellipsoid 模式（高空 tilt，枢轴在屏幕中心） */
+    tiltOnEllipsoid: boolean;
+    /** 是否处于 look 模式（太低无法 pick 枢轴时切换） */
+    tiltLooking: boolean;
 }
