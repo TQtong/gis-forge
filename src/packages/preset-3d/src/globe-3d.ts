@@ -64,7 +64,7 @@ import {
     destroyGlobeGPUResources,
     ensureGlobeDepthTexture,
 } from './globe-gpu.ts';
-import { createGlobeMouseHandlers, runMorph } from './globe-interaction.ts';
+import { createGlobeMouseHandlers, getActiveController, runMorph } from './globe-interaction.ts';
 import {
     renderAtmosphere,
     renderGlobeTiles,
@@ -1823,6 +1823,10 @@ export class Globe3D {
         // ── 每帧刷新 Canvas 尺寸（容器可能因布局变化而改变大小） ──
         // 同时更新 viewport，保证投影矩阵 aspect 与实际渲染目标一致
         this._viewport = this._resizeCanvas(this._maxPixelRatio);
+
+        // ── 更新交互控制器惯性 ──
+        const sscc = getActiveController();
+        if (sscc) { sscc.update(dt); }
 
         // ── 更新相机 ──
         const camState = this._camera3D.update(dt, this._viewport);
