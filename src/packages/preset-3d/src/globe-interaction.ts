@@ -2,7 +2,7 @@
 // globe-interaction.ts — 鼠标/触摸交互 → Camera3D 操作
 // 对标：Cesium ScreenSpaceCameraController — spin3D / pan3D / rotate3D / zoom3D
 // 职责：左键拖拽旋转（含极地穿越）、滚轮缩放（光标位置感知）、
-//       中键 pivot orbit、morph 动画。
+//       morph 动画。中键与 Cesium 一致不处理。
 // ============================================================
 
 import type { Camera3D } from '../../camera-3d/src/Camera3D.ts';
@@ -11,13 +11,9 @@ import {
     _panEast, _panPlaneNormal, _panRejA, _panRejB,
     _panTmpA, _panTmpB, _panBasis1, _panBasis2,
     _zoomDir, _zoomUnitPos,
-    _orbitCamECEF, _orbitENUBuf,
     _spinCurrentECEF,
 } from './globe-buffers.ts';
-import {
-    geodeticToECEF, ecefToGeodetic, surfaceNormal, WGS84_A,
-} from '../../core/src/geo/ellipsoid.ts';
-import type { Vec3d } from '../../core/src/geo/ellipsoid.ts';
+import { WGS84_A } from '../../core/src/geo/ellipsoid.ts';
 
 // ─── 常量 ────────────────────────────────────────────────────
 
@@ -41,13 +37,6 @@ const MIN_ROTATE_RATE = 1 / 5000;
 
 /** 最大旋转速率 */
 const MAX_ROTATE_RATE = 1.77;
-
-/** 极地 pivot orbit 约束 */
-const ORBIT_PITCH_MIN = -Math.PI / 2 + 0.02;
-const ORBIT_PITCH_MAX = -0.02;
-
-/** orbit 灵敏度 */
-const ORBIT_SENSITIVITY = 0.005;
 
 const TWO_PI = Math.PI * 2;
 const DEG2RAD = Math.PI / 180;
@@ -120,47 +109,6 @@ function mostOrthogonalBasis(out: Float64Array, v: Float64Array): void {
     // basis1 = cross(out, v)  然后 normalize
     v3Cross(out, out, v);
     v3Normalize(out, out);
-}
-
-// ─── 临时地理缓冲 ───────────────────────────────────────────
-
-const _geoBuf = new Float64Array(3) as Vec3d;
-const _normalBuf = new Float64Array(3) as Vec3d;
-
-// ─── ENU 基向量计算 ─────────────────────────────────────────
-
-function computeENUBasis(enuOut: Float64Array, ecef: Float64Array): { lonRad: number; latRad: number } {
-    ecefToGeodetic(_geoBuf, ecef[0], ecef[1], ecef[2]);
-    const lonR = _geoBuf[0];
-    const latR = _geoBuf[1];
-
-    // 法线 = up
-    surfaceNormal(_normalBuf, lonR, latR);
-
-    // east = cross([0,0,1], normal)  然后 normalize
-    const nx = _normalBuf[0], ny = _normalBuf[1], nz = _normalBuf[2];
-    let ex = -ny, ey = nx, ez = 0;
-    const el = Math.sqrt(ex * ex + ey * ey);
-    if (el < 1e-10) {
-        // 极点：east = [1,0,0]
-        ex = 1; ey = 0; ez = 0;
-    } else {
-        const inv = 1 / el;
-        ex *= inv; ey *= inv;
-    }
-    // north = cross(normal, east)
-    const northX = ny * ez - nz * ey;
-    const northY = nz * ex - nx * ez;
-    const northZ = nx * ey - ny * ex;
-
-    // E
-    enuOut[0] = ex; enuOut[1] = ey; enuOut[2] = ez;
-    // N
-    enuOut[3] = northX; enuOut[4] = northY; enuOut[5] = northZ;
-    // U
-    enuOut[6] = nx; enuOut[7] = ny; enuOut[8] = nz;
-
-    return { lonRad: lonR, latRad: latR };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -434,50 +382,6 @@ function zoom3D(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 中键 Pivot Orbit
-// ═══════════════════════════════════════════════════════════════
-
-function applyCameraOrbit(camera3D: Camera3D, state: GlobeInteractionState): void {
-    const pivot = state.orbitPivot;
-    const enu = state.orbitENU;
-    if (!pivot || !enu) return;
-
-    const dist = state.orbitDistance;
-    const bearing = state.orbitBearing;
-    const pitch = state.orbitPitch;
-
-    const cosP = Math.cos(pitch);
-    const sinP = Math.sin(pitch);
-    const cosB = Math.cos(bearing);
-    const sinB = Math.sin(bearing);
-
-    // 相机 ECEF = pivot + dist * (cosP*sinB*E + cosP*cosB*N + sinP*U)
-    const camPos = camera3D.getPositionECEF();
-    for (let i = 0; i < 3; i++) {
-        camPos[i] = pivot[i]
-            + dist * cosP * sinB * enu[i]        // East
-            + dist * cosP * cosB * enu[3 + i]    // North
-            + dist * sinP * enu[6 + i];          // Up
-    }
-
-    // direction = normalize(pivot - camPos)
-    const dir = camera3D.getDirection();
-    v3Sub(dir, pivot, camPos);
-    v3Normalize(dir, dir);
-
-    // up = U
-    const up = camera3D.getUp();
-    up[0] = enu[6]; up[1] = enu[7]; up[2] = enu[8];
-
-    // 重正交化
-    const right = camera3D.getRight();
-    v3Cross(right, dir, up);
-    v3Normalize(right, right);
-    v3Cross(up, right, dir);
-    v3Normalize(up, up);
-}
-
-// ═══════════════════════════════════════════════════════════════
 // createGlobeMouseHandlers — 主入口
 // ═══════════════════════════════════════════════════════════════
 
@@ -528,44 +432,8 @@ export function createGlobeMouseHandlers(
             } else {
                 state.spinStartECEF = null;
             }
-        } else if (e.button === 1 && opts.enableTilt) {
-            // 中键：pivot orbit
-            state.isDragging = true;
-            state.dragButton = 1;
-
-            const hit = pickGlobe(sx, sy);
-            if (hit) {
-                if (!state.orbitPivot) state.orbitPivot = new Float64Array(3);
-                state.orbitPivot[0] = hit[0];
-                state.orbitPivot[1] = hit[1];
-                state.orbitPivot[2] = hit[2];
-
-                // 计算 ENU
-                if (!state.orbitENU) state.orbitENU = _orbitENUBuf;
-                const geo = computeENUBasis(state.orbitENU, state.orbitPivot);
-                state.orbitPivotLngRad = geo.lonRad;
-                state.orbitPivotLatRad = geo.latRad;
-
-                // 相机到 pivot 距离
-                const camPos = camera3D.getPositionECEF();
-                state.orbitDistance = v3Distance(camPos, state.orbitPivot);
-
-                // 初始 bearing/pitch 从当前相机位置推算
-                const dx = camPos[0] - hit[0];
-                const dy = camPos[1] - hit[1];
-                const dz = camPos[2] - hit[2];
-                // 投影到 ENU
-                const enu = state.orbitENU;
-                const eComp = dx * enu[0] + dy * enu[1] + dz * enu[2];
-                const nComp = dx * enu[3] + dy * enu[4] + dz * enu[5];
-                const uComp = dx * enu[6] + dy * enu[7] + dz * enu[8];
-                state.orbitBearing = Math.atan2(eComp, nComp);
-                const horizDist = Math.sqrt(eComp * eComp + nComp * nComp);
-                state.orbitPitch = Math.atan2(uComp, horizDist);
-            } else {
-                state.orbitPivot = null;
-            }
         }
+        // 中键点击不做任何操作（与 Cesium 一致）
     }
 
     function onMouseMove(e: MouseEvent): void {
@@ -579,21 +447,6 @@ export function createGlobeMouseHandlers(
             spin3D(camera3D, state, sx, sy, pickGlobe, getViewport);
             state.spinLastScreenX = sx;
             state.spinLastScreenY = sy;
-        } else if (state.dragButton === 1) {
-            // 中键 orbit
-            if (state.orbitPivot && state.orbitENU) {
-                const dx = e.movementX ?? (sx - state.spinLastScreenX);
-                const dy = e.movementY ?? (sy - state.spinLastScreenY);
-                state.orbitBearing += dx * ORBIT_SENSITIVITY;
-                state.orbitPitch = clamp(
-                    state.orbitPitch - dy * ORBIT_SENSITIVITY,
-                    ORBIT_PITCH_MIN,
-                    ORBIT_PITCH_MAX,
-                );
-                applyCameraOrbit(camera3D, state);
-                state.spinLastScreenX = sx;
-                state.spinLastScreenY = sy;
-            }
         }
     }
 
