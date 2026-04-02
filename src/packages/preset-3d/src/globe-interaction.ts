@@ -614,7 +614,10 @@ export function createGlobeMouseHandlers(
         const sx = e.clientX - r.left;
         const sy = e.clientY - r.top;
 
-        zoom3D(camera3D, e.deltaY, sx, sy, pickGlobe);
+        // 取反 deltaY：浏览器 deltaY>0 表示向后滚（远离用户），应缩小；
+        // deltaY<0 表示向前滚（靠近用户），应放大。zoom3D 中正值=靠近球面，
+        // 因此传入 -deltaY 使方向符合用户直觉。
+        zoom3D(camera3D, -e.deltaY, sx, sy, pickGlobe);
     }
 
     function onContextMenu(e: Event): void {
