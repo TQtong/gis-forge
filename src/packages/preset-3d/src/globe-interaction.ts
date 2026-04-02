@@ -478,15 +478,14 @@ function zoom3D(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// tilt3DCore — 完全对标 Cesium tilt3DOnEllipsoid（SSCC:2467-2547）
+// tilt3DOnEllipsoid — 高空 tilt（对标 Cesium SSCC:2467-2547）
 //
-// 核心机制：相机绕枢轴点轨道运动：
-//   - 水平拖拽 → 绕枢轴法线旋转 → heading 变化
-//   - 垂直拖拽 → 绕 camera.right 旋转 → pitch 变化
-//   - 约束防翻转 + 允许到达水平视角
+// 在屏幕中心 pick 椭球得到枢轴 center → 构建 ENU transform →
+// 在 ENU 局部空间中调用 rotate3DLocal(UNIT_Z) →
+// maximumTiltAngle 在 ENU 空间中自然生效。
 // ═══════════════════════════════════════════════════════════════
 
-function tilt3DCore(
+function tilt3DOnEllipsoid(
     camera3D: Camera3D,
     state: GlobeInteractionState,
     startSX: number, startSY: number,
@@ -497,95 +496,169 @@ function tilt3DCore(
 ): void {
     const vp = getViewport();
 
-    // 1. 防穿地（对标 SSCC:2473-2479）──────────────────
+    // 1. 防穿地（对标 SSCC:2473-2479）
     const alt = camera3D.getPosition().alt;
     const minHeight = minimumZoomDistance * 0.25;
-    if (alt - minHeight - 1.0 < EPSILON3 && endSY < startSY) {
+    if (alt - minHeight - 1.0 < EPSILON3 && endSY - startSY < 0) {
         return;
     }
 
-    // 2. 确定枢轴（屏幕中心 pick）────────────────────────
-    if (!state.tiltCenter) {
-        let hit = pickGlobe(vp.width / 2, vp.height / 2);
-        if (!hit) {
-            const pos = camera3D.getPosition();
-            geodeticToECEF(_tiltCenterECEF as Vec3d, pos.lon * DEG2RAD, pos.lat * DEG2RAD, 0);
-            hit = _tiltCenterECEF;
-        }
-        state.tiltCenter = new Float64Array(3);
-        state.tiltCenter[0] = hit[0]; state.tiltCenter[1] = hit[1]; state.tiltCenter[2] = hit[2];
+    // 2. 确定枢轴 center（屏幕中心 pick）
+    let center: Float64Array;
+    const hit = pickGlobe(vp.width / 2, vp.height / 2);
+    if (hit) {
+        // 命中球面
+        _tiltCenterECEF[0] = hit[0]; _tiltCenterECEF[1] = hit[1]; _tiltCenterECEF[2] = hit[2];
+        center = _tiltCenterECEF;
+    } else if (alt > MINIMUM_TRACKBALL_HEIGHT_TILT) {
+        // 高空未命中：投影到地表正下方作为枢轴（简化 grazingAltitudeLocation）
+        const pos = camera3D.getPosition();
+        geodeticToECEF(_tiltCenterECEF as Vec3d, pos.lon * DEG2RAD, pos.lat * DEG2RAD, 0);
+        center = _tiltCenterECEF;
+    } else {
+        // 太低无法 pick → 切换到 look 模式（对标 SSCC:2512-2519）
+        state.tiltLooking = true;
+        const pos = camera3D.getPosition();
+        surfaceNormalFromDeg(_tiltNormalUp, pos.lon, pos.lat);
+        tiltLook3D(camera3D, startSX, startSY, endSX, endSY, getViewport, _tiltNormalUp);
+        state.tiltCenterMouseSX = startSX;
+        state.tiltCenterMouseSY = startSY;
+        return;
     }
 
-    // 3. 计算旋转量 ───────────────────────────────────
-    const dx = endSX - startSX;
-    const dy = endSY - startSY;
-    const sensitivity = 0.005;
+    // 3. 构建 ENU transform（对标 SSCC:2522-2536）
+    eastNorthUpToFixedFrame(_tiltENUMat, center);
 
-    // 4. 垂直拖拽 → 绕 camera.right（屏幕水平轴）做 tilt
-    //    对标 Cesium rotateVertical (Camera.js:2080-2134) 的约束逻辑
-    if (Math.abs(dy) > 0.5) {
-        let pitchAngle = -dy * sensitivity;
+    // 4. 切换到 ENU 局部空间（对标 Cesium camera._setTransform）
+    // 在 ENU 空间中：UNIT_Z = 局部 up
+    camera3D.setTransform(_tiltENUMat);
 
-        const center = state.tiltCenter;
-        const camPos = camera3D.getPositionECEF();
+    // 5. 在 ENU 局部空间中做 rotate3D，constrainedAxis = UNIT_Z
+    rotate3DLocal(camera3D,
+        startSX, startSY, endSX, endSY,
+        getViewport, UNIT_Z, false, false);
 
-        // 计算相机相对枢轴的偏移向量，归一化
-        const relX = camPos[0] - center[0];
-        const relY = camPos[1] - center[1];
-        const relZ = camPos[2] - center[2];
-        const relLen = Math.sqrt(relX * relX + relY * relY + relZ * relZ);
-
-        if (relLen > 1e-10) {
-            const px = relX / relLen, py = relY / relLen, pz = relZ / relLen;
-
-            // 枢轴法线（= constrainedAxis 在世界空间中的等价物）
-            const cLen = v3Length(center);
-            if (cLen > 1e-10) {
-                const ax = center[0] / cLen, ay = center[1] / cLen, az = center[2] / cLen;
-
-                // 对标 Cesium rotateVertical:2107-2120
-                // angleToAxis = 到"正上方"（north pole = 枢轴法线方向）的角度
-                const dotNorth = px * ax + py * ay + pz * az;
-                const angleToNorth = Math.acos(clamp(dotNorth, -1, 1));
-
-                // 正旋转（向上/向正上方）：不能越过正上方
-                if (pitchAngle > 0 && pitchAngle > angleToNorth) {
-                    pitchAngle = angleToNorth - EPSILON4;
-                }
-
-                // angleToSouth = 到"正下方"（south pole = 枢轴法线反方向）的角度
-                const dotSouth = -(px * ax + py * ay + pz * az); // = dot(p, -axis)
-                const angleToSouth = Math.acos(clamp(dotSouth, -1, 1));
-
-                // 负旋转（向下/向水平方向）：不能越过水平（south pole 方向）
-                if (pitchAngle < 0 && -pitchAngle > angleToSouth) {
-                    pitchAngle = -angleToSouth + EPSILON4;
-                }
-
-                if (Math.abs(pitchAngle) > 1e-8) {
-                    camera3D.rotateAroundPoint(center, camera3D.getRight(), pitchAngle);
-                }
-            }
-        }
-    }
-
-    // 5. 水平拖拽 → 绕枢轴法线（地表 up 方向）做 heading 旋转
-    //    往左拖转左，往右拖转右
-    if (Math.abs(dx) > 0.5) {
-        const headingAngle = dx * sensitivity;
-        const center = state.tiltCenter;
-        const cLen = v3Length(center);
-        if (cLen > 1e-10) {
-            _tiltTmpAxis[0] = center[0] / cLen;
-            _tiltTmpAxis[1] = center[1] / cLen;
-            _tiltTmpAxis[2] = center[2] / cLen;
-            camera3D.rotateAroundPoint(center, _tiltTmpAxis, headingAngle);
-        }
-    }
+    // 6. 恢复世界空间
+    camera3D.restoreTransform();
 }
 
 // ═══════════════════════════════════════════════════════════════
-// tiltLook3D — 对标 Cesium SSCC look3D:2750-2870
+// tilt3DOnTerrain — 低空 tilt（对标 Cesium SSCC:2549-2700）
+//
+// 枢轴 = pick 点（首帧）或缓存；双 ENU transform 分离垂直/水平旋转；
+// 翻转防护：cross(verticalCenter, posWC) · rightWC < 0 时阻止继续 tilt。
+// ═══════════════════════════════════════════════════════════════
+
+function tilt3DOnTerrain(
+    camera3D: Camera3D,
+    state: GlobeInteractionState,
+    startSX: number, startSY: number,
+    endSX: number, endSY: number,
+    pickGlobe: (x: number, y: number) => Float64Array | null,
+    getViewport: () => { width: number; height: number },
+    minimumZoomDistance: number,
+): void {
+    // 1. 确定枢轴 center（对标 SSCC:2559-2595）
+    let center: Float64Array;
+    if (state.tiltCenter &&
+        state.tiltCenterMouseSX === startSX &&
+        state.tiltCenterMouseSY === startSY) {
+        center = state.tiltCenter;
+    } else {
+        const hit = pickGlobe(startSX, startSY);
+        if (!hit) {
+            // pick 失败：回退到 look 模式
+            const alt = camera3D.getPosition().alt;
+            if (alt <= MINIMUM_TRACKBALL_HEIGHT_TILT) {
+                state.tiltLooking = true;
+                const pos = camera3D.getPosition();
+                surfaceNormalFromDeg(_tiltNormalUp, pos.lon, pos.lat);
+                tiltLook3D(camera3D, startSX, startSY, endSX, endSY, getViewport, _tiltNormalUp);
+                state.tiltCenterMouseSX = startSX;
+                state.tiltCenterMouseSY = startSY;
+            }
+            return;
+        }
+        if (!state.tiltCenter) state.tiltCenter = new Float64Array(3);
+        state.tiltCenter[0] = hit[0]; state.tiltCenter[1] = hit[1]; state.tiltCenter[2] = hit[2];
+        state.tiltCenterMouseSX = startSX;
+        state.tiltCenterMouseSY = startSY;
+        center = state.tiltCenter;
+    }
+
+    // 2. verticalCenter（对标 SSCC:2597-2617）
+    v3Copy(_tiltVerticalCenter, center);
+
+    // 3. 构建两个 ENU 变换
+    eastNorthUpToFixedFrame(_tiltENUMat, center);
+    eastNorthUpToFixedFrame(_tiltVerticalENUMat, _tiltVerticalCenter);
+
+    // 4. 翻转防护（对标 SSCC:2637-2667）
+    let constrainedAxis: Float64Array | undefined = UNIT_Z;
+
+    // 在世界空间中计算翻转检测
+    const camPosWC = camera3D.getPositionECEF();
+    const camRightWC = camera3D.getRight();
+    v3Cross(_tiltTangent, _tiltVerticalCenter, camPosWC);
+    const flipDot = v3Dot(camRightWC, _tiltTangent);
+
+    if (flipDot < 0.0) {
+        const movementDelta = startSY - endSY;
+        // 非地下 + 向上拖拽 → 阻止翻转（对标 SSCC:2651-2657）
+        if (movementDelta > 0.0) {
+            constrainedAxis = undefined;
+        }
+    }
+
+    // 5. 垂直旋转：在 verticalTransform 下旋转（对标 SSCC:2662/2666）
+    camera3D.setTransform(_tiltVerticalENUMat);
+
+    if (flipDot < 0.0) {
+        // camera.constrainedAxis = undefined 期间旋转（对标 SSCC:2659-2664）
+        const oldAxis = camera3D.getConstrainedAxis();
+        camera3D.setConstrainedAxis(null);
+        rotate3DLocal(camera3D,
+            startSX, startSY, endSX, endSY,
+            getViewport, constrainedAxis, true, false);
+        camera3D.setConstrainedAxis(oldAxis);
+    } else {
+        rotate3DLocal(camera3D,
+            startSX, startSY, endSX, endSY,
+            getViewport, constrainedAxis, true, false);
+    }
+
+    // 6. 恢复并切换到 center transform 做水平旋转（对标 SSCC:2669-2670）
+    camera3D.restoreTransform();
+    camera3D.setTransform(_tiltENUMat);
+
+    rotate3DLocal(camera3D,
+        startSX, startSY, endSX, endSY,
+        getViewport, constrainedAxis, false, true);
+
+    // 7. 旋转后重正交化（对标 SSCC:2672-2691）
+    const cAxis = camera3D.getConstrainedAxis();
+    if (cAxis) {
+        const dir = camera3D.getDirection();
+        const right = camera3D.getRight();
+        v3Cross(_tiltTmpAxis, dir, cAxis);
+        if (!v3EqualsEpsilon(_tiltTmpAxis, _zeroVec, EPSILON6)) {
+            if (v3Dot(_tiltTmpAxis, right) < 0.0) {
+                v3Negate(_tiltTmpAxis, _tiltTmpAxis);
+            }
+            // Cesium: up = cross(right, direction), right = cross(direction, up)
+            // 由 restoreTransform 中的 Gram-Schmidt 自动处理
+        }
+    }
+
+    // 8. 恢复世界空间
+    camera3D.restoreTransform();
+}
+
+const _zeroVec = new Float64Array(3);
+
+// ═══════════════════════════════════════════════════════════════
+// tiltLook3D — 低空自由观察（对标 Cesium SSCC look3D:2750-2870）
+// 仅旋转 direction/up（不动 position），带极点约束
 // ═══════════════════════════════════════════════════════════════
 
 function tiltLook3D(
@@ -657,8 +730,23 @@ function v3Negate(out: Float64Array, a: Float64Array): void {
     out[0] = -a[0]; out[1] = -a[1]; out[2] = -a[2];
 }
 
+/** 从经纬度（度）计算地表法线 */
+function surfaceNormalFromDeg(out: Float64Array, lonDeg: number, latDeg: number): void {
+    const lonR = lonDeg * DEG2RAD;
+    const latR = latDeg * DEG2RAD;
+    const cosLat = Math.cos(latR);
+    out[0] = cosLat * Math.cos(lonR);
+    out[1] = cosLat * Math.sin(lonR);
+    out[2] = Math.sin(latR);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // tilt3D — 主分发（对标 Cesium SSCC:2422-2463）
+//
+// 根据高度分发到三种模式：
+//   - tiltLook3D:       低空无法 pick 时的自由观察
+//   - tilt3DOnEllipsoid: 高空时在屏幕中心枢轴做 ENU 旋转
+//   - tilt3DOnTerrain:   低空时在 pick 点枢轴做双 transform 旋转
 // ═══════════════════════════════════════════════════════════════
 
 function tilt3D(
@@ -670,12 +758,32 @@ function tilt3D(
     getViewport: () => { width: number; height: number },
     minimumZoomDistance: number,
 ): void {
-    // 统一路由到 tilt3DCore：
-    // 绕鼠标点击位置的枢轴点做倾斜+旋转，
-    // 水平拖拽改变 heading（方位角），垂直拖拽改变 pitch（倾斜角），
-    // 在 90° 垂直向下时不允许翻转。
-    tilt3DCore(camera3D, state, startSX, startSY, endSX, endSY,
-              pickGlobe, getViewport, minimumZoomDistance);
+    // 连续拖拽中如果已确定为 look 模式，继续 look（对标 SSCC:2428-2434）
+    if (state.tiltLooking) {
+        const pos = camera3D.getPosition();
+        surfaceNormalFromDeg(_tiltNormalUp, pos.lon, pos.lat);
+        tiltLook3D(camera3D, startSX, startSY, endSX, endSY, getViewport, _tiltNormalUp);
+        return;
+    }
+
+    // 鼠标起始位置变化 → 重置模式标记（对标 SSCC:2436-2439）
+    if (startSX !== state.tiltCenterMouseSX || startSY !== state.tiltCenterMouseSY) {
+        state.tiltOnEllipsoid = false;
+        state.tiltLooking = false;
+    }
+
+    const alt = camera3D.getPosition().alt;
+
+    if (state.tiltOnEllipsoid || alt > MINIMUM_COLLISION_TERRAIN_HEIGHT) {
+        // 高空模式（对标 SSCC:2454-2458）
+        state.tiltOnEllipsoid = true;
+        tilt3DOnEllipsoid(camera3D, state, startSX, startSY, endSX, endSY,
+            pickGlobe, getViewport, minimumZoomDistance);
+    } else {
+        // 低空模式（对标 SSCC:2459-2461）
+        tilt3DOnTerrain(camera3D, state, startSX, startSY, endSX, endSY,
+            pickGlobe, getViewport, minimumZoomDistance);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
