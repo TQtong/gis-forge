@@ -64,7 +64,8 @@ import {
     destroyGlobeGPUResources,
     ensureGlobeDepthTexture,
 } from './globe-gpu.ts';
-import { createGlobeMouseHandlers, runMorph } from './globe-interaction.ts';
+import { runMorph } from './globe-interaction.ts';
+import { ScreenSpaceCameraController } from '../../camera-3d/src/ScreenSpaceCameraController.ts';
 import {
     renderAtmosphere,
     renderGlobeTiles,
@@ -285,32 +286,18 @@ export class Globe3D {
      */
     private readonly _pickECEFBuf = new Float64Array(3);
 
-    // ─── 事件处理器引用（供 remove 时 removeEventListener）──
+    // ─── Cesium 风格相机控制器（ScreenSpaceCameraController）──
 
-    /** 由 `createGlobeMouseHandlers` 返回，绑定在 canvas/window */
-    private readonly _boundMouseDown: (e: MouseEvent) => void;
-    private readonly _boundMouseMove: (e: MouseEvent) => void;
-    private readonly _boundMouseUp: (e: MouseEvent) => void;
-    private readonly _boundWheel: (e: WheelEvent) => void;
-    private readonly _boundContextMenu: (e: Event) => void;
+    /** 屏幕空间相机控制器：DOM 事件 → 聚合 → 分发相机动作 */
+    private _cameraController: ScreenSpaceCameraController | null = null;
 
     /**
-     * 窗口失焦时结束拖拽（中键/左键），避免「鼠标已在别处松开但 isDragging 仍为 true」
-     * （CesiumJS #1855：拖出 iframe 松手；MapLibre #5083：中断后状态残留）。
-     */
-    private readonly _onWindowBlurEndDrag = (): void => {
-        if (this._destroyed || !this._interactionState.isDragging) { return; }
-        this._boundMouseUp(
-            new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: 0, clientY: 0 }),
-        );
-    };
-
-    /**
-     * 页签隐藏或系统锁屏时结束拖拽，与 blur 互补（部分浏览器 blur 不触发）。
+     * 页签隐藏或系统锁屏时的可选清理回调（预留）。
+     * ScreenSpaceCameraController 内部管理按键状态，此处仅保留接口。
      */
     private readonly _onDocumentVisibilityEndDrag = (): void => {
-        if (document.visibilityState !== 'hidden') { return; }
-        this._onWindowBlurEndDrag();
+        // ScreenSpaceCameraController 内部 ScreenSpaceEventHandler
+        // 已通过 pointerup/pointercancel 自动处理按键释放。
     };
 
     // ════════════════════════════════════════════════════════════
@@ -403,28 +390,18 @@ export class Globe3D {
             maximumZoomDistance: this._maximumZoomDistance,
         });
 
-        // ── 绑定交互事件处理器（globe-interaction） ──
-        const _handlers = createGlobeMouseHandlers(
-            this._camera3D,
-            {
-                enableRotate: this._enableRotate,
-                enableZoom: this._enableZoom,
-                enableTilt: this._enableTilt,
-            },
-            this._interactionState,
-            { isDestroyed: () => this._destroyed },
-            (sx, sy) => this._pickGlobeSync(sx, sy),
-            () => ({ width: this._viewport.width, height: this._viewport.height }),
-            this._canvas
-        );
-        this._boundMouseDown = _handlers.onMouseDown;
-        this._boundMouseMove = _handlers.onMouseMove;
-        this._boundMouseUp = _handlers.onMouseUp;
-        this._boundWheel = _handlers.onWheel;
-        this._boundContextMenu = _handlers.onContextMenu;
-
-        // ── 安装交互监听 ──
-        this._installInteractions();
+        // ── 创建 Cesium 风格 ScreenSpaceCameraController ──
+        this._cameraController = new ScreenSpaceCameraController({
+            canvas: this._canvas,
+            camera: this._camera3D,
+            pickEllipsoid: (sx, sy) => this._pickGlobeSync(sx, sy),
+            getViewport: () => ({ width: this._viewport.width, height: this._viewport.height }),
+        });
+        this._cameraController.enableRotate = this._enableRotate;
+        this._cameraController.enableZoom = this._enableZoom;
+        this._cameraController.enableTilt = this._enableTilt;
+        this._cameraController.minimumZoomDistance = this._minimumZoomDistance;
+        this._cameraController.maximumZoomDistance = this._maximumZoomDistance;
 
         // ── ResizeObserver 监听容器尺寸变化 ──
         this._resizeObserver = new ResizeObserver(() => {
@@ -568,14 +545,12 @@ export class Globe3D {
             this._rafId = 0;
         }
 
-        // 移除交互监听
-        this._canvas.removeEventListener('mousedown', this._boundMouseDown);
-        window.removeEventListener('mousemove', this._boundMouseMove);
-        window.removeEventListener('mouseup', this._boundMouseUp);
-        window.removeEventListener('blur', this._onWindowBlurEndDrag);
+        // 销毁 ScreenSpaceCameraController（内部自动移除所有 DOM 监听）
+        if (this._cameraController) {
+            this._cameraController.destroy();
+            this._cameraController = null;
+        }
         document.removeEventListener('visibilitychange', this._onDocumentVisibilityEndDrag);
-        this._canvas.removeEventListener('wheel', this._boundWheel);
-        this._canvas.removeEventListener('contextmenu', this._boundContextMenu);
 
         // 停止 ResizeObserver
         if (this._resizeObserver) {
@@ -1824,6 +1799,11 @@ export class Globe3D {
         // 同时更新 viewport，保证投影矩阵 aspect 与实际渲染目标一致
         this._viewport = this._resizeCanvas(this._maxPixelRatio);
 
+        // ── 处理输入事件（Cesium 风格：聚合 → 分发 → 惯性） ──
+        if (this._cameraController) {
+            this._cameraController.update();
+        }
+
         // ── 更新相机 ──
         const camState = this._camera3D.update(dt, this._viewport);
         this._lastCamState = camState;
@@ -1939,34 +1919,8 @@ export class Globe3D {
 
     // 相机矩阵、天穹/瓦片/大气绘制、瓦片加载与 LRU 已迁至 globe-camera / globe-render / globe-tiles 模块。
 
-    // ════════════════════════════════════════════════════════════
-    // Private — 交互安装（处理器由 createGlobeMouseHandlers 生成）
-    // ════════════════════════════════════════════════════════════
-
-    /**
-     * 安装所有鼠标/滚轮交互监听器。
-     *
-     * @example
-     * this._installInteractions();
-     */
-    private _installInteractions(): void {
-        // mousedown 在 Canvas 上监听
-        this._canvas.addEventListener('mousedown', this._boundMouseDown);
-
-        // mousemove/mouseup 在 window 上监听（拖拽可能溢出 Canvas）
-        window.addEventListener('mousemove', this._boundMouseMove);
-        window.addEventListener('mouseup', this._boundMouseUp);
-        window.addEventListener('blur', this._onWindowBlurEndDrag);
-        document.addEventListener('visibilitychange', this._onDocumentVisibilityEndDrag);
-
-        // 滚轮缩放
-        this._canvas.addEventListener('wheel', this._boundWheel, { passive: false });
-
-        // 禁止右键菜单
-        this._canvas.addEventListener('contextmenu', this._boundContextMenu);
-    }
-
     // morph 逻辑见 globe-interaction.runMorph；此处无单独私有方法块。
+    // 交互事件监听由 ScreenSpaceCameraController 内部管理（DOM 注册/注销完全封装）。
 
     // ════════════════════════════════════════════════════════════
     // Private — 验证和安全
