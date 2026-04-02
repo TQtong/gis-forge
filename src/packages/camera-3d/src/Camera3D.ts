@@ -144,6 +144,81 @@ function mat3MulVec(out: Float64Array, m: Float64Array, v: Float64Array): void {
     out[2] = m[2] * x + m[5] * y + m[8] * z;
 }
 
+// ─── Float64 4×4 矩阵工具（transform 切换用）────────────────
+
+/** 4x4 列主序矩阵 × 点（齐次 w=1） */
+function m4MulPoint(out: Float64Array, m: Float64Array, p: Float64Array): void {
+    const x = p[0], y = p[1], z = p[2];
+    out[0] = m[0] * x + m[4] * y + m[8] * z + m[12];
+    out[1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+    out[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+}
+
+/** 4x4 列主序矩阵 × 向量（齐次 w=0，忽略平移列） */
+function m4MulVec(out: Float64Array, m: Float64Array, v: Float64Array): void {
+    const x = v[0], y = v[1], z = v[2];
+    out[0] = m[0] * x + m[4] * y + m[8] * z;
+    out[1] = m[1] * x + m[5] * y + m[9] * z;
+    out[2] = m[2] * x + m[6] * y + m[10] * z;
+}
+
+/** Float64 4x4 矩阵求逆（仿射变换特化：旋转部分转置 + 平移部分重算） */
+function m4InvertAffine(out: Float64Array, m: Float64Array): void {
+    // 旋转部分转置
+    out[0] = m[0]; out[1] = m[4]; out[2] = m[8];  out[3] = 0;
+    out[4] = m[1]; out[5] = m[5]; out[6] = m[9];  out[7] = 0;
+    out[8] = m[2]; out[9] = m[6]; out[10] = m[10]; out[11] = 0;
+    // 平移部分：-R^T * t
+    const tx = m[12], ty = m[13], tz = m[14];
+    out[12] = -(out[0] * tx + out[4] * ty + out[8] * tz);
+    out[13] = -(out[1] * tx + out[5] * ty + out[9] * tz);
+    out[14] = -(out[2] * tx + out[6] * ty + out[10] * tz);
+    out[15] = 1;
+}
+
+/**
+ * 在 ECEF 点 center 处构建 East-North-Up → Fixed 变换矩阵（4x4 列主序）。
+ * 对标 Cesium Transforms.eastNorthUpToFixedFrame。
+ */
+export function eastNorthUpToFixedFrame(out: Float64Array, center: Float64Array): void {
+    const cx = center[0], cy = center[1], cz = center[2];
+
+    // 极点退化检测（对标 Cesium Transforms.js:181-211）
+    const xyLen = Math.sqrt(cx * cx + cy * cy);
+    let ex: number, ey: number, ez: number;
+    let nx: number, ny: number, nz: number;
+    let ux: number, uy: number, uz: number;
+
+    if (xyLen < 1e-14) {
+        // 在极点：up = [0,0,sign(z)], east = [sign(z),0,0]（或 [1,0,0]）
+        const sign = cz >= 0 ? 1 : -1;
+        ex = sign; ey = 0; ez = 0;   // east
+        nx = 0; ny = sign; nz = 0;   // north
+        ux = 0; uy = 0; uz = sign;   // up
+    } else {
+        // up = geodeticSurfaceNormal（近似为 normalize(center)）
+        const len = Math.sqrt(cx * cx + cy * cy + cz * cz);
+        const invLen = 1 / len;
+        ux = cx * invLen; uy = cy * invLen; uz = cz * invLen;
+
+        // east = normalize(cross([0,0,1], up)) = normalize([-cy, cx, 0])
+        // 对标 Cesium: east.x = -origin.y; east.y = origin.x; east.z = 0
+        const invXY = 1 / xyLen;
+        ex = -cy * invXY; ey = cx * invXY; ez = 0;
+
+        // north = cross(up, east)
+        nx = uy * ez - uz * ey;
+        ny = uz * ex - ux * ez;
+        nz = ux * ey - uy * ex;
+    }
+
+    // 列主序：col0=east, col1=north, col2=up, col3=center
+    out[0] = ex;  out[1] = ey;  out[2] = ez;  out[3] = 0;
+    out[4] = nx;  out[5] = ny;  out[6] = nz;  out[7] = 0;
+    out[8] = ux;  out[9] = uy;  out[10] = uz; out[11] = 0;
+    out[12] = cx; out[13] = cy; out[14] = cz; out[15] = 1;
+}
+
 // ─── 预分配暂存 ─────────────────────────────────────────────
 
 const _quat = new Float64Array(4);
@@ -254,12 +329,24 @@ export interface Camera3D extends CameraController {
     getUp(): Float64Array;
     getRight(): Float64Array;
     getConstrainedAxis(): Float64Array | null;
+    setConstrainedAxis(axis: Float64Array | null): void;
     rotate(axis: Float64Array, angle: number): void;
     rotateRight(angle: number): void;
     rotateUp(angle: number): void;
     look(axis: Float64Array, angle: number): void;
     zoomIn(amount: number): void;
     moveAlongDirection(direction: Float64Array, distance: number): void;
+
+    /**
+     * 绕任意点 center、沿 axis 旋转 angle 弧度。
+     * 对标 Cesium tilt3D 中 setTransform + rotate + restoreTransform 的等效操作。
+     * position 做 translate→rotate→translate-back；direction/up 仅旋转（不平移）。
+     */
+    rotateAroundPoint(center: Float64Array, axis: Float64Array, angle: number): void;
+
+    // ━━ transform 切换（对标 Cesium Camera._setTransform）━━
+    setTransform(transform: Float64Array): void;
+    restoreTransform(): void;
 }
 
 // ─── 工厂 ───────────────────────────────────────────────────
@@ -270,7 +357,8 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
     const _direction = new Float64Array(3);
     const _up = new Float64Array(3);
     const _right = new Float64Array(3);
-    const _constrainedAxis = new Float64Array([0, 0, 1]); // Z = north pole
+    const _defaultConstrainedAxis = new Float64Array([0, 0, 1]); // Z = north pole
+    let _constrainedAxis: Float64Array | null = _defaultConstrainedAxis;
 
     const _fov = opts.fov ?? DEFAULT_FOV;
     const _minZoomDist = opts.minimumZoomDistance ?? 100;
@@ -278,6 +366,11 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
 
     let _terrainCollision = false;
     let _minTerrainAlt = 10;
+
+    // transform 切换状态（对标 Cesium Camera._setTransform）
+    const _currentTransform = new Float64Array(16);
+    const _invTransform = new Float64Array(16);
+    let _hasTransform = false;
 
     // 约束
     let _constraints: CameraConstraints = {
@@ -330,11 +423,24 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         v3Sub(_direction, _targetECEF, _position);
         v3Normalize(_direction, _direction);
 
-        // 构建正交基
-        v3Cross(_right, _direction, _normalUp);
+        // 构建正交基 — 使用 ENU 坐标系确定 right/up，避免 direction≈-normalUp 时退化
+        // east = normalize([-sinLon, cosLon, 0])（经线切线方向）
+        const sinLon = Math.sin(lonR), cosLon = Math.cos(lonR);
+        const sinLat = Math.sin(latR), cosLat = Math.cos(latR);
+        // 椭球上的 east 方向
+        _tmpA[0] = -sinLon; _tmpA[1] = cosLon; _tmpA[2] = 0;
+        // north = cross(normalUp, east)
+        v3Cross(_tmpB, _normalUp, _tmpA);
+        v3Normalize(_tmpB, _tmpB);
+        // right = east 方向（初始 heading=0 时相机右方朝东）
+        v3Copy(_right, _tmpA);
         v3Normalize(_right, _right);
+        // up = cross(right, direction)
         v3Cross(_up, _right, _direction);
         v3Normalize(_up, _up);
+        // 修正 right = cross(direction, up) 保证正交
+        v3Cross(_right, _direction, _up);
+        v3Normalize(_right, _right);
 
         // 应用 pitch: 绕 right 旋转。pitch < 0 表示俯视（默认状态下 direction 已经是正下方）
         // Cesium 约定：pitch=0 对应水平看，pitch=-π/2 对应正下方看
@@ -349,7 +455,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
 
         // 应用 bearing: 绕 constrainedAxis 旋转
         if (Math.abs(bearing) > 0.001) {
-            _applyRotate(_constrainedAxis, -bearing);
+            _applyRotate(_constrainedAxis ?? _defaultConstrainedAxis, -bearing);
         }
     }
 
@@ -393,7 +499,11 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
      * 水平旋转。对标 Cesium rotateHorizontal (Camera.js:2162-2168)。
      */
     function _rotateRight(angle: number): void {
-        _applyRotate(_constrainedAxis, -angle);
+        if (_constrainedAxis) {
+            _applyRotate(_constrainedAxis, -angle);
+        } else {
+            _applyRotate(_up, -angle);
+        }
     }
 
     /**
@@ -401,6 +511,12 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
      */
     function _rotateUp(angle: number): void {
         const a = -angle; // Cesium: rotateUp 调用 rotateVertical(-angle)
+
+        if (!_constrainedAxis || v3EqualsEpsilon(_position, new Float64Array(3), EPSILON2)) {
+            // 无约束轴：绕 right 自由旋转
+            _applyRotate(_right, a);
+            return;
+        }
 
         // 归一化位置
         v3Normalize(_tmpA, _position);
@@ -500,7 +616,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         // 投影 direction 到水平面，计算与北方的角度
         // north = 沿经线方向 = cross(normalUp, east_approx)
         // 简化计算 bearing
-        v3Cross(_tmpA, _constrainedAxis, _normalUp); // east_ish
+        v3Cross(_tmpA, _constrainedAxis ?? _defaultConstrainedAxis, _normalUp); // east_ish
         const eastLen = v3Length(_tmpA);
         let bearing = 0;
         if (eastLen > 1e-10) {
@@ -531,14 +647,13 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
 
         mat4.perspective(_projMat, _fov, aspect, nearZ, Math.max(farZ, nearZ + 1));
 
-        // RTE view matrix: eye at origin, target = center_ecef - camera_ecef
+        // RTE view matrix: eye at origin, target = direction（使用实际视线方向，不假设俯视）
         _eyeF32[0] = 0; _eyeF32[1] = 0; _eyeF32[2] = 0;
 
-        // center ECEF
-        geodeticToECEF(_targetECEF, _geodetic[0], _geodetic[1], 0);
-        _centerF32[0] = _targetECEF[0] - _position[0];
-        _centerF32[1] = _targetECEF[1] - _position[1];
-        _centerF32[2] = _targetECEF[2] - _position[2];
+        // target = direction（lookAt 需要一个目标点，用 direction 作为相对偏移）
+        _centerF32[0] = _direction[0];
+        _centerF32[1] = _direction[1];
+        _centerF32[2] = _direction[2];
 
         _upF32[0] = _up[0]; _upF32[1] = _up[1]; _upF32[2] = _up[2];
 
@@ -620,7 +735,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
             // 计算当前 bearing 差值并旋转
             ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
             surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
-            v3Cross(_tmpA, _constrainedAxis, _normalUp);
+            v3Cross(_tmpA, _constrainedAxis ?? _defaultConstrainedAxis, _normalUp);
             const eastLen = v3Length(_tmpA);
             if (eastLen > 1e-10) {
                 v3Normalize(_tmpA, _tmpA);
@@ -759,7 +874,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
                 _applyRotate(_right, rotateDelta);
             }
             if (Math.abs(heading) > 0.001) {
-                _applyRotate(_constrainedAxis, -heading);
+                _applyRotate(_constrainedAxis ?? _defaultConstrainedAxis, -heading);
             }
         },
 
@@ -775,7 +890,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
             geodeticToECEF(_targetECEF, tLonR, tLatR, tAlt);
             // 在目标点构建 ENU 坐标系
             surfaceNormal(_normalUp, tLonR, tLatR);
-            v3Cross(_tmpA, _constrainedAxis, _normalUp); // east
+            v3Cross(_tmpA, _constrainedAxis ?? _defaultConstrainedAxis, _normalUp); // east
             v3Normalize(_tmpA, _tmpA);
             v3Cross(_tmpB, _normalUp, _tmpA); // north
             v3Normalize(_tmpB, _tmpB);
@@ -807,7 +922,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
             surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
 
             // bearing
-            v3Cross(_tmpA, _constrainedAxis, _normalUp);
+            v3Cross(_tmpA, _constrainedAxis ?? _defaultConstrainedAxis, _normalUp);
             const eastLen = v3Length(_tmpA);
             let bearing = 0;
             if (eastLen > 1e-10) {
@@ -878,8 +993,31 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         getUp() { return _up; },
         getRight() { return _right; },
         getConstrainedAxis() { return _constrainedAxis; },
+        setConstrainedAxis(axis: Float64Array | null) {
+            if (axis) {
+                if (!_constrainedAxis) _constrainedAxis = new Float64Array(3);
+                _constrainedAxis[0] = axis[0]; _constrainedAxis[1] = axis[1]; _constrainedAxis[2] = axis[2];
+            } else {
+                _constrainedAxis = null;
+            }
+        },
 
         rotate(axis: Float64Array, angle: number) { _applyRotate(axis, angle); },
+
+        rotateAroundPoint(center: Float64Array, axis: Float64Array, angle: number) {
+            // 1. 平移 position 使 center 变为原点
+            _position[0] -= center[0];
+            _position[1] -= center[1];
+            _position[2] -= center[2];
+
+            // 2. 绕 axis 旋转 position、direction、up（_applyRotate 处理所有三个向量）
+            _applyRotate(axis, angle);
+
+            // 3. 平移回去
+            _position[0] += center[0];
+            _position[1] += center[1];
+            _position[2] += center[2];
+        },
         rotateRight(angle: number) { _rotateRight(angle); },
         rotateUp(angle: number) { _rotateUp(angle); },
         look(axis: Float64Array, angle: number) { _look(axis, angle); },
@@ -892,6 +1030,56 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         moveAlongDirection(dir: Float64Array, dist: number) {
             v3ScaleAndAdd(_position, _position, dir, dist);
             _clampAltitude();
+        },
+
+        // ─── transform 切换（对标 Cesium Camera._setTransform）───
+
+        setTransform(transform: Float64Array) {
+            // 1. 保存当前世界坐标
+            _currentTransform.set(transform);
+            m4InvertAffine(_invTransform, transform);
+
+            // 2. 将 position/direction/up 从世界空间转到局部空间
+            m4MulPoint(_tmpA, _invTransform, _position);
+            v3Copy(_position, _tmpA);
+
+            m4MulVec(_tmpA, _invTransform, _direction);
+            v3Copy(_direction, _tmpA);
+
+            m4MulVec(_tmpA, _invTransform, _up);
+            v3Copy(_up, _tmpA);
+
+            // 3. 重正交化
+            v3Cross(_right, _direction, _up);
+            v3Normalize(_right, _right);
+            v3Cross(_up, _right, _direction);
+            v3Normalize(_up, _up);
+
+            _hasTransform = true;
+        },
+
+        restoreTransform() {
+            if (!_hasTransform) return;
+
+            // 将 position/direction/up 从局部空间转回世界空间
+            m4MulPoint(_tmpA, _currentTransform, _position);
+            v3Copy(_position, _tmpA);
+
+            m4MulVec(_tmpA, _currentTransform, _direction);
+            v3Copy(_direction, _tmpA);
+            v3Normalize(_direction, _direction);
+
+            m4MulVec(_tmpA, _currentTransform, _up);
+            v3Copy(_up, _tmpA);
+            v3Normalize(_up, _up);
+
+            // 重正交化
+            v3Cross(_right, _direction, _up);
+            v3Normalize(_right, _right);
+            v3Cross(_up, _right, _direction);
+            v3Normalize(_up, _up);
+
+            _hasTransform = false;
         },
     };
 
