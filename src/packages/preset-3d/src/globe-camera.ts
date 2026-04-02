@@ -18,7 +18,6 @@ import type { GlobeCamera } from '../../globe/src/globe-tile-mesh.ts';
 import {
     _cameraUniformData,
     _ecefCam64,
-    _ecefCenter64,
     _tmpMat4A,
     _tmpMat4B,
     _tmpMat4C,
@@ -65,39 +64,33 @@ export function computeGlobeCamera(
 
     mat4.perspective(_tmpMat4A, fov, aspect, nearZ, farZ);
 
-    const camPos = camera3D.getPosition();
-    const camLonRad = camPos.lon * DEG2RAD;
-    const camLatRad = camPos.lat * DEG2RAD;
-    geodeticToECEF(_ecefCam64, camLonRad, camLatRad, camPos.alt);
+    // ─── 从 Camera3D 读取 ECEF 向量 ─────────────────────────
+    const camPosECEF = camera3D.getPositionECEF(); // Float64Array(3)
+    const camDir = camera3D.getDirection();          // Float64Array(3) 单位向量
+    const camUp = camera3D.getUp();                  // Float64Array(3) 单位向量
 
-    const centerLngRad = camState.center[0] * DEG2RAD;
-    const centerLatRad = camState.center[1] * DEG2RAD;
-    geodeticToECEF(_ecefCenter64, centerLngRad, centerLatRad, 0);
+    // 填充 _ecefCam64 供其他模块使用
+    _ecefCam64[0] = camPosECEF[0]; _ecefCam64[1] = camPosECEF[1]; _ecefCam64[2] = camPosECEF[2];
 
-    const camECEFx: number = _ecefCam64[0];
-    const camECEFy: number = _ecefCam64[1];
-    const camECEFz: number = _ecefCam64[2];
+    const camECEFx: number = camPosECEF[0];
+    const camECEFy: number = camPosECEF[1];
+    const camECEFz: number = camPosECEF[2];
 
-    const targetRteX: number = _ecefCenter64[0] - _ecefCam64[0];
-    const targetRteY: number = _ecefCenter64[1] - _ecefCam64[1];
-    const targetRteZ: number = _ecefCenter64[2] - _ecefCam64[2];
-
-    const sinLat = Math.sin(centerLatRad);
-    const cosLat = Math.cos(centerLatRad);
-    const sinLon = Math.sin(centerLngRad);
-    const cosLon = Math.cos(centerLngRad);
-
+    // ─── RTE 视图矩阵：eye=origin，target=direction，up=camera.up ────
     vec3.set(_tmpVec3A, 0, 0, 0);
-    vec3.set(_tmpVec3B, targetRteX, targetRteY, targetRteZ);
-    vec3.set(_tmpVec3C, -sinLat * cosLon, -sinLat * sinLon, cosLat);
+    vec3.set(_tmpVec3B, camDir[0], camDir[1], camDir[2]);
+    vec3.set(_tmpVec3C, camUp[0], camUp[1], camUp[2]);
 
     mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
 
     mat4.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
     const vpMatrix = mat4.clone(_tmpMat4C);
 
-    vec3.set(_tmpVec3A, _ecefCam64[0], _ecefCam64[1], _ecefCam64[2]);
-    vec3.set(_tmpVec3B, _ecefCenter64[0], _ecefCenter64[1], _ecefCenter64[2]);
+    // ─── ECEF 视图矩阵（用于 screenToGlobe 拾取）────────────
+    // eye = cameraECEF, target = cameraECEF + direction, up = camera.up
+    vec3.set(_tmpVec3A, camECEFx, camECEFy, camECEFz);
+    vec3.set(_tmpVec3B, camECEFx + camDir[0], camECEFy + camDir[1], camECEFz + camDir[2]);
+    vec3.set(_tmpVec3C, camUp[0], camUp[1], camUp[2]);
     mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
     mat4.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
 
