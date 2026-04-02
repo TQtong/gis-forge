@@ -178,6 +178,14 @@ export class Globe3D {
         orbitENU: null,
         orbitPivotLngRad: 0,
         orbitPivotLatRad: 0,
+        spinStartScreenX: 0,
+        spinStartScreenY: 0,
+        spinLastScreenX: 0,
+        spinLastScreenY: 0,
+        spinStartECEF: null,
+        spinning: false,
+        rotating: false,
+        looking: false,
     };
 
     // ─── 图层与实体（占位）───────────────────────────────────

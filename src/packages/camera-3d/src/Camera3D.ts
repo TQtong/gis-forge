@@ -1,0 +1,899 @@
+// ============================================================
+// camera-3d/Camera3D.ts — ECEF 四向量相机（Cesium 兼容）
+// 职责：Camera3D 接口、ECEF position/direction/up/right 四向量、
+//       旋转/极地穿越/缩放原语、CameraController 接口实现。
+// 对标：Cesium Camera.js — rotate / rotateVertical / rotateHorizontal
+// ============================================================
+
+import type { CameraAnimation, CameraConstraints, CameraController } from '../../runtime/src/camera-controller.ts';
+import type { CameraState, Viewport } from '../../core/src/types/viewport.ts';
+import type { BBox2D } from '../../core/src/types/math-types.ts';
+import type { Vec3d } from '../../core/src/geo/ellipsoid.ts';
+import { geodeticToECEF, ecefToGeodetic, surfaceNormal, WGS84_A } from '../../core/src/geo/ellipsoid.ts';
+import * as mat4 from '../../core/src/math/mat4.ts';
+
+// ─── 常量 ────────────────────────────────────────────────────
+
+const DEG2RAD = Math.PI / 180;
+const RAD2DEG = 180 / Math.PI;
+const TWO_PI = Math.PI * 2;
+const HALF_PI = Math.PI / 2;
+
+/** 地球周长（米），与 2D zoom 保持一致 */
+const EARTH_CIRCUMFERENCE = 40075017;
+/** 标准瓦片像素边长 */
+const TILE_SIZE = 256;
+
+/** 默认 zoom 范围 */
+const DEFAULT_MIN_ZOOM = 0;
+const DEFAULT_MAX_ZOOM = 22;
+/** 默认 FOV（弧度） */
+const DEFAULT_FOV = Math.PI / 4;
+
+/** 极点检测 epsilon（≈cos(2.5°)） */
+const EPSILON2 = 1e-2;
+/** 角度 clamp 安全边距 */
+const EPSILON4 = 1e-4;
+
+/** 动画默认时长 */
+const DEFAULT_ANIM_MS = 1500;
+const MIN_ANIM_MS = 16;
+
+/** 惯性阈值 */
+const INERTIA_EPS = 1e-5;
+
+// ─── Float64 向量工具 ────────────────────────────────────────
+
+function v3Set(out: Float64Array, x: number, y: number, z: number): void {
+    out[0] = x; out[1] = y; out[2] = z;
+}
+
+function v3Copy(out: Float64Array, a: Float64Array): void {
+    out[0] = a[0]; out[1] = a[1]; out[2] = a[2];
+}
+
+function v3Dot(a: Float64Array, b: Float64Array): number {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function v3Cross(out: Float64Array, a: Float64Array, b: Float64Array): void {
+    const ax = a[0], ay = a[1], az = a[2];
+    const bx = b[0], by = b[1], bz = b[2];
+    out[0] = ay * bz - az * by;
+    out[1] = az * bx - ax * bz;
+    out[2] = ax * by - ay * bx;
+}
+
+function v3Length(a: Float64Array): number {
+    return Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+}
+
+function v3Normalize(out: Float64Array, a: Float64Array): void {
+    const len = v3Length(a);
+    if (len < 1e-15) { out[0] = 0; out[1] = 0; out[2] = 1; return; }
+    const inv = 1 / len;
+    out[0] = a[0] * inv; out[1] = a[1] * inv; out[2] = a[2] * inv;
+}
+
+function v3Sub(out: Float64Array, a: Float64Array, b: Float64Array): void {
+    out[0] = a[0] - b[0]; out[1] = a[1] - b[1]; out[2] = a[2] - b[2];
+}
+
+function v3Add(out: Float64Array, a: Float64Array, b: Float64Array): void {
+    out[0] = a[0] + b[0]; out[1] = a[1] + b[1]; out[2] = a[2] + b[2];
+}
+
+function v3Scale(out: Float64Array, a: Float64Array, s: number): void {
+    out[0] = a[0] * s; out[1] = a[1] * s; out[2] = a[2] * s;
+}
+
+function v3ScaleAndAdd(out: Float64Array, a: Float64Array, b: Float64Array, s: number): void {
+    out[0] = a[0] + b[0] * s; out[1] = a[1] + b[1] * s; out[2] = a[2] + b[2] * s;
+}
+
+function v3Negate(out: Float64Array, a: Float64Array): void {
+    out[0] = -a[0]; out[1] = -a[1]; out[2] = -a[2];
+}
+
+function v3EqualsEpsilon(a: Float64Array, b: Float64Array, eps: number): boolean {
+    return Math.abs(a[0] - b[0]) <= eps &&
+           Math.abs(a[1] - b[1]) <= eps &&
+           Math.abs(a[2] - b[2]) <= eps;
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+    return Math.min(hi, Math.max(lo, v));
+}
+
+function acosClamped(v: number): number {
+    return Math.acos(clamp(v, -1, 1));
+}
+
+// ─── Float64 四元数 → 3×3 旋转（对标 Cesium Quaternion→Matrix3）───
+
+/** 四元数 [x,y,z,w] from axis-angle */
+function quatFromAxisAngle(out: Float64Array, axis: Float64Array, angle: number): void {
+    const half = angle * 0.5;
+    const s = Math.sin(half);
+    out[0] = axis[0] * s;
+    out[1] = axis[1] * s;
+    out[2] = axis[2] * s;
+    out[3] = Math.cos(half);
+}
+
+/** 3×3 rotation matrix from quaternion (column-major: m[col*3+row]) */
+function mat3FromQuat(out: Float64Array, q: Float64Array): void {
+    const x = q[0], y = q[1], z = q[2], w = q[3];
+    const x2 = x + x, y2 = y + y, z2 = z + z;
+    const xx = x * x2, xy = x * y2, xz = x * z2;
+    const yy = y * y2, yz = y * z2, zz = z * z2;
+    const wx = w * x2, wy = w * y2, wz = w * z2;
+    // column 0
+    out[0] = 1 - yy - zz; out[1] = xy + wz;     out[2] = xz - wy;
+    // column 1
+    out[3] = xy - wz;     out[4] = 1 - xx - zz; out[5] = yz + wx;
+    // column 2
+    out[6] = xz + wy;     out[7] = yz - wx;     out[8] = 1 - xx - yy;
+}
+
+/** mat3 × vec3 (column-major) */
+function mat3MulVec(out: Float64Array, m: Float64Array, v: Float64Array): void {
+    const x = v[0], y = v[1], z = v[2];
+    out[0] = m[0] * x + m[3] * y + m[6] * z;
+    out[1] = m[1] * x + m[4] * y + m[7] * z;
+    out[2] = m[2] * x + m[5] * y + m[8] * z;
+}
+
+// ─── 预分配暂存 ─────────────────────────────────────────────
+
+const _quat = new Float64Array(4);
+const _mat3 = new Float64Array(9);
+const _tmpA = new Float64Array(3);
+const _tmpB = new Float64Array(3);
+const _tmpC = new Float64Array(3);
+const _tmpD = new Float64Array(3);
+const _geodetic = new Float64Array(3) as Vec3d;
+const _targetECEF = new Float64Array(3) as Vec3d;
+const _normalUp = new Float64Array(3) as Vec3d;
+
+// Float32 缓冲（CameraState 输出）
+const _viewMat = mat4.create();
+const _projMat = mat4.create();
+const _vpMat = mat4.create();
+const _invVPMat = mat4.create();
+const _posF32 = new Float32Array(3);
+const _eyeF32 = new Float32Array(3);
+const _centerF32 = new Float32Array(3);
+const _upF32 = new Float32Array(3);
+
+// ─── zoom ↔ altitude 换算 ───────────────────────────────────
+
+function altFromZoom(z: number): number {
+    return EARTH_CIRCUMFERENCE / (Math.pow(2, Math.max(0, z)) * TILE_SIZE);
+}
+
+function zoomFromAlt(alt: number): number {
+    const a = Math.max(1, alt);
+    return clamp(Math.log2(EARTH_CIRCUMFERENCE / (TILE_SIZE * a)), DEFAULT_MIN_ZOOM, DEFAULT_MAX_ZOOM);
+}
+
+// ─── smoothstep 缓动 ────────────────────────────────────────
+
+function smoothstep(t: number): number {
+    const x = clamp(t, 0, 1);
+    return x * x * (3 - 2 * x);
+}
+
+function lerp(a: number, b: number, t: number): number {
+    return a + (b - a) * clamp(t, 0, 1);
+}
+
+// ─── 动画句柄 ───────────────────────────────────────────────
+
+function makeId(): string {
+    try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch { /* */ }
+    return `c3d-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+type AnimHandle = CameraAnimation & { _st: 'running' | 'finished' | 'cancelled'; _res?: () => void };
+
+function mkHandle(id: string, onCancel: () => void): AnimHandle {
+    let done = false;
+    let res: (() => void) | undefined;
+    const finished = new Promise<void>(r => { res = r; });
+    const h: AnimHandle = {
+        id, _st: 'running',
+        get state() { return h._st; },
+        cancel() {
+            if (h._st !== 'running') return;
+            h._st = 'cancelled';
+            try { onCancel(); } catch { /* */ }
+            if (!done && res) { done = true; res(); }
+        },
+        finished,
+    };
+    h._res = () => { if (!done && res) { done = true; res(); } };
+    return h;
+}
+
+function finishHandle(h: AnimHandle): void {
+    if (h._st !== 'running') return;
+    h._st = 'finished';
+    h._res?.();
+}
+
+// ─── Camera3D 接口 ──────────────────────────────────────────
+
+export interface Camera3DOptions {
+    readonly position?: { lon: number; lat: number; alt: number };
+    readonly bearing?: number;
+    readonly pitch?: number;
+    readonly fov?: number;
+    readonly minimumZoomDistance?: number;
+    readonly maximumZoomDistance?: number;
+}
+
+export interface Camera3D extends CameraController {
+    readonly type: '3d';
+    setPosition(lon: number, lat: number, alt: number): void;
+    getPosition(): { lon: number; lat: number; alt: number };
+    setHeadingPitchRoll(heading: number, pitch: number, roll: number): void;
+    lookAt(target: [number, number, number], offset?: { heading?: number; bearing?: number; pitch?: number; range?: number }): void;
+    readonly terrainCollisionEnabled: boolean;
+    setTerrainCollisionEnabled(enabled: boolean): void;
+    setMinAltitudeAboveTerrain(meters: number): void;
+    queryTerrainHeight(lon: number, lat: number): Promise<number>;
+    flyToPosition(options: { lon: number; lat: number; alt: number; heading?: number; bearing?: number; pitch?: number; duration?: number }): CameraAnimation;
+
+    getOrientation(): { bearing: number; pitch: number; roll: number };
+    setOrientation(bearing: number, pitch: number, roll: number): void;
+
+    // ━━ ECEF 访问（供 globe-interaction 使用）━━
+    getPositionECEF(): Float64Array;
+    getDirection(): Float64Array;
+    getUp(): Float64Array;
+    getRight(): Float64Array;
+    getConstrainedAxis(): Float64Array | null;
+    rotate(axis: Float64Array, angle: number): void;
+    rotateRight(angle: number): void;
+    rotateUp(angle: number): void;
+    look(axis: Float64Array, angle: number): void;
+    zoomIn(amount: number): void;
+    moveAlongDirection(direction: Float64Array, distance: number): void;
+}
+
+// ─── 工厂 ───────────────────────────────────────────────────
+
+export function createCamera3D(opts: Camera3DOptions): Camera3D {
+    // ─── 内部状态 ─────────────────────────────────────
+    const _position = new Float64Array(3);
+    const _direction = new Float64Array(3);
+    const _up = new Float64Array(3);
+    const _right = new Float64Array(3);
+    const _constrainedAxis = new Float64Array([0, 0, 1]); // Z = north pole
+
+    const _fov = opts.fov ?? DEFAULT_FOV;
+    const _minZoomDist = opts.minimumZoomDistance ?? 100;
+    const _maxZoomDist = opts.maximumZoomDistance ?? 5e7;
+
+    let _terrainCollision = false;
+    let _minTerrainAlt = 10;
+
+    // 约束
+    let _constraints: CameraConstraints = {
+        minZoom: DEFAULT_MIN_ZOOM,
+        maxZoom: DEFAULT_MAX_ZOOM,
+        minPitch: 0,
+        maxPitch: HALF_PI,
+    };
+
+    // 动画
+    type FlyAnim = {
+        id: string;
+        startMs: number;
+        durationMs: number;
+        from: { pos: Float64Array; dir: Float64Array; up: Float64Array };
+        to: { pos: Float64Array; dir: Float64Array; up: Float64Array };
+        handle: AnimHandle;
+    };
+    let _anim: FlyAnim | null = null;
+
+    // 事件回调
+    const _onMoveStart: Set<() => void> = new Set();
+    const _onMove: Set<(s: CameraState) => void> = new Set();
+    const _onMoveEnd: Set<() => void> = new Set();
+    let _moving = false;
+
+    // 惯性（简化：3D 交互由 globe-interaction 驱动，惯性在那里处理）
+    let _inertiaEnabled = true;
+
+    // 最新 CameraState 缓存
+    let _cachedState: CameraState = _makeState({ width: 1, height: 1, physicalWidth: 1, physicalHeight: 1, pixelRatio: 1 });
+
+    // ─── 初始化 ───────────────────────────────────────
+
+    function _initFromGeodetic(lonDeg: number, latDeg: number, alt: number, bearing: number, pitch: number): void {
+        const lonR = lonDeg * DEG2RAD;
+        const latR = latDeg * DEG2RAD;
+        const safeAlt = clamp(alt, _minZoomDist, _maxZoomDist);
+
+        // 相机 ECEF 位置
+        geodeticToECEF(_position as Vec3d, lonR, latR, safeAlt);
+
+        // 地表正下方
+        geodeticToECEF(_targetECEF, lonR, latR, 0);
+
+        // 地表法线（局部 up）
+        surfaceNormal(_normalUp, lonR, latR);
+
+        // direction = normalize(target - position)（即向下看向地表）
+        v3Sub(_direction, _targetECEF, _position);
+        v3Normalize(_direction, _direction);
+
+        // 构建正交基
+        v3Cross(_right, _direction, _normalUp);
+        v3Normalize(_right, _right);
+        v3Cross(_up, _right, _direction);
+        v3Normalize(_up, _up);
+
+        // 应用 pitch: 绕 right 旋转。pitch < 0 表示俯视（默认状态下 direction 已经是正下方）
+        // Cesium 约定：pitch=0 对应水平看，pitch=-π/2 对应正下方看
+        // 我们的初始 direction 指向地心（≈-π/2 pitch），需要先调整到水平，再加 pitch
+        // 但 globe-3d.ts 传入 pitch=-45°*DEG2RAD 表示"45度俯视"
+        // 所以：从正下方开始，rotateUp(π/2 + pitch) 把视线提升到水平+pitch
+        if (Math.abs(pitch + HALF_PI) > 0.001) {
+            // 当前是正下方（-π/2），需要旋转到目标 pitch
+            const rotateDelta = -(HALF_PI + pitch); // 负号因为从正下方往水平方向旋转
+            _applyRotate(_right, rotateDelta);
+        }
+
+        // 应用 bearing: 绕 constrainedAxis 旋转
+        if (Math.abs(bearing) > 0.001) {
+            _applyRotate(_constrainedAxis, -bearing);
+        }
+    }
+
+    const initPos = opts.position ?? { lon: 0, lat: 0, alt: 1e7 };
+    const initBearing = opts.bearing ?? 0;
+    const initPitch = opts.pitch ?? -HALF_PI * 0.5; // 默认 -45 度俯视
+    _initFromGeodetic(initPos.lon, initPos.lat, initPos.alt, initBearing, initPitch);
+
+    // ─── 旋转原语（对标 Cesium Camera.rotate）────────
+
+    /**
+     * 绕 axis 旋转 angle 弧度。
+     * 对标 Cesium Camera.js:2027-2048。
+     * 旋转 position、direction、up 三个向量，然后重正交化。
+     */
+    function _applyRotate(axis: Float64Array, angle: number): void {
+        // 四元数 from axis-angle（Cesium 用 -turnAngle）
+        quatFromAxisAngle(_quat, axis, -angle);
+        mat3FromQuat(_mat3, _quat);
+
+        // 旋转 position
+        mat3MulVec(_tmpA, _mat3, _position);
+        v3Copy(_position, _tmpA);
+
+        // 旋转 direction
+        mat3MulVec(_tmpA, _mat3, _direction);
+        v3Copy(_direction, _tmpA);
+
+        // 旋转 up
+        mat3MulVec(_tmpA, _mat3, _up);
+        v3Copy(_up, _tmpA);
+
+        // Gram-Schmidt 重正交化
+        v3Cross(_right, _direction, _up);
+        v3Normalize(_right, _right);
+        v3Cross(_up, _right, _direction);
+        v3Normalize(_up, _up);
+    }
+
+    /**
+     * 水平旋转。对标 Cesium rotateHorizontal (Camera.js:2162-2168)。
+     */
+    function _rotateRight(angle: number): void {
+        _applyRotate(_constrainedAxis, -angle);
+    }
+
+    /**
+     * 垂直旋转（含极地检测）。对标 Cesium rotateVertical (Camera.js:2080-2134)。
+     */
+    function _rotateUp(angle: number): void {
+        const a = -angle; // Cesium: rotateUp 调用 rotateVertical(-angle)
+
+        // 归一化位置
+        v3Normalize(_tmpA, _position);
+
+        // 北极检测
+        const northParallel = v3EqualsEpsilon(_tmpA, _constrainedAxis, EPSILON2);
+        // 南极检测
+        v3Negate(_tmpB, _constrainedAxis);
+        const southParallel = v3EqualsEpsilon(_tmpA, _tmpB, EPSILON2);
+
+        if (!northParallel && !southParallel) {
+            // 非极点：计算到极点的角度并 clamp
+            let dot = v3Dot(_tmpA, _constrainedAxis);
+            let angleToAxis = acosClamped(dot);
+            let clampedAngle = a;
+
+            if (clampedAngle > 0 && clampedAngle > angleToAxis) {
+                clampedAngle = angleToAxis - EPSILON4;
+            }
+
+            v3Negate(_tmpB, _constrainedAxis);
+            dot = v3Dot(_tmpA, _tmpB);
+            angleToAxis = acosClamped(dot);
+            if (clampedAngle < 0 && -clampedAngle > angleToAxis) {
+                clampedAngle = -angleToAxis + EPSILON4;
+            }
+
+            // tangent = cross(constrainedAxis, p)
+            v3Cross(_tmpC, _constrainedAxis, _tmpA);
+            v3Normalize(_tmpC, _tmpC);
+            _applyRotate(_tmpC, clampedAngle);
+        } else if ((northParallel && a < 0) || (southParallel && a > 0)) {
+            // 在极点且旋转方向"离开"极点 → 绕 right 旋转
+            _applyRotate(_right, a);
+        }
+        // 其他情况（在极点但旋转方向"更深入"极点）→ 不旋转
+    }
+
+    /**
+     * 仅旋转 direction/up/right（不动 position）。对标 Cesium Camera.look。
+     */
+    function _look(axis: Float64Array, angle: number): void {
+        quatFromAxisAngle(_quat, axis, -angle);
+        mat3FromQuat(_mat3, _quat);
+
+        mat3MulVec(_tmpA, _mat3, _direction);
+        v3Copy(_direction, _tmpA);
+
+        mat3MulVec(_tmpA, _mat3, _up);
+        v3Copy(_up, _tmpA);
+
+        v3Cross(_right, _direction, _up);
+        v3Normalize(_right, _right);
+        v3Cross(_up, _right, _direction);
+        v3Normalize(_up, _up);
+    }
+
+    // ─── 高度约束 ─────────────────────────────────────
+
+    function _getAlt(): number {
+        ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+        return _geodetic[2];
+    }
+
+    function _clampAltitude(): void {
+        ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+        const alt = _geodetic[2];
+        if (alt < _minZoomDist || alt > _maxZoomDist) {
+            const clamped = clamp(alt, _minZoomDist, _maxZoomDist);
+            // 沿法线方向调整位置
+            surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
+            const delta = clamped - alt;
+            v3ScaleAndAdd(_position, _position, _normalUp, delta);
+        }
+    }
+
+    // ─── CameraState 构建 ─────────────────────────────
+
+    function _makeState(vp: Viewport): CameraState {
+        ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+        const lonDeg = _geodetic[0] * RAD2DEG;
+        const latDeg = _geodetic[1] * RAD2DEG;
+        const alt = _geodetic[2];
+
+        // center：射线与椭球交点（简化：当前位置正下方）
+        // 精确做法需要 ray-ellipsoid 交点，但对于近俯视状态正下方是很好的近似
+        const centerLon = lonDeg;
+        const centerLat = latDeg;
+
+        const zoom = zoomFromAlt(alt);
+
+        // bearing: direction 在水平面上的方位角
+        // 在地表法线坐标系中，east = cross([0,0,1], normal), north = cross(normal, east)
+        surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
+
+        // east = cross(constrainedAxis, normalUp)... 但更准确的做法：
+        // 投影 direction 到水平面，计算与北方的角度
+        // north = 沿经线方向 = cross(normalUp, east_approx)
+        // 简化计算 bearing
+        v3Cross(_tmpA, _constrainedAxis, _normalUp); // east_ish
+        const eastLen = v3Length(_tmpA);
+        let bearing = 0;
+        if (eastLen > 1e-10) {
+            v3Normalize(_tmpA, _tmpA); // east
+            v3Cross(_tmpB, _normalUp, _tmpA); // north
+            v3Normalize(_tmpB, _tmpB);
+            // project direction onto horizontal plane
+            const de = v3Dot(_direction, _tmpA); // east component
+            const dn = v3Dot(_direction, _tmpB); // north component
+            bearing = Math.atan2(de, dn); // 0=north, π/2=east
+        }
+
+        // pitch: angle between direction and surface normal
+        // pitch = acos(-dot(direction, normalUp)) - π/2
+        // dot(dir, -normalUp) = cos(angle_from_nadir)
+        const dotDN = -v3Dot(_direction, _normalUp);
+        const pitch = Math.asin(clamp(dotDN, -1, 1)) - HALF_PI;
+
+        // 构建矩阵（Float32 精度 for GPU）
+        const w = Math.max(1, vp.width);
+        const h = Math.max(1, vp.height);
+        const aspect = w / h;
+        const nearZ = Math.max(alt * 0.1, 100);
+        // horizon distance
+        const R = WGS84_A;
+        const horizonDist = alt > 0 ? Math.sqrt((R + alt) * (R + alt) - R * R) : R;
+        const farZ = horizonDist * 1.5 + alt;
+
+        mat4.perspective(_projMat, _fov, aspect, nearZ, Math.max(farZ, nearZ + 1));
+
+        // RTE view matrix: eye at origin, target = center_ecef - camera_ecef
+        _eyeF32[0] = 0; _eyeF32[1] = 0; _eyeF32[2] = 0;
+
+        // center ECEF
+        geodeticToECEF(_targetECEF, _geodetic[0], _geodetic[1], 0);
+        _centerF32[0] = _targetECEF[0] - _position[0];
+        _centerF32[1] = _targetECEF[1] - _position[1];
+        _centerF32[2] = _targetECEF[2] - _position[2];
+
+        _upF32[0] = _up[0]; _upF32[1] = _up[1]; _upF32[2] = _up[2];
+
+        mat4.lookAt(_viewMat, _eyeF32, _centerF32, _upF32);
+        mat4.multiply(_vpMat, _projMat, _viewMat);
+        mat4.invert(_invVPMat, _vpMat);
+
+        _posF32[0] = _position[0]; _posF32[1] = _position[1]; _posF32[2] = _position[2];
+
+        return {
+            center: [centerLon, centerLat],
+            zoom,
+            bearing,
+            pitch,
+            viewMatrix: new Float32Array(_viewMat),
+            projectionMatrix: new Float32Array(_projMat),
+            vpMatrix: new Float32Array(_vpMat),
+            inverseVPMatrix: new Float32Array(_invVPMat),
+            position: new Float32Array(_posF32),
+            altitude: alt,
+            fov: _fov,
+            roll: 0,
+        };
+    }
+
+    // ─── 动画推进 ─────────────────────────────────────
+
+    function _tickAnim(now: number): boolean {
+        if (!_anim) return false;
+        const elapsed = now - _anim.startMs;
+        const t = clamp(elapsed / _anim.durationMs, 0, 1);
+        const s = smoothstep(t);
+
+        // SLERP position on unit sphere + interpolate altitude
+        const fromPos = _anim.from.pos;
+        const toPos = _anim.to.pos;
+
+        // 简化：线性插值 ECEF 然后投影到正确高度
+        for (let i = 0; i < 3; i++) {
+            _position[i] = fromPos[i] + (toPos[i] - fromPos[i]) * s;
+            _direction[i] = _anim.from.dir[i] + (_anim.to.dir[i] - _anim.from.dir[i]) * s;
+            _up[i] = _anim.from.up[i] + (_anim.to.up[i] - _anim.from.up[i]) * s;
+        }
+        v3Normalize(_direction, _direction);
+        v3Normalize(_up, _up);
+        v3Cross(_right, _direction, _up);
+        v3Normalize(_right, _right);
+        v3Cross(_up, _right, _direction);
+        v3Normalize(_up, _up);
+
+        if (t >= 1) {
+            finishHandle(_anim.handle);
+            _anim = null;
+            return false;
+        }
+        return true;
+    }
+
+    // ─── 公共 API（Camera3D + CameraController）──────
+
+    const cam: Camera3D = {
+        type: '3d' as const,
+
+        get state() { return _cachedState; },
+
+        // ─── 地理位置 API ────────────────────────────
+
+        setCenter(center: [number, number]) {
+            cam.setPosition(center[0], center[1], _getAlt());
+        },
+
+        setZoom(zoom: number) {
+            const alt = altFromZoom(clamp(zoom, _constraints.minZoom, _constraints.maxZoom));
+            ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+            cam.setPosition(_geodetic[0] * RAD2DEG, _geodetic[1] * RAD2DEG, alt);
+        },
+
+        setBearing(b: number) {
+            // 计算当前 bearing 差值并旋转
+            ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+            surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
+            v3Cross(_tmpA, _constrainedAxis, _normalUp);
+            const eastLen = v3Length(_tmpA);
+            if (eastLen > 1e-10) {
+                v3Normalize(_tmpA, _tmpA);
+                v3Cross(_tmpB, _normalUp, _tmpA);
+                v3Normalize(_tmpB, _tmpB);
+                const de = v3Dot(_direction, _tmpA);
+                const dn = v3Dot(_direction, _tmpB);
+                const currentBearing = Math.atan2(de, dn);
+                const delta = b - currentBearing;
+                _rotateRight(delta);
+            }
+        },
+
+        setPitch(_p: number) {
+            // pitch 调整在 3D 模式中通过 rotateUp 实现
+            // 简化：不直接支持 setPitch，由交互层驱动
+        },
+
+        jumpTo(options) {
+            if (_anim) { _anim.handle.cancel(); _anim = null; }
+            const pos = cam.getPosition();
+            const lon = options.center?.[0] ?? pos.lon;
+            const lat = options.center?.[1] ?? pos.lat;
+            const alt = options.zoom != null ? altFromZoom(options.zoom) : pos.alt;
+            _initFromGeodetic(lon, lat, alt, options.bearing ?? 0, options.pitch ?? -HALF_PI * 0.5);
+        },
+
+        flyTo(options) {
+            return cam.flyToPosition({
+                lon: options.center?.[0] ?? cam.getPosition().lon,
+                lat: options.center?.[1] ?? cam.getPosition().lat,
+                alt: options.zoom != null ? altFromZoom(options.zoom) : cam.getPosition().alt,
+                heading: options.bearing,
+                pitch: options.pitch,
+                duration: options.duration,
+            });
+        },
+
+        easeTo(options) {
+            return cam.flyTo({ ...options, duration: options.duration ?? 600 });
+        },
+
+        stop() {
+            if (_anim) { _anim.handle.cancel(); _anim = null; }
+        },
+
+        get isAnimating() { return _anim != null; },
+
+        get constraints() { return _constraints; },
+        setConstraints(c: Partial<CameraConstraints>) {
+            _constraints = { ..._constraints, ...c };
+        },
+
+        // ─── 每帧更新 ───────────────────────────────
+
+        update(deltaTime: number, viewport: Viewport): CameraState {
+            const now = performance.now();
+            _tickAnim(now);
+            _cachedState = _makeState(viewport);
+
+            // 事件通知
+            for (const cb of _onMove) {
+                try { cb(_cachedState); } catch { /* */ }
+            }
+
+            return _cachedState;
+        },
+
+        // ─── 交互入口（由 globe-interaction 驱动）────
+
+        handlePanStart(_sx: number, _sy: number) { /* noop — globe-interaction manages */ },
+        handlePanMove(_sx: number, _sy: number) { /* noop */ },
+        handlePanEnd() { /* noop */ },
+        handleZoom(delta: number, _sx: number, _sy: number) {
+            const alt = _getAlt();
+            const amount = alt * 0.001 * delta;
+            _position[0] += _direction[0] * amount;
+            _position[1] += _direction[1] * amount;
+            _position[2] += _direction[2] * amount;
+            _clampAltitude();
+        },
+        handleRotate(bearingDelta: number, pitchDelta: number) {
+            if (Math.abs(bearingDelta) > 1e-8) _rotateRight(-bearingDelta);
+            if (Math.abs(pitchDelta) > 1e-8) _rotateUp(pitchDelta);
+        },
+
+        get inertiaEnabled() { return _inertiaEnabled; },
+        setInertiaEnabled(enabled: boolean) { _inertiaEnabled = enabled; },
+
+        onMoveStart(cb: () => void) {
+            _onMoveStart.add(cb);
+            return () => { _onMoveStart.delete(cb); };
+        },
+        onMove(cb: (s: CameraState) => void) {
+            _onMove.add(cb);
+            return () => { _onMove.delete(cb); };
+        },
+        onMoveEnd(cb: () => void) {
+            _onMoveEnd.add(cb);
+            return () => { _onMoveEnd.delete(cb); };
+        },
+
+        destroy() {
+            if (_anim) { _anim.handle.cancel(); _anim = null; }
+            _onMoveStart.clear();
+            _onMove.clear();
+            _onMoveEnd.clear();
+        },
+
+        // ─── 3D 专用 API ────────────────────────────
+
+        setPosition(lon: number, lat: number, alt: number) {
+            _initFromGeodetic(lon, lat, clamp(alt, _minZoomDist, _maxZoomDist), 0, -HALF_PI * 0.5);
+        },
+
+        getPosition() {
+            ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+            return { lon: _geodetic[0] * RAD2DEG, lat: _geodetic[1] * RAD2DEG, alt: _geodetic[2] };
+        },
+
+        setHeadingPitchRoll(heading: number, pitch: number, _roll: number) {
+            // 从当前位置重新计算方向
+            ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+            // 重建到正下方
+            geodeticToECEF(_targetECEF, _geodetic[0], _geodetic[1], 0);
+            v3Sub(_direction, _targetECEF, _position);
+            v3Normalize(_direction, _direction);
+            surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
+            v3Cross(_right, _direction, _normalUp);
+            v3Normalize(_right, _right);
+            v3Cross(_up, _right, _direction);
+            v3Normalize(_up, _up);
+            // 应用 pitch 然后 heading
+            if (Math.abs(pitch + HALF_PI) > 0.001) {
+                const rotateDelta = -(HALF_PI + pitch);
+                _applyRotate(_right, rotateDelta);
+            }
+            if (Math.abs(heading) > 0.001) {
+                _applyRotate(_constrainedAxis, -heading);
+            }
+        },
+
+        lookAt(target: [number, number, number], offset?: { heading?: number; bearing?: number; pitch?: number; range?: number }) {
+            const tLonR = target[0] * DEG2RAD;
+            const tLatR = target[1] * DEG2RAD;
+            const tAlt = target[2] ?? 0;
+            const range = offset?.range ?? 1e6;
+            const heading = offset?.heading ?? offset?.bearing ?? 0;
+            const pitch = offset?.pitch ?? -HALF_PI * 0.5;
+
+            // 目标 ECEF
+            geodeticToECEF(_targetECEF, tLonR, tLatR, tAlt);
+            // 在目标点构建 ENU 坐标系
+            surfaceNormal(_normalUp, tLonR, tLatR);
+            v3Cross(_tmpA, _constrainedAxis, _normalUp); // east
+            v3Normalize(_tmpA, _tmpA);
+            v3Cross(_tmpB, _normalUp, _tmpA); // north
+            v3Normalize(_tmpB, _tmpB);
+
+            // 相机在 ENU 中的偏移
+            const cosP = Math.cos(pitch);
+            const sinP = Math.sin(pitch);
+            const cosH = Math.cos(heading);
+            const sinH = Math.sin(heading);
+            for (let i = 0; i < 3; i++) {
+                _position[i] = _targetECEF[i]
+                    + range * cosP * sinH * _tmpA[i]   // east
+                    + range * cosP * cosH * _tmpB[i]   // north
+                    + range * sinP * _normalUp[i];     // up
+            }
+
+            // direction = normalize(target - position)
+            v3Sub(_direction, _targetECEF, _position);
+            v3Normalize(_direction, _direction);
+            v3Copy(_up, _normalUp);
+            v3Cross(_right, _direction, _up);
+            v3Normalize(_right, _right);
+            v3Cross(_up, _right, _direction);
+            v3Normalize(_up, _up);
+        },
+
+        getOrientation() {
+            ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+            surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
+
+            // bearing
+            v3Cross(_tmpA, _constrainedAxis, _normalUp);
+            const eastLen = v3Length(_tmpA);
+            let bearing = 0;
+            if (eastLen > 1e-10) {
+                v3Normalize(_tmpA, _tmpA); // east
+                v3Cross(_tmpB, _normalUp, _tmpA); // north
+                v3Normalize(_tmpB, _tmpB);
+                const de = v3Dot(_direction, _tmpA);
+                const dn = v3Dot(_direction, _tmpB);
+                bearing = Math.atan2(de, dn);
+            }
+
+            // pitch
+            const dotDN = -v3Dot(_direction, _normalUp);
+            const pitch = Math.asin(clamp(dotDN, -1, 1)) - HALF_PI;
+
+            return { bearing, pitch, roll: 0 };
+        },
+
+        setOrientation(bearing: number, pitch: number, roll: number) {
+            cam.setHeadingPitchRoll(bearing, pitch, roll);
+        },
+
+        get terrainCollisionEnabled() { return _terrainCollision; },
+        setTerrainCollisionEnabled(enabled: boolean) { _terrainCollision = enabled; },
+        setMinAltitudeAboveTerrain(meters: number) { _minTerrainAlt = meters; },
+        async queryTerrainHeight(_lon: number, _lat: number): Promise<number> { return 0; },
+
+        flyToPosition(options) {
+            if (_anim) { _anim.handle.cancel(); _anim = null; }
+
+            const fromPos = new Float64Array(_position);
+            const fromDir = new Float64Array(_direction);
+            const fromUp = new Float64Array(_up);
+
+            // 构建目标状态
+            const targetCam = createCamera3D({
+                position: { lon: options.lon, lat: options.lat, alt: options.alt },
+                bearing: options.heading ?? options.bearing ?? 0,
+                pitch: options.pitch ?? -HALF_PI * 0.5,
+                fov: _fov,
+                minimumZoomDistance: _minZoomDist,
+                maximumZoomDistance: _maxZoomDist,
+            });
+            const toPos = new Float64Array(targetCam.getPositionECEF());
+            const toDir = new Float64Array(targetCam.getDirection());
+            const toUp = new Float64Array(targetCam.getUp());
+            targetCam.destroy();
+
+            const duration = Math.max(options.duration ?? DEFAULT_ANIM_MS, MIN_ANIM_MS);
+            const id = makeId();
+            const handle = mkHandle(id, () => { _anim = null; });
+
+            _anim = {
+                id,
+                startMs: performance.now(),
+                durationMs: duration,
+                from: { pos: fromPos, dir: fromDir, up: fromUp },
+                to: { pos: toPos, dir: toDir, up: toUp },
+                handle,
+            };
+            return handle;
+        },
+
+        // ─── ECEF 直接访问 ──────────────────────────
+
+        getPositionECEF() { return _position; },
+        getDirection() { return _direction; },
+        getUp() { return _up; },
+        getRight() { return _right; },
+        getConstrainedAxis() { return _constrainedAxis; },
+
+        rotate(axis: Float64Array, angle: number) { _applyRotate(axis, angle); },
+        rotateRight(angle: number) { _rotateRight(angle); },
+        rotateUp(angle: number) { _rotateUp(angle); },
+        look(axis: Float64Array, angle: number) { _look(axis, angle); },
+
+        zoomIn(amount: number) {
+            v3ScaleAndAdd(_position, _position, _direction, amount);
+            _clampAltitude();
+        },
+
+        moveAlongDirection(dir: Float64Array, dist: number) {
+            v3ScaleAndAdd(_position, _position, dir, dist);
+            _clampAltitude();
+        },
+    };
+
+    return cam;
+}

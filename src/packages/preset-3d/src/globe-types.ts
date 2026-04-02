@@ -501,4 +501,31 @@ export interface GlobeInteractionState {
      * 用于 `applyCameraOrbit` 中 lookAt 计算。
      */
     orbitPivotLatRad: number;
+
+    // ═══ 左键 spin/pan 状态 ═══
+
+    /** 拖拽起始屏幕坐标 X（CSS 像素） */
+    spinStartScreenX: number;
+    /** 拖拽起始屏幕坐标 Y（CSS 像素） */
+    spinStartScreenY: number;
+    /** 上一帧屏幕坐标 X */
+    spinLastScreenX: number;
+    /** 上一帧屏幕坐标 Y */
+    spinLastScreenY: number;
+
+    /**
+     * 拖拽起始点的射线-椭球交点 ECEF [x,y,z]（米）。
+     * null = 起始拖拽时未命中球面。
+     * mouseDown 时由 pickGlobe 填入。
+     */
+    spinStartECEF: Float64Array | null;
+
+    // ═══ spin 模式标记（连续拖拽中保持模式） ═══
+
+    /** 正在 pan3D（球面跟踪） */
+    spinning: boolean;
+    /** 正在 rotate3D（高空屏幕空间旋转） */
+    rotating: boolean;
+    /** 正在 look3D（低空自由观察） */
+    looking: boolean;
 }
