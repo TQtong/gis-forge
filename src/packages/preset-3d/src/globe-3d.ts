@@ -186,6 +186,13 @@ export class Globe3D {
         spinning: false,
         rotating: false,
         looking: false,
+        tiltCenter: null,
+        tiltCenterMouseSX: -1,
+        tiltCenterMouseSY: -1,
+        tiltLastScreenX: 0,
+        tiltLastScreenY: 0,
+        tiltOnEllipsoid: false,
+        tiltLooking: false,
     };
 
     // ─── 图层与实体（占位）───────────────────────────────────
@@ -418,6 +425,7 @@ export class Globe3D {
                 enableRotate: this._enableRotate,
                 enableZoom: this._enableZoom,
                 enableTilt: this._enableTilt,
+                minimumZoomDistance: this._minimumZoomDistance,
             },
             this._interactionState,
             { isDestroyed: () => this._destroyed },

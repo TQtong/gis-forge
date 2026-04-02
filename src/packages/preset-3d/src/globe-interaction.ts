@@ -2,18 +2,22 @@
 // globe-interaction.ts — 鼠标/触摸交互 → Camera3D 操作
 // 对标：Cesium ScreenSpaceCameraController — spin3D / pan3D / rotate3D / zoom3D
 // 职责：左键拖拽旋转（含极地穿越）、滚轮缩放（光标位置感知）、
-//       morph 动画。中键与 Cesium 一致不处理。
+//       中键 tilt3D（对标 Cesium MIDDLE_DRAG）、morph 动画。
 // ============================================================
 
 import type { Camera3D } from '../../camera-3d/src/Camera3D.ts';
+import { eastNorthUpToFixedFrame } from '../../camera-3d/src/Camera3D.ts';
 import type { GlobeInteractionState, MorphState } from './globe-types.ts';
 import {
     _panEast, _panPlaneNormal, _panRejA, _panRejB,
     _panTmpA, _panTmpB, _panBasis1, _panBasis2,
     _zoomDir, _zoomUnitPos,
     _spinCurrentECEF,
+    _tiltCenterECEF, _tiltENUMat, _tiltVerticalCenter, _tiltVerticalENUMat,
+    _tiltTmpAxis, _tiltTangent, _tiltNegAxis, _tiltNormalUp,
 } from './globe-buffers.ts';
-import { WGS84_A } from '../../core/src/geo/ellipsoid.ts';
+import { geodeticToECEF, WGS84_A } from '../../core/src/geo/ellipsoid.ts';
+import type { Vec3d } from '../../core/src/geo/ellipsoid.ts';
 
 // ─── 常量 ────────────────────────────────────────────────────
 
@@ -37,6 +41,18 @@ const MIN_ROTATE_RATE = 1 / 5000;
 
 /** 最大旋转速率 */
 const MAX_ROTATE_RATE = 1.77;
+
+/** tilt3D：高度高于此值使用 tilt3DOnEllipsoid，低于则用 tilt3DOnTerrain（对标 SSCC:246） */
+const MINIMUM_COLLISION_TERRAIN_HEIGHT = 15_000;
+
+/** tilt3D：高于此高度且未命中时切换到 look 模式（对标 SSCC:258-259） */
+const MINIMUM_TRACKBALL_HEIGHT_TILT = WGS84_A * 0.75;
+
+const EPSILON2 = 1e-2;
+const EPSILON3 = 1e-3;
+const EPSILON4 = 1e-4;
+const EPSILON6 = 1e-6;
+const UNIT_Z = new Float64Array([0, 0, 1]);
 
 const TWO_PI = Math.PI * 2;
 const DEG2RAD = Math.PI / 180;
@@ -382,12 +398,213 @@ function zoom3D(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// tilt3DCore — 完全对标 Cesium tilt3DOnEllipsoid（SSCC:2467-2547）
+//
+// 核心机制：相机绕枢轴点轨道运动：
+//   - 水平拖拽 → 绕枢轴法线旋转 → heading 变化
+//   - 垂直拖拽 → 绕 camera.right 旋转 → pitch 变化
+//   - 约束防翻转 + 允许到达水平视角
+// ═══════════════════════════════════════════════════════════════
+
+function tilt3DCore(
+    camera3D: Camera3D,
+    state: GlobeInteractionState,
+    startSX: number, startSY: number,
+    endSX: number, endSY: number,
+    pickGlobe: (x: number, y: number) => Float64Array | null,
+    getViewport: () => { width: number; height: number },
+    minimumZoomDistance: number,
+): void {
+    const vp = getViewport();
+
+    // 1. 防穿地（对标 SSCC:2473-2479）──────────────────
+    const alt = camera3D.getPosition().alt;
+    const minHeight = minimumZoomDistance * 0.25;
+    if (alt - minHeight - 1.0 < EPSILON3 && endSY < startSY) {
+        return;
+    }
+
+    // 2. 确定枢轴（屏幕中心 pick）────────────────────────
+    if (!state.tiltCenter) {
+        let hit = pickGlobe(vp.width / 2, vp.height / 2);
+        if (!hit) {
+            const pos = camera3D.getPosition();
+            geodeticToECEF(_tiltCenterECEF as Vec3d, pos.lon * DEG2RAD, pos.lat * DEG2RAD, 0);
+            hit = _tiltCenterECEF;
+        }
+        state.tiltCenter = new Float64Array(3);
+        state.tiltCenter[0] = hit[0]; state.tiltCenter[1] = hit[1]; state.tiltCenter[2] = hit[2];
+    }
+
+    // 3. 计算旋转量 ───────────────────────────────────
+    const dx = endSX - startSX;
+    const dy = endSY - startSY;
+    const sensitivity = 0.005;
+
+    // 4. 垂直拖拽 → 绕 camera.right（屏幕水平轴）做 tilt
+    //    对标 Cesium rotateVertical (Camera.js:2080-2134) 的约束逻辑
+    if (Math.abs(dy) > 0.5) {
+        let pitchAngle = -dy * sensitivity;
+
+        const center = state.tiltCenter;
+        const camPos = camera3D.getPositionECEF();
+
+        // 计算相机相对枢轴的偏移向量，归一化
+        const relX = camPos[0] - center[0];
+        const relY = camPos[1] - center[1];
+        const relZ = camPos[2] - center[2];
+        const relLen = Math.sqrt(relX * relX + relY * relY + relZ * relZ);
+
+        if (relLen > 1e-10) {
+            const px = relX / relLen, py = relY / relLen, pz = relZ / relLen;
+
+            // 枢轴法线（= constrainedAxis 在世界空间中的等价物）
+            const cLen = v3Length(center);
+            if (cLen > 1e-10) {
+                const ax = center[0] / cLen, ay = center[1] / cLen, az = center[2] / cLen;
+
+                // 对标 Cesium rotateVertical:2107-2120
+                // angleToAxis = 到"正上方"（north pole = 枢轴法线方向）的角度
+                const dotNorth = px * ax + py * ay + pz * az;
+                const angleToNorth = Math.acos(clamp(dotNorth, -1, 1));
+
+                // 正旋转（向上/向正上方）：不能越过正上方
+                if (pitchAngle > 0 && pitchAngle > angleToNorth) {
+                    pitchAngle = angleToNorth - EPSILON4;
+                }
+
+                // angleToSouth = 到"正下方"（south pole = 枢轴法线反方向）的角度
+                const dotSouth = -(px * ax + py * ay + pz * az); // = dot(p, -axis)
+                const angleToSouth = Math.acos(clamp(dotSouth, -1, 1));
+
+                // 负旋转（向下/向水平方向）：不能越过水平（south pole 方向）
+                if (pitchAngle < 0 && -pitchAngle > angleToSouth) {
+                    pitchAngle = -angleToSouth + EPSILON4;
+                }
+
+                if (Math.abs(pitchAngle) > 1e-8) {
+                    camera3D.rotateAroundPoint(center, camera3D.getRight(), pitchAngle);
+                }
+            }
+        }
+    }
+
+    // 5. 水平拖拽 → 绕枢轴法线（地表 up 方向）做 heading 旋转
+    //    往左拖转左，往右拖转右
+    if (Math.abs(dx) > 0.5) {
+        const headingAngle = dx * sensitivity;
+        const center = state.tiltCenter;
+        const cLen = v3Length(center);
+        if (cLen > 1e-10) {
+            _tiltTmpAxis[0] = center[0] / cLen;
+            _tiltTmpAxis[1] = center[1] / cLen;
+            _tiltTmpAxis[2] = center[2] / cLen;
+            camera3D.rotateAroundPoint(center, _tiltTmpAxis, headingAngle);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// tiltLook3D — 对标 Cesium SSCC look3D:2750-2870
+// ═══════════════════════════════════════════════════════════════
+
+function tiltLook3D(
+    camera3D: Camera3D,
+    startSX: number, startSY: number,
+    endSX: number, endSY: number,
+    getViewport: () => { width: number; height: number },
+    rotationAxis: Float64Array | null,
+): void {
+    const vp = getViewport();
+
+    // 水平旋转（鼠标 X 移动）
+    const dx = endSX - startSX;
+    let angleH = (dx / vp.width) * Math.PI * 0.5;
+    angleH = startSX > endSX ? -Math.abs(angleH) : Math.abs(angleH);
+
+    if (rotationAxis) {
+        camera3D.look(rotationAxis, -angleH);
+    } else {
+        camera3D.look(camera3D.getUp(), -angleH);
+    }
+
+    // 垂直旋转（鼠标 Y 移动）— 带极点约束（对标 SSCC:2841-2868）
+    const dy = endSY - startSY;
+    let angleV = (dy / vp.height) * Math.PI * 0.5;
+    angleV = startSY > endSY ? -Math.abs(angleV) : Math.abs(angleV);
+
+    if (rotationAxis) {
+        const dir = camera3D.getDirection();
+        v3Negate(_tiltNegAxis, rotationAxis);
+        const northParallel = v3EqualsEpsilon(dir, rotationAxis, EPSILON2);
+        const southParallel = v3EqualsEpsilon(dir, _tiltNegAxis, EPSILON2);
+
+        if (!northParallel && !southParallel) {
+            const dot1 = v3Dot(dir, rotationAxis);
+            const angleToAxis = acosClamped(dot1);
+            if (angleV > 0 && angleV > angleToAxis) {
+                angleV = angleToAxis - EPSILON4;
+            }
+
+            const dot2 = v3Dot(dir, _tiltNegAxis);
+            const angleToAxis2 = acosClamped(dot2);
+            if (angleV < 0 && -angleV > angleToAxis2) {
+                angleV = -angleToAxis2 + EPSILON4;
+            }
+
+            v3Cross(_tiltTangent, rotationAxis, dir);
+            v3Normalize(_tiltTangent, _tiltTangent);
+            camera3D.look(_tiltTangent, angleV);
+        } else if ((northParallel && angleV < 0) || (southParallel && angleV > 0)) {
+            camera3D.look(camera3D.getRight(), -angleV);
+        }
+    } else {
+        camera3D.look(camera3D.getRight(), -angleV);
+    }
+}
+
+function acosClamped(v: number): number {
+    return Math.acos(clamp(v, -1, 1));
+}
+
+function v3EqualsEpsilon(a: Float64Array, b: Float64Array, eps: number): boolean {
+    return Math.abs(a[0] - b[0]) <= eps &&
+           Math.abs(a[1] - b[1]) <= eps &&
+           Math.abs(a[2] - b[2]) <= eps;
+}
+
+function v3Negate(out: Float64Array, a: Float64Array): void {
+    out[0] = -a[0]; out[1] = -a[1]; out[2] = -a[2];
+}
+
+// ═══════════════════════════════════════════════════════════════
+// tilt3D — 主分发（对标 Cesium SSCC:2422-2463）
+// ═══════════════════════════════════════════════════════════════
+
+function tilt3D(
+    camera3D: Camera3D,
+    state: GlobeInteractionState,
+    startSX: number, startSY: number,
+    endSX: number, endSY: number,
+    pickGlobe: (x: number, y: number) => Float64Array | null,
+    getViewport: () => { width: number; height: number },
+    minimumZoomDistance: number,
+): void {
+    // 统一路由到 tilt3DCore：
+    // 绕鼠标点击位置的枢轴点做倾斜+旋转，
+    // 水平拖拽改变 heading（方位角），垂直拖拽改变 pitch（倾斜角），
+    // 在 90° 垂直向下时不允许翻转。
+    tilt3DCore(camera3D, state, startSX, startSY, endSX, endSY,
+              pickGlobe, getViewport, minimumZoomDistance);
+}
+
+// ═══════════════════════════════════════════════════════════════
 // createGlobeMouseHandlers — 主入口
 // ═══════════════════════════════════════════════════════════════
 
 export function createGlobeMouseHandlers(
     camera3D: Camera3D,
-    opts: { enableRotate: boolean; enableZoom: boolean; enableTilt: boolean },
+    opts: { enableRotate: boolean; enableZoom: boolean; enableTilt: boolean; minimumZoomDistance?: number },
     state: GlobeInteractionState,
     guard: { isDestroyed: () => boolean },
     pickGlobe: (sx: number, sy: number) => Float64Array | null,
@@ -432,8 +649,18 @@ export function createGlobeMouseHandlers(
             } else {
                 state.spinStartECEF = null;
             }
+        } else if (e.button === 1 && opts.enableTilt) {
+            // 中键：tilt（对标 Cesium MIDDLE_DRAG → tilt3D）
+            state.isDragging = true;
+            state.dragButton = 1;
+            state.tiltLastScreenX = sx;
+            state.tiltLastScreenY = sy;
+            state.tiltOnEllipsoid = false;
+            state.tiltLooking = false;
+            state.tiltCenterMouseSX = -1;
+            state.tiltCenterMouseSY = -1;
+            state.tiltCenter = null;
         }
-        // 中键点击不做任何操作（与 Cesium 一致）
     }
 
     function onMouseMove(e: MouseEvent): void {
@@ -447,6 +674,15 @@ export function createGlobeMouseHandlers(
             spin3D(camera3D, state, sx, sy, pickGlobe, getViewport);
             state.spinLastScreenX = sx;
             state.spinLastScreenY = sy;
+        } else if (state.dragButton === 1) {
+            // 中键 tilt（对标 Cesium MIDDLE_DRAG → tilt3D）
+            tilt3D(camera3D, state,
+                   state.tiltLastScreenX, state.tiltLastScreenY,
+                   sx, sy,
+                   pickGlobe, getViewport,
+                   opts.minimumZoomDistance ?? 100);
+            state.tiltLastScreenX = sx;
+            state.tiltLastScreenY = sy;
         }
     }
 
