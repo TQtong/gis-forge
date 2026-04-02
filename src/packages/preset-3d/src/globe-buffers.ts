@@ -111,3 +111,41 @@ export const _orbitCamECEF = new Float64Array(3);
  * 通过 `state.orbitENU` 引用此缓冲——拖拽期间零分配。
  */
 export const _orbitENUBuf = new Float64Array(9);
+
+// ─── 左键 spin/pan 预分配缓冲 ─────────────────────────────
+
+/** spin/pan 当前帧交点 ECEF 暂存（3 float64）。 */
+export const _spinCurrentECEF = new Float64Array(3);
+
+/** pan3D east 向量暂存 */
+export const _panEast = new Float64Array(3);
+
+/** pan3D 平面法线暂存（极地穿越检测用） */
+export const _panPlaneNormal = new Float64Array(3);
+
+/** pan3D 球坐标 p0 rejection 暂存 */
+export const _panRejA = new Float64Array(3);
+
+/** pan3D 球坐标 p1 rejection 暂存 */
+export const _panRejB = new Float64Array(3);
+
+/** pan3D 通用临时向量 */
+export const _panTmpA = new Float64Array(3);
+
+/** pan3D 通用临时向量 */
+export const _panTmpB = new Float64Array(3);
+
+/** pan3D basis1（mostOrthogonalAxis 输出） */
+export const _panBasis1 = new Float64Array(3);
+
+/** pan3D basis2 = cross(basis0, basis1) */
+export const _panBasis2 = new Float64Array(3);
+
+/** zoom 时 camera→target 方向暂存 */
+export const _zoomDir = new Float64Array(3);
+
+/** zoom 时 unitPosition 暂存 */
+export const _zoomUnitPos = new Float64Array(3);
+
+/** _pickECEFBuf：screenToGlobe 输出 ECEF 暂存（供 globe-interaction 持有引用） */
+export const _pickECEFBuf = new Float64Array(3);
