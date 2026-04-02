@@ -149,3 +149,29 @@ export const _zoomUnitPos = new Float64Array(3);
 
 /** _pickECEFBuf：screenToGlobe 输出 ECEF 暂存（供 globe-interaction 持有引用） */
 export const _pickECEFBuf = new Float64Array(3);
+
+// ─── 中键 tilt 预分配缓冲 ─────────────────────────────────
+
+/** tilt 枢轴点 ECEF 暂存 */
+export const _tiltCenterECEF = new Float64Array(3);
+
+/** tilt ENU 变换矩阵（4x4 列主序 Float64） */
+export const _tiltENUMat = new Float64Array(16);
+
+/** tilt vertical center ECEF 暂存（tilt3DOnTerrain 用） */
+export const _tiltVerticalCenter = new Float64Array(3);
+
+/** tilt vertical ENU 变换矩阵 */
+export const _tiltVerticalENUMat = new Float64Array(16);
+
+/** tilt 临时轴向量 */
+export const _tiltTmpAxis = new Float64Array(3);
+
+/** tilt look3D 临时 tangent */
+export const _tiltTangent = new Float64Array(3);
+
+/** tilt look3D 临时 negated axis */
+export const _tiltNegAxis = new Float64Array(3);
+
+/** tilt 临时 surface normal */
+export const _tiltNormalUp = new Float64Array(3) as import('../../core/src/geo/ellipsoid.ts').Vec3d;
