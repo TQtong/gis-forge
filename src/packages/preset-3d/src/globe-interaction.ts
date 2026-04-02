@@ -55,8 +55,15 @@ const EPSILON6 = 1e-6;
 const UNIT_Z = new Float64Array([0, 0, 1]);
 
 const TWO_PI = Math.PI * 2;
+const HALF_PI = Math.PI / 2;
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
+
+/** 最大仰角限制（对标 Cesium SSCC.maximumTiltAngle = PI/2 → 不允许翻过地平线） */
+const MAXIMUM_TILT_ANGLE = HALF_PI;
+
+/** maximumMovementRatio（对标 Cesium SSCC:272） */
+const MAXIMUM_MOVEMENT_RATIO = 0.1;
 
 // ─── Float64 向量工具 ────────────────────────────────────────
 
@@ -251,6 +258,7 @@ function pan3D(
 
 // ═══════════════════════════════════════════════════════════════
 // rotate3D — 高空屏幕空间旋转（对标 Cesium SSCC:2025-2088）
+// 含 maximumTiltAngle 约束
 // ═══════════════════════════════════════════════════════════════
 
 function rotate3D(
@@ -270,10 +278,82 @@ function rotate3D(
     rotateRate = clamp(rotateRate, MIN_ROTATE_RATE, MAX_ROTATE_RATE);
 
     const deltaPhi = rotateRate * dx * TWO_PI;
-    const deltaTheta = rotateRate * dy * Math.PI;
+    let deltaTheta = rotateRate * dy * Math.PI;
+
+    // ─── maximumTiltAngle 约束（对标 Cesium SSCC:2070-2077）───
+    // tilt = PI - acos(dot(direction, constrainedAxis))
+    // constrainedAxis 在世界空间中 = 地表法线 ≈ normalize(position)
+    const constrainedAxis = camera3D.getConstrainedAxis();
+    if (constrainedAxis) {
+        const dir = camera3D.getDirection();
+        const dotProduct = v3Dot(dir, constrainedAxis);
+        const tilt = Math.PI - Math.acos(clamp(dotProduct, -1, 1)) + deltaTheta;
+        if (tilt > MAXIMUM_TILT_ANGLE) {
+            deltaTheta -= tilt - MAXIMUM_TILT_ANGLE;
+        }
+    }
 
     camera3D.rotateRight(deltaPhi);
     camera3D.rotateUp(deltaTheta);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// rotate3DLocal — ENU 局部空间旋转（对标 Cesium rotate3D with setTransform）
+// camera 已经 setTransform 到 ENU，constrainedAxis = UNIT_Z
+// ═══════════════════════════════════════════════════════════════
+
+function rotate3DLocal(
+    camera3D: Camera3D,
+    startSX: number, startSY: number,
+    endSX: number, endSY: number,
+    getViewport: () => { width: number; height: number },
+    constrainedAxis: Float64Array | undefined,
+    rotateOnlyVertical: boolean,
+    rotateOnlyHorizontal: boolean,
+): void {
+    const vp = getViewport();
+
+    const camPos = camera3D.getPositionECEF();
+    const rho = v3Length(camPos);
+
+    // ENU 下使用单位球：rotateFactor=1, rangeAdjustment=1（对标 SSCC:2530-2533）
+    let rotateRate = 1.0 * (rho - 1.0);
+    if (rotateRate > MAX_ROTATE_RATE) rotateRate = MAX_ROTATE_RATE;
+    if (rotateRate < MIN_ROTATE_RATE) rotateRate = MIN_ROTATE_RATE;
+
+    let phiWindowRatio = (startSX - endSX) / vp.width;
+    let thetaWindowRatio = (startSY - endSY) / vp.height;
+    phiWindowRatio = Math.min(phiWindowRatio, MAXIMUM_MOVEMENT_RATIO);
+    thetaWindowRatio = Math.min(thetaWindowRatio, MAXIMUM_MOVEMENT_RATIO);
+
+    const deltaPhi = rotateRate * phiWindowRatio * TWO_PI;
+    let deltaTheta = rotateRate * thetaWindowRatio * Math.PI;
+
+    // ─── maximumTiltAngle 约束（对标 Cesium SSCC:2070-2077）───
+    if (constrainedAxis) {
+        const dir = camera3D.getDirection();
+        const dotProduct = v3Dot(dir, constrainedAxis);
+        const tilt = Math.PI - Math.acos(clamp(dotProduct, -1, 1)) + deltaTheta;
+        if (tilt > MAXIMUM_TILT_ANGLE) {
+            deltaTheta -= tilt - MAXIMUM_TILT_ANGLE;
+        }
+    }
+
+    // 临时设置 constrainedAxis
+    const oldAxis = camera3D.getConstrainedAxis();
+    if (constrainedAxis) {
+        camera3D.setConstrainedAxis(constrainedAxis);
+    }
+
+    if (!rotateOnlyVertical) {
+        camera3D.rotateRight(deltaPhi);
+    }
+    if (!rotateOnlyHorizontal) {
+        camera3D.rotateUp(deltaTheta);
+    }
+
+    // 恢复 constrainedAxis
+    camera3D.setConstrainedAxis(oldAxis);
 }
 
 // ═══════════════════════════════════════════════════════════════
