@@ -190,6 +190,13 @@ export class Globe3D {
         tiltLastScreenY: 0,
         tiltCenter: null,
         tiltOnEllipsoid: false,
+        // zoom（对标 Cesium SSCC handleZoom）
+        zoomMouseStartX: -1,
+        zoomMouseStartY: -1,
+        zoomWorldPosition: null,
+        useZoomWorldPosition: false,
+        zoomingOnVector: false,
+        rotatingZoom: false,
     };
 
     // ─── 图层与实体（占位）───────────────────────────────────

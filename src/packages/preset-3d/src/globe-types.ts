@@ -542,4 +542,49 @@ export interface GlobeInteractionState {
     tiltCenter: Float64Array | null;
     /** tilt3DOnEllipsoid 模式已激活 */
     tiltOnEllipsoid: boolean;
+
+    // ═══ 滚轮 zoom 状态（对标 Cesium SSCC handleZoom 持久状态） ═══
+
+    /**
+     * 首次滚轮时的鼠标屏幕坐标 X。`-1` 表示未初始化。
+     * 对标 Cesium `_zoomMouseStart.x`。
+     * 当光标移动超过阈值时重置为 -1，触发重新 pick 锚点。
+     */
+    zoomMouseStartX: number;
+
+    /**
+     * 首次滚轮时的鼠标屏幕坐标 Y。`-1` 表示未初始化。
+     * 对标 Cesium `_zoomMouseStart.y`。
+     */
+    zoomMouseStartY: number;
+
+    /**
+     * 首次滚轮在光标位置 pick 的 ECEF 锚点 [x,y,z]（米）。
+     * 对标 Cesium `_zoomWorldPosition`。
+     * 在整个连续缩放手势中保持不变（光标不移动时复用），
+     * 光标移动或 mouseDown 时重置为 null。
+     * 引用 `_zoomWorldPosBuf` 模块缓冲——零分配。
+     */
+    zoomWorldPosition: Float64Array | null;
+
+    /**
+     * 是否成功 pick 到缩放锚点。
+     * 对标 Cesium `_useZoomWorldPosition`。
+     * false 时回退到 `camera.zoomIn(distance)` 简单视线方向移动。
+     */
+    useZoomWorldPosition: boolean;
+
+    /**
+     * zoomOnVector 回退模式标记（低空水平视角或地下相机）。
+     * 对标 Cesium `_zoomingOnVector`。
+     * 为 true 时沿 camera→锚点方向做线性移动，不做旋转缩放。
+     */
+    zoomingOnVector: boolean;
+
+    /**
+     * 旋转缩放模式活跃标记（height < 2,000,000m）。
+     * 对标 Cesium `_rotatingZoom`。
+     * 控制后续帧是否继续走旋转缩放路径而非重新判断。
+     */
+    rotatingZoom: boolean;
 }
