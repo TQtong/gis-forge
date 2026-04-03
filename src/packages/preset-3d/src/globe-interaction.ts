@@ -1,6 +1,6 @@
 // ============================================================
 // globe-interaction.ts — 鼠标/触摸交互 → Camera3D 操作
-// 对标：Cesium ScreenSpaceCameraController — spin3D / pan3D / rotate3D / zoom3D
+// 对标：Cesium ScreenSpaceCameraController — spin3D / pan3D / rotate3D / zoom3D / tilt3D
 // 职责：左键拖拽旋转（含极地穿越）、滚轮缩放（光标位置感知）、
 //       中键 tilt3D（对标 Cesium MIDDLE_DRAG）、morph 动画。
 // ============================================================
@@ -13,8 +13,7 @@ import {
     _panTmpA, _panTmpB, _panBasis1, _panBasis2,
     _zoomDir, _zoomUnitPos,
     _spinCurrentECEF,
-    _tiltCenterECEF, _tiltENUMat, _tiltVerticalCenter, _tiltVerticalENUMat,
-    _tiltTmpAxis, _tiltTangent, _tiltNegAxis, _tiltNormalUp,
+    _tiltCenterECEF, _tiltENUMat, _tiltOldAxis,
 } from './globe-buffers.ts';
 import { geodeticToECEF, WGS84_A } from '../../core/src/geo/ellipsoid.ts';
 import type { Vec3d } from '../../core/src/geo/ellipsoid.ts';
@@ -42,28 +41,24 @@ const MIN_ROTATE_RATE = 1 / 5000;
 /** 最大旋转速率 */
 const MAX_ROTATE_RATE = 1.77;
 
-/** tilt3D：高度高于此值使用 tilt3DOnEllipsoid，低于则用 tilt3DOnTerrain（对标 SSCC:246） */
+/** tilt3D：高度高于此值使用 tilt3DOnEllipsoid，低于则用 look 模式（对标 SSCC:246） */
 const MINIMUM_COLLISION_TERRAIN_HEIGHT = 15_000;
 
-/** tilt3D：高于此高度且未命中时切换到 look 模式（对标 SSCC:258-259） */
-const MINIMUM_TRACKBALL_HEIGHT_TILT = WGS84_A * 0.75;
+/** maximumMovementRatio（对标 Cesium SSCC:272）—— 单帧最大移动比率 */
+const MAXIMUM_MOVEMENT_RATIO = 0.1;
 
-const EPSILON2 = 1e-2;
+/** 最大仰角限制（对标 Cesium maximumTiltAngle = PI/2 → 不允许翻过地平线） */
+const MAXIMUM_TILT_ANGLE = Math.PI / 2;
+
 const EPSILON3 = 1e-3;
-const EPSILON4 = 1e-4;
-const EPSILON6 = 1e-6;
-const UNIT_Z = new Float64Array([0, 0, 1]);
 
 const TWO_PI = Math.PI * 2;
 const HALF_PI = Math.PI / 2;
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
 
-/** 最大仰角限制（对标 Cesium SSCC.maximumTiltAngle = PI/2 → 不允许翻过地平线） */
-const MAXIMUM_TILT_ANGLE = HALF_PI;
-
-/** maximumMovementRatio（对标 Cesium SSCC:272） */
-const MAXIMUM_MOVEMENT_RATIO = 0.1;
+/** ENU 局部空间中的 up 方向（Z 轴）—— tilt3D constrainedAxis */
+const UNIT_Z = new Float64Array([0, 0, 1]);
 
 // ─── Float64 向量工具 ────────────────────────────────────────
 
@@ -132,6 +127,45 @@ function mostOrthogonalBasis(out: Float64Array, v: Float64Array): void {
     // basis1 = cross(out, v)  然后 normalize
     v3Cross(out, out, v);
     v3Normalize(out, out);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Float64 射线-椭球求交（tilt3D 枢轴计算专用，绕过 Float32 VP 精度问题）
+// ═══════════════════════════════════════════════════════════════
+
+const _RAY_INV_A2 = 1.0 / (WGS84_A * WGS84_A);
+const _RAY_INV_B2 = 1.0 / (6356752.314245179 * 6356752.314245179);
+
+/**
+ * Float64 射线-WGS84 椭球求交。返回 ECEF 交点写入 out，未命中返回 null。
+ *
+ * @param origin - 射线起点 ECEF (Float64Array)
+ * @param dir - 射线方向（单位向量，Float64Array）
+ * @param out - 输出 ECEF 交点 (Float64Array[3])
+ * @returns out 引用或 null
+ */
+function _rayEllipsoidIntersect64(
+    origin: Float64Array,
+    dir: Float64Array,
+    out: Float64Array,
+): Float64Array | null {
+    const ox = origin[0], oy = origin[1], oz = origin[2];
+    const dx = dir[0], dy = dir[1], dz = dir[2];
+
+    const A = dx * dx * _RAY_INV_A2 + dy * dy * _RAY_INV_A2 + dz * dz * _RAY_INV_B2;
+    const B = 2 * (ox * dx * _RAY_INV_A2 + oy * dy * _RAY_INV_A2 + oz * dz * _RAY_INV_B2);
+    const C = ox * ox * _RAY_INV_A2 + oy * oy * _RAY_INV_A2 + oz * oz * _RAY_INV_B2 - 1;
+
+    const disc = B * B - 4 * A * C;
+    if (disc < 0) { return null; }
+
+    const t = (-B - Math.sqrt(disc)) / (2 * A);
+    if (t < 0) { return null; }
+
+    out[0] = ox + t * dx;
+    out[1] = oy + t * dy;
+    out[2] = oz + t * dz;
+    return out;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -258,7 +292,6 @@ function pan3D(
 
 // ═══════════════════════════════════════════════════════════════
 // rotate3D — 高空屏幕空间旋转（对标 Cesium SSCC:2025-2088）
-// 含 maximumTiltAngle 约束
 // ═══════════════════════════════════════════════════════════════
 
 function rotate3D(
@@ -278,82 +311,10 @@ function rotate3D(
     rotateRate = clamp(rotateRate, MIN_ROTATE_RATE, MAX_ROTATE_RATE);
 
     const deltaPhi = rotateRate * dx * TWO_PI;
-    let deltaTheta = rotateRate * dy * Math.PI;
-
-    // ─── maximumTiltAngle 约束（对标 Cesium SSCC:2070-2077）───
-    // tilt = PI - acos(dot(direction, constrainedAxis))
-    // constrainedAxis 在世界空间中 = 地表法线 ≈ normalize(position)
-    const constrainedAxis = camera3D.getConstrainedAxis();
-    if (constrainedAxis) {
-        const dir = camera3D.getDirection();
-        const dotProduct = v3Dot(dir, constrainedAxis);
-        const tilt = Math.PI - Math.acos(clamp(dotProduct, -1, 1)) + deltaTheta;
-        if (tilt > MAXIMUM_TILT_ANGLE) {
-            deltaTheta -= tilt - MAXIMUM_TILT_ANGLE;
-        }
-    }
+    const deltaTheta = rotateRate * dy * Math.PI;
 
     camera3D.rotateRight(deltaPhi);
     camera3D.rotateUp(deltaTheta);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// rotate3DLocal — ENU 局部空间旋转（对标 Cesium rotate3D with setTransform）
-// camera 已经 setTransform 到 ENU，constrainedAxis = UNIT_Z
-// ═══════════════════════════════════════════════════════════════
-
-function rotate3DLocal(
-    camera3D: Camera3D,
-    startSX: number, startSY: number,
-    endSX: number, endSY: number,
-    getViewport: () => { width: number; height: number },
-    constrainedAxis: Float64Array | undefined,
-    rotateOnlyVertical: boolean,
-    rotateOnlyHorizontal: boolean,
-): void {
-    const vp = getViewport();
-
-    const camPos = camera3D.getPositionECEF();
-    const rho = v3Length(camPos);
-
-    // ENU 下使用单位球：rotateFactor=1, rangeAdjustment=1（对标 SSCC:2530-2533）
-    let rotateRate = 1.0 * (rho - 1.0);
-    if (rotateRate > MAX_ROTATE_RATE) rotateRate = MAX_ROTATE_RATE;
-    if (rotateRate < MIN_ROTATE_RATE) rotateRate = MIN_ROTATE_RATE;
-
-    let phiWindowRatio = (startSX - endSX) / vp.width;
-    let thetaWindowRatio = (startSY - endSY) / vp.height;
-    phiWindowRatio = Math.min(phiWindowRatio, MAXIMUM_MOVEMENT_RATIO);
-    thetaWindowRatio = Math.min(thetaWindowRatio, MAXIMUM_MOVEMENT_RATIO);
-
-    const deltaPhi = rotateRate * phiWindowRatio * TWO_PI;
-    let deltaTheta = rotateRate * thetaWindowRatio * Math.PI;
-
-    // ─── maximumTiltAngle 约束（对标 Cesium SSCC:2070-2077）───
-    if (constrainedAxis) {
-        const dir = camera3D.getDirection();
-        const dotProduct = v3Dot(dir, constrainedAxis);
-        const tilt = Math.PI - Math.acos(clamp(dotProduct, -1, 1)) + deltaTheta;
-        if (tilt > MAXIMUM_TILT_ANGLE) {
-            deltaTheta -= tilt - MAXIMUM_TILT_ANGLE;
-        }
-    }
-
-    // 临时设置 constrainedAxis
-    const oldAxis = camera3D.getConstrainedAxis();
-    if (constrainedAxis) {
-        camera3D.setConstrainedAxis(constrainedAxis);
-    }
-
-    if (!rotateOnlyVertical) {
-        camera3D.rotateRight(deltaPhi);
-    }
-    if (!rotateOnlyHorizontal) {
-        camera3D.rotateUp(deltaTheta);
-    }
-
-    // 恢复 constrainedAxis
-    camera3D.setConstrainedAxis(oldAxis);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -478,12 +439,21 @@ function zoom3D(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// tilt3DCore — 完全对标 Cesium tilt3DOnEllipsoid（SSCC:2467-2547）
+// tilt3DCore — 对标 Cesium tilt3DOnEllipsoid（SSCC:2467-2547）
 //
-// 核心机制：相机绕枢轴点轨道运动：
-//   - 水平拖拽 → 绕枢轴法线旋转 → heading 变化
-//   - 垂直拖拽 → 绕 camera.right 旋转 → pitch 变化
-//   - 约束防翻转 + 允许到达水平视角
+// 核心机制（完全对标 Cesium 方案）：
+//   1. 在屏幕中心 pick 枢轴点 → 构建 ENU（East-North-Up）局部坐标系
+//   2. camera.setTransform(ENU) → 相机坐标切换到 ENU 局部空间
+//   3. 在 ENU 空间中，constrainedAxis = UNIT_Z（局部 up），用 rotateRight/rotateUp
+//      做 heading + pitch 旋转。rotateUp 内部的极点检测天然处理 nadir 约束：
+//      - 当相机在 ENU 空间中处于"北极"（= 世界空间中正上方 = nadir 状态），
+//        垂直拖拽被阻断，但水平旋转仍然生效 → 类似极点处旋转地球的效果
+//   4. maximumTiltAngle = π/2 防止越过水平线
+//   5. camera.restoreTransform() → 坐标回到 ECEF 世界空间
+//
+// 倾斜角范围：0°（nadir，垂直向下看）→ 90°（水平看），不允许越过水平线。
+// nadir 时继续向下拖拽 → 垂直分量被 rotateVertical 极点逻辑屏蔽，
+// 但水平分量（rotateRight）始终生效 → 地球绕枢轴法线旋转。
 // ═══════════════════════════════════════════════════════════════
 
 function tilt3DCore(
@@ -497,164 +467,104 @@ function tilt3DCore(
 ): void {
     const vp = getViewport();
 
-    // 1. 防穿地（对标 SSCC:2473-2479）──────────────────
+    // 1. 防穿地：高度接近最小缩放距离时，禁止向地面方向继续拖拽
+    //    对标 Cesium SSCC:2473-2479（endY - startY < 0 = 鼠标向上移动 = 试图压低相机）
     const alt = camera3D.getPosition().alt;
     const minHeight = minimumZoomDistance * 0.25;
-    if (alt - minHeight - 1.0 < EPSILON3 && endSY < startSY) {
+    if (alt - minHeight - 1.0 < EPSILON3 &&
+        (endSY - startSY) < 0) {
         return;
     }
 
-    // 2. 确定枢轴（屏幕中心 pick）────────────────────────
-    if (!state.tiltCenter) {
-        let hit = pickGlobe(vp.width / 2, vp.height / 2);
-        if (!hit) {
-            const pos = camera3D.getPosition();
-            geodeticToECEF(_tiltCenterECEF as Vec3d, pos.lon * DEG2RAD, pos.lat * DEG2RAD, 0);
-            hit = _tiltCenterECEF;
-        }
-        state.tiltCenter = new Float64Array(3);
-        state.tiltCenter[0] = hit[0]; state.tiltCenter[1] = hit[1]; state.tiltCenter[2] = hit[2];
+    // 2. 确定枢轴：每帧用 Camera3D 的 Float64 向量做射线-球求交（对标 Cesium tilt3DOnEllipsoid）。
+    //    Cesium 每帧重新计算枢轴——随着相机倾斜，视口中心在球面的交点会移动，
+    //    始终围绕当前视口中心旋转可防止地球偏移出屏幕。
+    //    ⚠ 不使用 pickGlobe（依赖 Float32 inverseVP，精度不够导致累积漂移），
+    //    改为直接用 Camera3D 的 Float64 position+direction 做射线-球求交。
+    const camPos = camera3D.getPositionECEF();
+    const camDir = camera3D.getDirection();
+    const tiltCenter = _rayEllipsoidIntersect64(camPos, camDir, _tiltCenterECEF);
+    if (!tiltCenter) {
+        // 射线未命中椭球 → 用相机正下方地表点作为备用枢轴
+        const pos = camera3D.getPosition();
+        geodeticToECEF(
+            _tiltCenterECEF as Vec3d,
+            pos.lon * DEG2RAD, pos.lat * DEG2RAD, 0,
+        );
     }
 
-    // 3. 计算旋转量 ───────────────────────────────────
-    const dx = endSX - startSX;
-    const dy = endSY - startSY;
-    const sensitivity = 0.005;
+    // 3. 在枢轴点构建 ENU 变换矩阵（对标 Cesium Transforms.eastNorthUpToFixedFrame）
+    //    ENU 列主序：col0=east, col1=north, col2=up, col3=center
+    eastNorthUpToFixedFrame(_tiltENUMat, _tiltCenterECEF);
 
-    // 4. 垂直拖拽 → 绕 camera.right（屏幕水平轴）做 tilt
-    //    对标 Cesium rotateVertical (Camera.js:2080-2134) 的约束逻辑
-    if (Math.abs(dy) > 0.5) {
-        let pitchAngle = -dy * sensitivity;
-
-        const center = state.tiltCenter;
-        const camPos = camera3D.getPositionECEF();
-
-        // 计算相机相对枢轴的偏移向量，归一化
-        const relX = camPos[0] - center[0];
-        const relY = camPos[1] - center[1];
-        const relZ = camPos[2] - center[2];
-        const relLen = Math.sqrt(relX * relX + relY * relY + relZ * relZ);
-
-        if (relLen > 1e-10) {
-            const px = relX / relLen, py = relY / relLen, pz = relZ / relLen;
-
-            // 枢轴法线（= constrainedAxis 在世界空间中的等价物）
-            const cLen = v3Length(center);
-            if (cLen > 1e-10) {
-                const ax = center[0] / cLen, ay = center[1] / cLen, az = center[2] / cLen;
-
-                // 对标 Cesium rotateVertical:2107-2120
-                // angleToAxis = 到"正上方"（north pole = 枢轴法线方向）的角度
-                const dotNorth = px * ax + py * ay + pz * az;
-                const angleToNorth = Math.acos(clamp(dotNorth, -1, 1));
-
-                // 正旋转（向上/向正上方）：不能越过正上方
-                if (pitchAngle > 0 && pitchAngle > angleToNorth) {
-                    pitchAngle = angleToNorth - EPSILON4;
-                }
-
-                // angleToSouth = 到"正下方"（south pole = 枢轴法线反方向）的角度
-                const dotSouth = -(px * ax + py * ay + pz * az); // = dot(p, -axis)
-                const angleToSouth = Math.acos(clamp(dotSouth, -1, 1));
-
-                // 负旋转（向下/向水平方向）：不能越过水平（south pole 方向）
-                if (pitchAngle < 0 && -pitchAngle > angleToSouth) {
-                    pitchAngle = -angleToSouth + EPSILON4;
-                }
-
-                if (Math.abs(pitchAngle) > 1e-8) {
-                    camera3D.rotateAroundPoint(center, camera3D.getRight(), pitchAngle);
-                }
-            }
-        }
+    // 4. 保存相机当前的 constrainedAxis，然后切换到 ENU 局部空间
+    //    对标 Cesium SSCC:2523-2533 的 setTransform + 临时修改 rotateFactor
+    //    ⚠ getConstrainedAxis() 返回内部数组引用，setConstrainedAxis 会原地修改，
+    //    所以必须先把旧值复制到独立缓冲 _tiltOldAxis，否则 restore 时旧值已被覆盖。
+    const rawOldAxis = camera3D.getConstrainedAxis();
+    let hasOldAxis = false;
+    if (rawOldAxis) {
+        _tiltOldAxis[0] = rawOldAxis[0];
+        _tiltOldAxis[1] = rawOldAxis[1];
+        _tiltOldAxis[2] = rawOldAxis[2];
+        hasOldAxis = true;
     }
 
-    // 5. 水平拖拽 → 绕枢轴法线（地表 up 方向）做 heading 旋转
-    //    往左拖转左，往右拖转右
-    if (Math.abs(dx) > 0.5) {
-        const headingAngle = dx * sensitivity;
-        const center = state.tiltCenter;
-        const cLen = v3Length(center);
-        if (cLen > 1e-10) {
-            _tiltTmpAxis[0] = center[0] / cLen;
-            _tiltTmpAxis[1] = center[1] / cLen;
-            _tiltTmpAxis[2] = center[2] / cLen;
-            camera3D.rotateAroundPoint(center, _tiltTmpAxis, headingAngle);
-        }
+    // 切换到 ENU 空间：position/direction/up 变为 ENU 局部坐标
+    camera3D.setTransform(_tiltENUMat);
+
+    // 在 ENU 空间中 constrainedAxis = Z 轴（= 局部 up 方向）
+    camera3D.setConstrainedAxis(UNIT_Z);
+
+    // 5. 计算旋转量（对标 Cesium rotate3D SSCC:2025-2088 中的 NDC 归一化方案）
+    //    ENU 下使用单位球：rotateFactor=1, rangeAdjustment=1
+    const camPosLocal = camera3D.getPositionECEF(); // setTransform 后返回 ENU 局部位置
+    const rho = v3Length(camPosLocal);
+
+    // 旋转速率：与 Cesium 一致的 rho - 1 方案（ENU 下椭球半径 = 1）
+    let rotateRate = 1.0 * (rho - 1.0);
+    rotateRate = clamp(rotateRate, MIN_ROTATE_RATE, MAX_ROTATE_RATE);
+
+    // 屏幕像素 → NDC 归一化比率
+    let phiWindowRatio = (startSX - endSX) / vp.width;
+    let thetaWindowRatio = (startSY - endSY) / vp.height;
+
+    // 防抖：限制单帧最大移动比率（对标 Cesium SSCC:272 maximumMovementRatio）
+    phiWindowRatio = Math.min(phiWindowRatio, MAXIMUM_MOVEMENT_RATIO);
+    thetaWindowRatio = Math.min(thetaWindowRatio, MAXIMUM_MOVEMENT_RATIO);
+
+    // 转换为弧度：水平满屏 = 360° 旋转，垂直满屏 = 180° 旋转
+    const deltaPhi = rotateRate * phiWindowRatio * TWO_PI;
+    let deltaTheta = rotateRate * thetaWindowRatio * Math.PI;
+
+    // 6. maximumTiltAngle 约束（对标 Cesium SSCC:2070-2077）
+    //    tilt = π - acos(dot(direction, constrainedAxis))
+    //    - nadir（正下方看）：dot(dir, up) ≈ -1 → acos = π → tilt ≈ 0
+    //    - 水平看：dot(dir, up) ≈ 0 → acos = π/2 → tilt ≈ π/2
+    //    - MAXIMUM_TILT_ANGLE = π/2 → 不允许越过水平线
+    const dir = camera3D.getDirection();
+    const dotProduct = v3Dot(dir, UNIT_Z);
+    const currentTilt = Math.PI - Math.acos(clamp(dotProduct, -1, 1));
+    const tiltAfterDelta = currentTilt + deltaTheta;
+    if (tiltAfterDelta > MAXIMUM_TILT_ANGLE) {
+        // 将超出部分裁剪：deltaTheta 只允许把 tilt 推到 MAXIMUM_TILT_ANGLE
+        deltaTheta -= (tiltAfterDelta - MAXIMUM_TILT_ANGLE);
     }
-}
 
-// ═══════════════════════════════════════════════════════════════
-// tiltLook3D — 对标 Cesium SSCC look3D:2750-2870
-// ═══════════════════════════════════════════════════════════════
+    // 7. 应用旋转
+    //    rotateRight：绕 constrainedAxis（ENU Z 轴 = 地表 up）旋转 → heading 变化
+    //    rotateUp：绕 tangent 旋转 → pitch 变化
+    //    在 nadir 时，rotateUp 内部的极点检测（Camera3D._rotateUp）会：
+    //      - 检测 normalize(position) ≈ constrainedAxis（北极 = nadir）
+    //      - 阻断"向北极更深处"方向的旋转（= 阻止越过 nadir）
+    //      - 允许"离开北极"方向的旋转（= 允许从 nadir 向水平倾斜）
+    //    水平旋转 rotateRight 不受极点约束影响 → 始终生效 → nadir 时拖拽只旋转地球
+    camera3D.rotateRight(deltaPhi);
+    camera3D.rotateUp(deltaTheta);
 
-function tiltLook3D(
-    camera3D: Camera3D,
-    startSX: number, startSY: number,
-    endSX: number, endSY: number,
-    getViewport: () => { width: number; height: number },
-    rotationAxis: Float64Array | null,
-): void {
-    const vp = getViewport();
-
-    // 水平旋转（鼠标 X 移动）
-    const dx = endSX - startSX;
-    let angleH = (dx / vp.width) * Math.PI * 0.5;
-    angleH = startSX > endSX ? -Math.abs(angleH) : Math.abs(angleH);
-
-    if (rotationAxis) {
-        camera3D.look(rotationAxis, -angleH);
-    } else {
-        camera3D.look(camera3D.getUp(), -angleH);
-    }
-
-    // 垂直旋转（鼠标 Y 移动）— 带极点约束（对标 SSCC:2841-2868）
-    const dy = endSY - startSY;
-    let angleV = (dy / vp.height) * Math.PI * 0.5;
-    angleV = startSY > endSY ? -Math.abs(angleV) : Math.abs(angleV);
-
-    if (rotationAxis) {
-        const dir = camera3D.getDirection();
-        v3Negate(_tiltNegAxis, rotationAxis);
-        const northParallel = v3EqualsEpsilon(dir, rotationAxis, EPSILON2);
-        const southParallel = v3EqualsEpsilon(dir, _tiltNegAxis, EPSILON2);
-
-        if (!northParallel && !southParallel) {
-            const dot1 = v3Dot(dir, rotationAxis);
-            const angleToAxis = acosClamped(dot1);
-            if (angleV > 0 && angleV > angleToAxis) {
-                angleV = angleToAxis - EPSILON4;
-            }
-
-            const dot2 = v3Dot(dir, _tiltNegAxis);
-            const angleToAxis2 = acosClamped(dot2);
-            if (angleV < 0 && -angleV > angleToAxis2) {
-                angleV = -angleToAxis2 + EPSILON4;
-            }
-
-            v3Cross(_tiltTangent, rotationAxis, dir);
-            v3Normalize(_tiltTangent, _tiltTangent);
-            camera3D.look(_tiltTangent, angleV);
-        } else if ((northParallel && angleV < 0) || (southParallel && angleV > 0)) {
-            camera3D.look(camera3D.getRight(), -angleV);
-        }
-    } else {
-        camera3D.look(camera3D.getRight(), -angleV);
-    }
-}
-
-function acosClamped(v: number): number {
-    return Math.acos(clamp(v, -1, 1));
-}
-
-function v3EqualsEpsilon(a: Float64Array, b: Float64Array, eps: number): boolean {
-    return Math.abs(a[0] - b[0]) <= eps &&
-           Math.abs(a[1] - b[1]) <= eps &&
-           Math.abs(a[2] - b[2]) <= eps;
-}
-
-function v3Negate(out: Float64Array, a: Float64Array): void {
-    out[0] = -a[0]; out[1] = -a[1]; out[2] = -a[2];
+    // 8. 恢复世界空间 + 恢复原 constrainedAxis
+    camera3D.restoreTransform();
+    camera3D.setConstrainedAxis(hasOldAxis ? _tiltOldAxis : null);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -670,10 +580,10 @@ function tilt3D(
     getViewport: () => { width: number; height: number },
     minimumZoomDistance: number,
 ): void {
-    // 统一路由到 tilt3DCore：
-    // 绕鼠标点击位置的枢轴点做倾斜+旋转，
+    // 统一路由到 tilt3DCore（ENU 方案）：
+    // 绕屏幕中心枢轴点做倾斜+旋转，
     // 水平拖拽改变 heading（方位角），垂直拖拽改变 pitch（倾斜角），
-    // 在 90° 垂直向下时不允许翻转。
+    // 在 nadir 时垂直被阻断、水平仍生效 → 类似极点旋转效果。
     tilt3DCore(camera3D, state, startSX, startSY, endSX, endSY,
               pickGlobe, getViewport, minimumZoomDistance);
 }
@@ -736,9 +646,7 @@ export function createGlobeMouseHandlers(
             state.tiltLastScreenX = sx;
             state.tiltLastScreenY = sy;
             state.tiltOnEllipsoid = false;
-            state.tiltLooking = false;
-            state.tiltCenterMouseSX = -1;
-            state.tiltCenterMouseSY = -1;
+            // 首帧 tilt 时将确定枢轴，此处置 null 触发重新 pick
             state.tiltCenter = null;
         }
     }
