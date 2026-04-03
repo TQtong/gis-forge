@@ -11,8 +11,8 @@ declare const __DEV__: boolean | undefined;
 
 import type { CameraState, Viewport } from '../../core/src/types/viewport.ts';
 import { geodeticToECEF } from '../../core/src/geo/ellipsoid.ts';
-import * as mat4 from '../../core/src/math/mat4.ts';
-import * as vec3 from '../../core/src/math/vec3.ts';
+import * as mat4d from '../../core/src/math/mat4d.ts';
+import * as vec3d from '../../core/src/math/vec3d.ts';
 import type { Camera3D } from '../../camera-3d/src/Camera3D.ts';
 import type { GlobeCamera } from '../../globe/src/globe-tile-mesh.ts';
 import {
@@ -64,7 +64,7 @@ export function computeGlobeCamera(
     const horizonDist = computeHorizonDist(alt);
     const farZ = horizonDist * FAR_PLANE_HORIZON_FACTOR + alt;
 
-    mat4.perspective(_tmpMat4A, fov, aspect, nearZ, farZ);
+    mat4d.perspective(_tmpMat4A, fov, aspect, nearZ, farZ);
 
     // ─── 从 Camera3D 读取 ECEF 向量 ─────────────────────────
     // 直接使用 Camera3D 维护的 position/direction/up 四向量，
@@ -82,39 +82,36 @@ export function computeGlobeCamera(
     const camECEFz: number = camPosECEF[2];
 
     // ─── RTE 视图矩阵：eye=origin，target=direction，up=camera.up ────
-    // RTE（Relative To Eye）将相机置于原点，避免 Float32 精度问题。
-    // target = direction（lookAt 需要一个目标点，用 direction 作为单位向量方向指示）
-    vec3.set(_tmpVec3A, 0, 0, 0);
-    vec3.set(_tmpVec3B, camDir[0], camDir[1], camDir[2]);
-    vec3.set(_tmpVec3C, camUp[0], camUp[1], camUp[2]);
+    // RTE（Relative To Eye）将相机置于原点，避免大 ECEF 坐标的精度问题。
+    // 全程 Float64 计算，最后转 Float32 上传 GPU。
+    vec3d.set(_tmpVec3A, 0, 0, 0);
+    vec3d.set(_tmpVec3B, camDir[0], camDir[1], camDir[2]);
+    vec3d.set(_tmpVec3C, camUp[0], camUp[1], camUp[2]);
 
-    mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
+    mat4d.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
 
-    mat4.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
-    const vpMatrix = mat4.clone(_tmpMat4C);
+    mat4d.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
+    const vpMatrix = mat4d.create();
+    mat4d.copy(vpMatrix, _tmpMat4C);
 
     // ─── ECEF 视图矩阵（用于 screenToGlobe 拾取）────────────
-    // eye = cameraECEF, target = cameraECEF + direction * SCALE, up = camera.up
-    // ⚠ direction 是单位向量（长度 ~1m），而 ECEF 坐标 ~2.6×10⁷m；
-    //   Float32 在该量级 ULP ≈ 2m，1m 偏移被精度吞没 → lookAt forward 退化。
-    //   乘以 1e6（1000 km）使 target 偏移远超 Float32 噪底，
-    //   lookAt 内部 normalize(target - eye) 不受 scale 影响。
-    const DIR_SCALE = 1e6;
-    vec3.set(_tmpVec3A, camECEFx, camECEFy, camECEFz);
-    vec3.set(_tmpVec3B,
-        camECEFx + camDir[0] * DIR_SCALE,
-        camECEFy + camDir[1] * DIR_SCALE,
-        camECEFz + camDir[2] * DIR_SCALE,
+    // eye = cameraECEF, target = cameraECEF + direction, up = camera.up
+    // 全程 Float64——不再需要 DIR_SCALE 技巧，Float64 精度足以表达 1m 偏移于 2.6×10⁷m 坐标上。
+    vec3d.set(_tmpVec3A, camECEFx, camECEFy, camECEFz);
+    vec3d.set(_tmpVec3B,
+        camECEFx + camDir[0],
+        camECEFy + camDir[1],
+        camECEFz + camDir[2],
     );
-    vec3.set(_tmpVec3C, camUp[0], camUp[1], camUp[2]);
-    mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
-    mat4.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
+    vec3d.set(_tmpVec3C, camUp[0], camUp[1], camUp[2]);
+    mat4d.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
+    mat4d.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
 
-    const inverseVP_ECEF = mat4.create();
-    mat4.invert(inverseVP_ECEF, _tmpMat4C);
+    const inverseVP_ECEF = mat4d.create();
+    mat4d.invert(inverseVP_ECEF, _tmpMat4C);
 
-    const inverseVP_RTE = mat4.create();
-    mat4.invert(inverseVP_RTE, vpMatrix);
+    const inverseVP_RTE = mat4d.create();
+    mat4d.invert(inverseVP_RTE, vpMatrix);
 
     return {
         vpMatrix,

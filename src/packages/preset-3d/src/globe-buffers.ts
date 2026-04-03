@@ -14,8 +14,8 @@
  */
 
 import type { Vec3d } from '../../core/src/geo/ellipsoid.ts';
-import * as mat4 from '../../core/src/math/mat4.ts';
-import * as vec3 from '../../core/src/math/vec3.ts';
+import * as mat4d from '../../core/src/math/mat4d.ts';
+import * as vec3d from '../../core/src/math/vec3d.ts';
 
 /**
  * 通用 ECEF 三维点暂存（Float64），供 `geodeticToECEF`、`cartographicToScreen` 等写入。
@@ -31,32 +31,32 @@ export const _normTmp = new Float64Array(3) as Vec3d;
 /**
  * 透视投影矩阵暂存。`computeGlobeCamera` / EggShape 诊断读取 `[0]`、`[5]` 等分量校验纵横比。
  */
-export const _tmpMat4A = mat4.create();
+export const _tmpMat4A = mat4d.create();
 
 /**
  * 视图矩阵 `lookAt` 结果暂存（RTE 或 ECEF 空间）。
  */
-export const _tmpMat4B = mat4.create();
+export const _tmpMat4B = mat4d.create();
 
 /**
  * 合成矩阵暂存：`proj × view` 或逆矩阵计算的中间结果。
  */
-export const _tmpMat4C = mat4.create();
+export const _tmpMat4C = mat4d.create();
 
 /**
  * `lookAt` 用的 eye / 起点向量（RTE 下常为原点）。
  */
-export const _tmpVec3A = vec3.create();
+export const _tmpVec3A = vec3d.create();
 
 /**
  * `lookAt` 用的 target / 方向终点向量。
  */
-export const _tmpVec3B = vec3.create();
+export const _tmpVec3B = vec3d.create();
 
 /**
  * `lookAt` 用的 up 向量（地理北向在 ECEF 中的表达）。
  */
-export const _tmpVec3C = vec3.create();
+export const _tmpVec3C = vec3d.create();
 
 /**
  * 相机位置 ECEF（米），Float64；由经纬高经 `geodeticToECEF` 填入，供 RTE 减法与 `GlobeCamera.cameraECEF`。

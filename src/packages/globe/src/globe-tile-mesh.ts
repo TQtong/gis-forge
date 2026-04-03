@@ -212,12 +212,12 @@ export interface GlobeTileID {
  * 与 core/types/viewport.ts 的 CameraState 兼容但不强制完整依赖。
  */
 export interface GlobeCamera {
-    /** 视图投影矩阵（RTE 空间），Float32Array[16]，column-major */
-    readonly vpMatrix: Float32Array;
-    /** 逆 VP 矩阵（ECEF 绝对空间版），用于 screenToGlobe 射线反投影 */
-    readonly inverseVP_ECEF: Float32Array;
-    /** 逆 VP 矩阵（RTE 版），用于大气/天穹 shader 射线方向计算（Float32 精度安全） */
-    readonly inverseVP_RTE: Float32Array;
+    /** 视图投影矩阵（RTE 空间），Float64Array[16]，column-major；上传 GPU 时截断为 Float32 */
+    readonly vpMatrix: Float64Array;
+    /** 逆 VP 矩阵（ECEF 绝对空间版），Float64 精度——用于 screenToGlobe 射线反投影 */
+    readonly inverseVP_ECEF: Float64Array;
+    /** 逆 VP 矩阵（RTE 版），Float64 精度——用于大气/天穹 shader 射线方向计算 */
+    readonly inverseVP_RTE: Float64Array;
     /** 相机 ECEF 坐标 [x, y, z]（米），Float64 精度 */
     readonly cameraECEF: [number, number, number];
     /** 注视点经纬度 [lng, lat]（度） */
@@ -1296,7 +1296,7 @@ export function meshToRTE_HighLow(
  * @returns [rx, ry, rz, rw]
  */
 function mulMat4Vec4(
-    m: Float32Array,
+    m: Float64Array,
     x: number, y: number, z: number, w: number,
 ): [number, number, number, number] {
     return [
@@ -1330,7 +1330,7 @@ function mulMat4Vec4(
  */
 export function screenToGlobe(
     sx: number, sy: number,
-    inverseVP_ECEF: Float32Array,
+    inverseVP_ECEF: Float64Array,
     vpWidth: number, vpHeight: number,
     ellipsoid: Ellipsoid = WGS84_ELLIPSOID,
 ): [number, number] | null {
