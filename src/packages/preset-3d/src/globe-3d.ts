@@ -186,13 +186,10 @@ export class Globe3D {
         spinning: false,
         rotating: false,
         looking: false,
-        tiltCenter: null,
-        tiltCenterMouseSX: -1,
-        tiltCenterMouseSY: -1,
         tiltLastScreenX: 0,
         tiltLastScreenY: 0,
+        tiltCenter: null,
         tiltOnEllipsoid: false,
-        tiltLooking: false,
     };
 
     // ─── 图层与实体（占位）───────────────────────────────────
@@ -403,10 +400,10 @@ export class Globe3D {
         this._maximumZoomDistance = options.maximumZoomDistance ?? 5e7;
 
         // ── 初始相机参数 ──
-        const initCenter = options.center ?? [0, 0];
+        const initCenter = options.center ?? [104, 35];
         const initAlt = options.altitude ?? DEFAULT_ALTITUDE;
         const initBearingRad = (options.bearing ?? 0) * DEG2RAD;
-        const initPitchRad = (options.pitch ?? -45) * DEG2RAD;
+        const initPitchRad = (options.pitch ?? -90) * DEG2RAD;
 
         // ── 创建 Camera3D ──
         this._camera3D = createCamera3D({

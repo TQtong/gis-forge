@@ -18,6 +18,7 @@ import type { GlobeCamera } from '../../globe/src/globe-tile-mesh.ts';
 import {
     _cameraUniformData,
     _ecefCam64,
+    _ecefCenter64,
     _tmpMat4A,
     _tmpMat4B,
     _tmpMat4C,
@@ -65,6 +66,9 @@ export function computeGlobeCamera(
     mat4.perspective(_tmpMat4A, fov, aspect, nearZ, farZ);
 
     // ─── 从 Camera3D 读取 ECEF 向量 ─────────────────────────
+    // 直接使用 Camera3D 维护的 position/direction/up 四向量，
+    // 而非从经纬度重新推导视线方向。
+    // 这样 tilt3D / rotateUp / rotateRight 对 direction/up 的修改才能反映到渲染中。
     const camPosECEF = camera3D.getPositionECEF(); // Float64Array(3)
     const camDir = camera3D.getDirection();          // Float64Array(3) 单位向量
     const camUp = camera3D.getUp();                  // Float64Array(3) 单位向量
@@ -77,6 +81,8 @@ export function computeGlobeCamera(
     const camECEFz: number = camPosECEF[2];
 
     // ─── RTE 视图矩阵：eye=origin，target=direction，up=camera.up ────
+    // RTE（Relative To Eye）将相机置于原点，避免 Float32 精度问题。
+    // target = direction（lookAt 需要一个目标点，用 direction 作为单位向量方向指示）
     vec3.set(_tmpVec3A, 0, 0, 0);
     vec3.set(_tmpVec3B, camDir[0], camDir[1], camDir[2]);
     vec3.set(_tmpVec3C, camUp[0], camUp[1], camUp[2]);
@@ -87,9 +93,18 @@ export function computeGlobeCamera(
     const vpMatrix = mat4.clone(_tmpMat4C);
 
     // ─── ECEF 视图矩阵（用于 screenToGlobe 拾取）────────────
-    // eye = cameraECEF, target = cameraECEF + direction, up = camera.up
+    // eye = cameraECEF, target = cameraECEF + direction * SCALE, up = camera.up
+    // ⚠ direction 是单位向量（长度 ~1m），而 ECEF 坐标 ~2.6×10⁷m；
+    //   Float32 在该量级 ULP ≈ 2m，1m 偏移被精度吞没 → lookAt forward 退化。
+    //   乘以 1e6（1000 km）使 target 偏移远超 Float32 噪底，
+    //   lookAt 内部 normalize(target - eye) 不受 scale 影响。
+    const DIR_SCALE = 1e6;
     vec3.set(_tmpVec3A, camECEFx, camECEFy, camECEFz);
-    vec3.set(_tmpVec3B, camECEFx + camDir[0], camECEFy + camDir[1], camECEFz + camDir[2]);
+    vec3.set(_tmpVec3B,
+        camECEFx + camDir[0] * DIR_SCALE,
+        camECEFy + camDir[1] * DIR_SCALE,
+        camECEFz + camDir[2] * DIR_SCALE,
+    );
     vec3.set(_tmpVec3C, camUp[0], camUp[1], camUp[2]);
     mat4.lookAt(_tmpMat4B, _tmpVec3A, _tmpVec3B, _tmpVec3C);
     mat4.multiply(_tmpMat4C, _tmpMat4A, _tmpMat4B);
