@@ -35,6 +35,7 @@ import {
     RAD2DEG,
     TWO_PI,
 } from './globe-constants.ts';
+import { computeSunDirectionECEF } from '../../globe/src/sun.ts';
 import { computeHorizonDist } from './globe-utils.ts';
 import type { GlobeGPURefs } from './globe-types.ts';
 
@@ -152,20 +153,20 @@ export function updateGlobeCameraUniforms(
     const farZ = gc.horizonDist * FAR_PLANE_HORIZON_FACTOR + gc.altitude;
     const logDepthBufFC = 1.0 / Math.log2(farZ + 1.0);
 
-    const hourAngle = (dateTime.getUTCHours() + dateTime.getUTCMinutes() / 60) / 24 * TWO_PI - PI;
-    const sunDirX = Math.cos(hourAngle);
-    const sunDirY = Math.sin(hourAngle);
-    const sunDirZ = 0.3;
-    const sunLen = Math.sqrt(sunDirX * sunDirX + sunDirY * sunDirY + sunDirZ * sunDirZ);
+    // ─── 太阳方向：基于真实天文算法计算 ECEF 方向 ───────────
+    // 使用简化 Meeus 算法计算太阳赤经/赤纬 + GMST，得到太阳在 ECEF 坐标系中的归一化方向。
+    // 精度约 ±1°，随本地时间自动更新，正确反映季节性太阳赤纬变化。
+    const sunDir = computeSunDirectionECEF(dateTime);
 
     _cameraUniformData.set(gc.vpMatrix, 0);
     _cameraUniformData[16] = gc.cameraECEF[0];
     _cameraUniformData[17] = gc.cameraECEF[1];
     _cameraUniformData[18] = gc.cameraECEF[2];
     _cameraUniformData[19] = gc.altitude;
-    _cameraUniformData[20] = sunDirX / sunLen;
-    _cameraUniformData[21] = sunDirY / sunLen;
-    _cameraUniformData[22] = sunDirZ / sunLen;
+    // sunDir 已经是归一化的 ECEF 方向向量（单位球面上的点）
+    _cameraUniformData[20] = sunDir[0];
+    _cameraUniformData[21] = sunDir[1];
+    _cameraUniformData[22] = sunDir[2];
     _cameraUniformData[23] = logDepthBufFC;
 
     device.queue.writeBuffer(refs.cameraUniformBuffer, 0, _cameraUniformData);
