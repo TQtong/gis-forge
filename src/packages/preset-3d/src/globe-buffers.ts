@@ -147,6 +147,59 @@ export const _zoomDir = new Float64Array(3);
 /** zoom 时 unitPosition 暂存 */
 export const _zoomUnitPos = new Float64Array(3);
 
+// ─── handleZoom 预分配缓冲（对标 Cesium SSCC handleZoom scratch 变量）───
+
+/** 持久缩放锚点 ECEF 缓冲（对标 Cesium _zoomWorldPosition） */
+export const _zoomWorldPosBuf = new Float64Array(3);
+
+/** 屏幕中心 pick 结果复制（pickGlobe 共享缓冲，第二次 pick 前必须复制） */
+export const _zoomCenterHit = new Float64Array(3);
+
+/** normalize(centerHit)——sub-path A 用 */
+export const _zoomPosNormal = new Float64Array(3);
+
+/** normalize(zoomWorldPosition)——sub-path A 用 */
+export const _zoomPickNormal = new Float64Array(3);
+
+/** cross(pickedNormal, positionNormal) 旋转轴——sub-path A 用 */
+export const _zoomRotAxis = new Float64Array(3);
+
+/** target - camPos 向量——sub-path B 用 */
+export const _zoomPosToTarget = new Float64Array(3);
+
+/** normalize(positionToTarget)——sub-path B 用 */
+export const _zoomPosToTargetNorm = new Float64Array(3);
+
+/** 新相机位置暂存——sub-path B 大圆移动 */
+export const _zoomCamPos = new Float64Array(3);
+
+/** center 参考点暂存——sub-path B */
+export const _zoomCenter = new Float64Array(3);
+
+/** forward 基向量暂存——sub-path B */
+export const _zoomForward = new Float64Array(3);
+
+/** up 基向量暂存——sub-path B */
+export const _zoomUp = new Float64Array(3);
+
+/** right 基向量暂存——sub-path B */
+export const _zoomRight = new Float64Array(3);
+
+/** 位移暂存——sub-path B pMid */
+export const _zoomPan = new Float64Array(3);
+
+/** center 位移暂存——sub-path B cMid */
+export const _zoomCMid = new Float64Array(3);
+
+/** 通用暂存 A */
+export const _zoomTmpA = new Float64Array(3);
+
+/** 通用暂存 B */
+export const _zoomTmpB = new Float64Array(3);
+
+/** zoomOnVector 射线方向暂存——sub-path C */
+export const _zoomRayDir = new Float64Array(3);
+
 /** _pickECEFBuf：screenToGlobe 输出 ECEF 暂存（供 globe-interaction 持有引用） */
 export const _pickECEFBuf = new Float64Array(3);
 
