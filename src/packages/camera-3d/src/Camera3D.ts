@@ -354,6 +354,17 @@ export interface Camera3D extends CameraController {
     moveAlongDirection(direction: Float64Array, distance: number): void;
 
     /**
+     * 直接设置相机的 position/direction/up（ECEF 世界空间）。
+     * 对标 Cesium handleZoom sub-path B 中直接写入 camera.position / camera.direction / camera.up。
+     * 内部自动重正交化 right/up（Gram-Schmidt）并 clamp altitude。
+     *
+     * @param pos - 新的 ECEF 位置 (Float64Array[3])
+     * @param dir - 新的视线方向（无需归一化，内部归一化）
+     * @param up - 新的上方向参考（无需归一化，内部通过 cross 重正交化）
+     */
+    setPositionDirectionUp(pos: Float64Array, dir: Float64Array, up: Float64Array): void;
+
+    /**
      * 将 position/direction/up 从世界空间转换到 transform 定义的局部空间。
      * 对标 Cesium Camera._setTransform：保存世界坐标快照，乘以逆变换写入局部坐标。
      * 调用后 getPositionECEF/getDirection/getUp 返回的是局部空间向量。
@@ -1034,6 +1045,20 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
 
         moveAlongDirection(dir: Float64Array, dist: number) {
             v3ScaleAndAdd(_position, _position, dir, dist);
+            _clampAltitude();
+        },
+
+        setPositionDirectionUp(pos: Float64Array, dir: Float64Array, up: Float64Array) {
+            // 对标 Cesium handleZoom sub-path B：直接写入 position/direction/up/right
+            v3Copy(_position, pos);
+            v3Copy(_direction, dir);
+            v3Normalize(_direction, _direction);
+            // Gram-Schmidt 重正交化：right = normalize(cross(direction, up))
+            v3Cross(_right, _direction, up);
+            v3Normalize(_right, _right);
+            // up = normalize(cross(right, direction))
+            v3Cross(_up, _right, _direction);
+            v3Normalize(_up, _up);
             _clampAltitude();
         },
 
