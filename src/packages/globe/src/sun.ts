@@ -221,6 +221,65 @@ function equatorialToHorizontal(ra: number, dec: number, gmstDeg: number): [numb
 // ===================== 公共函数 =====================
 
 /**
+ * 计算太阳在 ECEF（Earth-Centered Earth-Fixed）坐标系下的归一化方向向量。
+ *
+ * 算法：
+ * 1. 由日期计算太阳黄经 → 赤经(RA) + 赤纬(Dec)
+ * 2. 由日期计算格林威治平恒星时(GMST)
+ * 3. 太阳地理经度 = RA - GMST（赤经减去地球自转角）
+ * 4. 太阳地理纬度 = Dec（赤纬即为太阳直射纬度）
+ * 5. 将地理经纬度转为 ECEF 单位向量
+ *
+ * 返回的向量指向太阳方向（从地心出发），在 ECEF 坐标系中。
+ * 精度约 ±1°，足够用于 GIS 地球光照渲染。
+ *
+ * @param date - JavaScript Date 对象（UTC 时间）
+ * @returns 归一化的 ECEF 太阳方向向量 [x, y, z]
+ *
+ * @stability stable
+ *
+ * @example
+ * // 2024-06-21 正午 UTC 时，太阳直射北回归线附近，经度约 0°
+ * const dir = computeSunDirectionECEF(new Date('2024-06-21T12:00:00Z'));
+ * // dir ≈ [1, 0, 0.4]（归一化后）— X 轴正方向即经度 0°
+ */
+export function computeSunDirectionECEF(date: Date): [number, number, number] {
+    // 将 Date 转为 Julian Day
+    const jd = dateToJD(date);
+    // 自 J2000.0 的天数
+    const d = jd - J2000_JDN;
+
+    // 太阳黄经
+    const sunLong = solarEclipticLongitude(d);
+
+    // 黄经→赤经(RA)/赤纬(Dec)
+    const [ra, dec] = eclipticToEquatorial(sunLong);
+
+    // 格林威治平恒星时（度→弧度）
+    const gmstDeg = greenwichMeanSiderealTime(jd);
+    const gmstRad = gmstDeg * DEG2RAD;
+
+    // 太阳地理经度 = RA - GMST
+    // RA 是太阳在惯性坐标系中的经度，GMST 是地球自转角度
+    // 两者之差即为太阳在地固坐标系（ECEF）中的经度
+    const sunLon = ra - gmstRad;
+
+    // 太阳地理纬度 = 赤纬 Dec
+    // 赤纬直接对应太阳直射点的地理纬度
+    const sunLat = dec;
+
+    // 地理经纬度 → ECEF 单位向量
+    // 对于单位球：x = cos(lat)*cos(lon), y = cos(lat)*sin(lon), z = sin(lat)
+    // 这里不需要考虑椭球扁率，因为只要方向，不要精确位置
+    const cosLat = Math.cos(sunLat);
+    const x = cosLat * Math.cos(sunLon);
+    const y = cosLat * Math.sin(sunLon);
+    const z = Math.sin(sunLat);
+
+    return [x, y, z];
+}
+
+/**
  * 计算给定日期时刻的太阳位置。
  * 使用简化天文算法（精度约 ±1°），适用于 GIS 光照模拟。
  *

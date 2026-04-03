@@ -18,7 +18,7 @@ export { createSkyboxRenderer } from './skybox.ts';
 export type { SkyboxRenderer, SkyboxRendererOptions, SkyboxRenderContext } from './skybox.ts';
 
 // --- 太阳位置计算 ---
-export { computeSunPosition } from './sun.ts';
+export { computeSunPosition, computeSunDirectionECEF } from './sun.ts';
 export type { SunPosition } from './sun.ts';
 
 // --- 3D Globe 瓦片网格 + 覆盖算法 ---
