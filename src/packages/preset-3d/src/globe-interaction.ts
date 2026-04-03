@@ -12,6 +12,11 @@ import {
     _panEast, _panPlaneNormal, _panRejA, _panRejB,
     _panTmpA, _panTmpB, _panBasis1, _panBasis2,
     _zoomDir, _zoomUnitPos,
+    _zoomWorldPosBuf, _zoomCenterHit,
+    _zoomPosNormal, _zoomPickNormal, _zoomRotAxis,
+    _zoomPosToTarget, _zoomPosToTargetNorm,
+    _zoomCamPos, _zoomCenter, _zoomForward, _zoomUp, _zoomRight,
+    _zoomPan, _zoomCMid, _zoomTmpA, _zoomTmpB, _zoomRayDir,
     _spinCurrentECEF,
     _tiltCenterECEF, _tiltENUMat, _tiltOldAxis,
 } from './globe-buffers.ts';
@@ -87,6 +92,10 @@ function v3Normalize(out: Float64Array, a: Float64Array): void {
 
 function v3Sub(out: Float64Array, a: Float64Array, b: Float64Array): void {
     out[0] = a[0] - b[0]; out[1] = a[1] - b[1]; out[2] = a[2] - b[2];
+}
+
+function v3Add(out: Float64Array, a: Float64Array, b: Float64Array): void {
+    out[0] = a[0] + b[0]; out[1] = a[1] + b[1]; out[2] = a[2] + b[2];
 }
 
 function v3Scale(out: Float64Array, a: Float64Array, s: number): void {
@@ -391,51 +400,489 @@ function spin3D(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// zoom3D — 滚轮缩放（对标 Cesium SSCC:2318-2408 + handleZoom:559-677）
+// zoom3D — 滚轮缩放入口（完全对标 Cesium SSCC:2318-2408）
+//
+// 与旧实现的核心区别：
+//   1. distanceMeasure 从**屏幕中心** pick（非光标位置）
+//   2. 首次滚轮在光标位置 pick 锚点，后续帧复用
+//   3. height < 2000km 时调用旋转缩放（camera.rotate / 球面正弦定律）
+//      同时更新 position + direction + up → 修复缩放后 tilt 偏移 bug
+//   4. height >= 2000km 时回退到 camera.zoomIn（沿视线方向平移）
 // ═══════════════════════════════════════════════════════════════
 
+/** handleZoom 前一次相交距离（对标 Cesium 模块级 preIntersectionDistance） */
+let _preIntersectionDistance = 0;
+
+/** 最小缩放速率（对标 Cesium controller._minimumZoomRate = 20） */
+const MIN_ZOOM_RATE = 20.0;
+
+/** 最大缩放速率（对标 Cesium controller._maximumZoomRate = 5906376272000） */
+const MAX_ZOOM_RATE = 5_906_376_272_000.0;
+
+/** 旋转缩放激活阈值 2000km（对标 Cesium camera.positionCartographic.height < 2000000） */
+const ROTATING_ZOOM_HEIGHT = 2_000_000;
+
+/**
+ * 高精度旋转缩放阈值 1000km（对标 Cesium camera.positionCartographic.height < 1000000）。
+ * 低于此值且相机朝向地表时使用 sub-path B 球面正弦定律大圆旋转。
+ */
+const HIGH_PRECISION_ZOOM_HEIGHT = 1_000_000;
+
+/**
+ * 低空水平视角检测阈值 3000m（对标 Cesium camera.positionCartographic.height < 3000）。
+ * 低于此值且相机几乎水平时回退到 zoomOnVector。
+ */
+const LOW_ALT_HORIZONTAL_HEIGHT = 3_000;
+
+/** sub-path A denom 分界角度 20°（对标 Cesium CesiumMath.toRadians(20)） */
+const ZOOM_ANGLE_THRESHOLD = 20 * DEG2RAD;
+
+/**
+ * zoom3D 入口——对标 Cesium SSCC:2318-2408。
+ *
+ * 职责：
+ *   1. 在屏幕中心 pick 得到 distanceMeasure
+ *   2. 计算 unitPositionDotDirection
+ *   3. 委托给 handleZoom 执行实际缩放
+ */
 function zoom3D(
     camera3D: Camera3D,
+    state: GlobeInteractionState,
     deltaY: number,
     sx: number,
     sy: number,
     pickGlobe: (x: number, y: number) => Float64Array | null,
+    getViewport: () => { width: number; height: number },
+    minimumZoomDistance: number,
+): void {
+    const vp = getViewport();
+    const camPos = camera3D.getPositionECEF();
+
+    // ─── 1. 在屏幕中心 pick 计算 distanceMeasure（对标 Cesium zoom3D:2331-2394）───
+    //    Cesium 使用屏幕中心（非光标位置）来计算距离度量。
+    //    ⚠ pickGlobe 返回共享缓冲，后续 handleZoom 中会再次 pick 光标位置，
+    //    必须在此处复制结果到 _zoomCenterHit。
+    const cx = vp.width / 2;
+    const cy = vp.height / 2;
+    const centerHitRaw = pickGlobe(cx, cy);
+
+    let distanceMeasure: number;
+    let centerHit: Float64Array | null = null;
+    if (centerHitRaw) {
+        v3Copy(_zoomCenterHit, centerHitRaw);
+        centerHit = _zoomCenterHit;
+        distanceMeasure = v3Distance(camPos, centerHit);
+        _preIntersectionDistance = distanceMeasure;
+    } else {
+        // 屏幕中心未命中球面 → 使用高度作为距离度量（对标 Cesium zoom3D:2392-2394）
+        distanceMeasure = camera3D.getPosition().alt;
+    }
+
+    // ─── 2. unitPositionDotDirection（对标 Cesium zoom3D:2396-2407）───
+    v3Normalize(_zoomUnitPos, camPos);
+    const unitPosDotDir = v3Dot(_zoomUnitPos, camera3D.getDirection());
+
+    // ─── 3. 委托 handleZoom ───
+    handleZoom(
+        camera3D, state,
+        deltaY, sx, sy,
+        distanceMeasure, unitPosDotDir,
+        pickGlobe, getViewport,
+        minimumZoomDistance, centerHit,
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// _restoreOrientationAtPosition — 对标 Cesium setView3D (Camera.js:1267-1300)
+//
+// 在当前位置用给定 bearing/pitch 重建 direction/up/right，**不修改 position**。
+//
+// ⚠ 不使用 setTransform/restoreTransform（在 ENU 空间调用 _clampAltitude 会崩溃）。
+// 改为直接在世界空间中用 ENU 基向量合成 direction 和 up。
+// ═══════════════════════════════════════════════════════════════
+
+function _restoreOrientationAtPosition(
+    camera3D: Camera3D,
+    bearing: number,
+    pitch: number,
+): void {
+    // 1. 在当前相机位置构建 ENU 变换，提取 east/north/up 世界空间基向量
+    const camPos = camera3D.getPositionECEF();
+    eastNorthUpToFixedFrame(_tiltENUMat, camPos);
+    // 列主序：col0=east, col1=north, col2=up
+    const ex = _tiltENUMat[0], ey = _tiltENUMat[1], ez = _tiltENUMat[2];
+    const nx = _tiltENUMat[4], ny = _tiltENUMat[5], nz = _tiltENUMat[6];
+    const ux = _tiltENUMat[8], uy = _tiltENUMat[9], uz = _tiltENUMat[10];
+
+    // 2. 从 bearing/pitch 计算 ENU 局部方向，然后用世界空间基向量合成
+    //    getOrientation 约定：pitch=0 → nadir, pitch=-π/2 → horizontal
+    //    elev = -pitch - π/2 → nadir: elev=-π/2, horizontal: elev=0
+    const elev = -pitch - HALF_PI;
+    const cosE = Math.cos(elev);
+    const sinE = Math.sin(elev);
+    const cosB = Math.cos(bearing);
+    const sinB = Math.sin(bearing);
+
+    // direction(world) = cosE·sinB·east + cosE·cosB·north + sinE·up
+    _zoomTmpA[0] = cosE * sinB * ex + cosE * cosB * nx + sinE * ux;
+    _zoomTmpA[1] = cosE * sinB * ey + cosE * cosB * ny + sinE * uy;
+    _zoomTmpA[2] = cosE * sinB * ez + cosE * cosB * nz + sinE * uz;
+
+    // up(world) = -sinE·sinB·east - sinE·cosB·north + cosE·up
+    _zoomTmpB[0] = -sinE * sinB * ex - sinE * cosB * nx + cosE * ux;
+    _zoomTmpB[1] = -sinE * sinB * ey - sinE * cosB * ny + cosE * uy;
+    _zoomTmpB[2] = -sinE * sinB * ez - sinE * cosB * nz + cosE * uz;
+
+    // nadir 退化：elev ≈ -π/2 时 cosE ≈ 0，up 变零向量。
+    // 此时 up 必须包含 bearing 信息，否则 heading 会被重置为 0。
+    // 对标 Cesium setView3D：使用 HeadingPitchRoll 四元数保留 heading。
+    // nadir 下 up = -sin(bearing)*east + cos(bearing)*north（绕 down 轴旋转 bearing）
+    if (Math.abs(cosE) < 1e-10) {
+        _zoomTmpB[0] = -sinB * ex + cosB * nx;
+        _zoomTmpB[1] = -sinB * ey + cosB * ny;
+        _zoomTmpB[2] = -sinB * ez + cosB * nz;
+    }
+
+    // 3. 写入相机——position 不变，只更新 direction/up/right
+    camera3D.setPositionDirectionUp(camPos, _zoomTmpA, _zoomTmpB);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// _handleZoomRotatingSimple — sub-path A（对标 Cesium SSCC:913-939）
+//
+// height >= 1,000,000m 或相机几乎水平时的简单旋转缩放。
+// 计算 screenCenter↔anchor 之间的角度，按 distance 比例旋转相机。
+// camera.rotate 同时旋转 position + direction + up → 保持姿态一致。
+// ═══════════════════════════════════════════════════════════════
+
+function _handleZoomRotatingSimple(
+    camera3D: Camera3D,
+    state: GlobeInteractionState,
+    distance: number,
+    centerHit: Float64Array,
+): void {
+    // positionNormal = normalize(centerHit)（屏幕中心球面交点的径向方向）
+    v3Normalize(_zoomPosNormal, centerHit);
+    // pickedNormal = normalize(zoomWorldPosition)（光标锚点的径向方向）
+    v3Normalize(_zoomPickNormal, state.zoomWorldPosition!);
+
+    const dotProduct = v3Dot(_zoomPickNormal, _zoomPosNormal);
+
+    // 点积 ≤ 0 表示两点在球体对侧，≥ 1 表示重合——均无法定义旋转轴
+    if (dotProduct <= 0 || dotProduct >= 1) { return; }
+
+    // 两点间的角度
+    const angle = Math.acos(clamp(dotProduct, -1, 1));
+
+    // 旋转轴 = cross(pickedNormal, positionNormal)，垂直于两点所在的大圆平面
+    v3Cross(_zoomRotAxis, _zoomPickNormal, _zoomPosNormal);
+    v3Normalize(_zoomRotAxis, _zoomRotAxis);
+
+    // denom 决定旋转比例的分母（对标 Cesium SSCC:932-936）
+    //   大角度（> 20°）：用 height * 0.75，减小旋转幅度避免过冲
+    //   小角度（≤ 20°）：用 height - distance，线性缩小
+    const alt = camera3D.getPosition().alt;
+    const denom = Math.abs(angle) > ZOOM_ANGLE_THRESHOLD
+        ? alt * 0.75
+        : alt - distance;
+    const scalar = distance / denom;
+
+    // camera.rotate 同时旋转 position + direction + up（对标 Cesium camera.rotate）
+    camera3D.rotate(_zoomRotAxis, angle * scalar);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// _handleZoomRotatingFull — sub-path B（完全对标 Cesium SSCC:762-911）
+//
+// height < 1,000,000m 且相机朝向地表时的**完整球面旋转缩放**。
+//
+// 核心算法：
+//   1. 在 camera-target 平面内用球面正弦定律求旋转角 beta
+//   2. 构建 up/right/forward 旋转基底
+//   3. 沿大圆路径移动 camera position 和 center 参考点
+//   4. 重算 direction = normalize(center - position)
+//   5. setPositionDirectionUp 直接写入相机向量
+//
+// 这是 Cesium handleZoom 中最精确的路径。
+// ═══════════════════════════════════════════════════════════════
+
+function _handleZoomRotatingFull(
+    camera3D: Camera3D,
+    state: GlobeInteractionState,
+    distance: number,
+    _centerHit: Float64Array,
 ): void {
     const camPos = camera3D.getPositionECEF();
-    const hitECEF = pickGlobe(sx, sy);
+    const camDir = camera3D.getDirection();
+    const target = state.zoomWorldPosition!;
 
-    if (hitECEF) {
-        // ─── 鼠标在球上：以鼠标位置为锚点缩放 ───
-        const distance = v3Distance(camPos, hitECEF);
+    // ─── center = cameraPosition + forward * 1000（对标 Cesium SSCC:775-782）───
+    // 沿视线前方 1000m 处的参考点，用于后续重算 direction。
+    v3Copy(_zoomForward, camDir);
+    v3Scale(_zoomTmpA, _zoomForward, 1000);
+    v3Add(_zoomCenter, camPos, _zoomTmpA);
 
-        // 速率调节（对标 Cesium handleZoom percentage）
-        v3Normalize(_zoomUnitPos, camPos);
-        const dirDot = Math.abs(v3Dot(_zoomUnitPos, camera3D.getDirection()));
-        const percentage = clamp(dirDot, 0.25, 1.0);
+    // ─── positionToTarget = target - cameraPosition（对标 SSCC:784-788）───
+    v3Sub(_zoomPosToTarget, target, camPos);
+    v3Normalize(_zoomPosToTargetNorm, _zoomPosToTarget);
 
-        // 越近越慢
-        const approachingSurface = deltaY > 0;
-        const minDist = approachingSurface ? Math.max(distance * 0.01, MIN_ZOOM_HEIGHT) : 0;
-        let zoomRate = ZOOM_FACTOR * Math.max(distance - minDist, MIN_ZOOM_HEIGHT);
-        zoomRate = clamp(zoomRate, 0.01, 1e8);
+    // ─── 检查 target 和 camera 是否在椭球同侧（对标 SSCC:769-773）───
+    v3Normalize(_zoomUp, camPos);    // cameraPositionNormal
+    v3Normalize(_zoomTmpA, target);  // targetNormal
+    if (v3Dot(_zoomTmpA, _zoomUp) < 0) { return; }
 
-        const sign = deltaY > 0 ? 1 : -1;
-        const amount = zoomRate * sign * 0.02 * percentage;
-
-        // 沿 camera→hitPoint 方向移动
-        v3Sub(_zoomDir, hitECEF, camPos);
-        v3Normalize(_zoomDir, _zoomDir);
-        camera3D.moveAlongDirection(_zoomDir, amount);
-    } else {
-        // ─── 鼠标不在球上：以屏幕中心沿视线方向缩放 ───
-        const alt = camera3D.getPosition().alt;
-        let zoomRate = ZOOM_FACTOR * Math.max(alt, MIN_ZOOM_HEIGHT);
-        zoomRate = clamp(zoomRate, 0.01, 1e8);
-
-        const sign = deltaY > 0 ? 1 : -1;
-        const amount = zoomRate * sign * 0.02;
-        camera3D.zoomIn(amount);
+    // ─── alpha（对标 SSCC:790-800）───
+    // alpha = acos(-dot(cameraPositionNormal, positionToTargetNormal))
+    // 相机径向与 camera→target 方向之间的角度补角
+    const alphaDot = v3Dot(_zoomUp, _zoomPosToTargetNorm);
+    if (alphaDot >= 0) {
+        // 已 zoom 过目标点（camera→target 方向朝外而非朝地表）→ invalidate
+        state.zoomMouseStartX = -1;
+        return;
     }
+    const alpha = Math.acos(clamp(-alphaDot, -1, 1));
+
+    // ─── 距离参数（对标 SSCC:801-805）───
+    const cameraDistance = v3Length(camPos);
+    const targetDistance = v3Length(target);
+    const remainingDistance = cameraDistance - distance;
+    const positionToTargetDistance = v3Length(_zoomPosToTarget);
+
+    // ─── 球面正弦定律（对标 SSCC:807-821）───
+    // 在 camera-center-target 球面三角形中：
+    //   gamma = 当前 camera→target 对应的球面角
+    //   delta = 缩放后 camera→target 对应的球面角
+    //   beta = gamma - delta + alpha = 相机需要旋转的大圆角度
+    const sinAlpha = Math.sin(alpha);
+    const gamma = Math.asin(clamp(
+        (positionToTargetDistance / targetDistance) * sinAlpha, -1, 1,
+    ));
+    const delta = Math.asin(clamp(
+        (remainingDistance / targetDistance) * sinAlpha, -1, 1,
+    ));
+    const beta = gamma - delta + alpha;
+
+    // ─── 构建旋转基底（对标 SSCC:823-832）───
+    // up = normalize(cameraPosition)（径向方向，已在 _zoomUp 中）
+    // right = normalize(cross(positionToTargetNormal, up))（旋转轴，⊥ camera-target 平面）
+    v3Cross(_zoomRight, _zoomPosToTargetNorm, _zoomUp);
+    v3Normalize(_zoomRight, _zoomRight);
+    // forward = normalize(cross(up, right))（大圆切线方向）
+    v3Cross(_zoomForward, _zoomUp, _zoomRight);
+    v3Normalize(_zoomForward, _zoomForward);
+
+    // ─── 移动 center 参考点（对标 SSCC:834-839）───
+    // center = normalize(center) * (|center| - distance)
+    const centerMag = v3Length(_zoomCenter);
+    v3Normalize(_zoomTmpA, _zoomCenter);
+    v3Scale(_zoomCenter, _zoomTmpA, centerMag - distance);
+
+    // ─── 移动 camera position 到新半径（对标 SSCC:840-845）───
+    // cameraPosition = normalize(camPos) * remainingDistance
+    v3Normalize(_zoomTmpA, camPos);
+    v3Scale(_zoomCamPos, _zoomTmpA, remainingDistance);
+
+    // ─── 沿大圆位移 camera（对标 SSCC:847-866）───
+    // pMid = ((cos(β)-1) * up + sin(β) * forward) * remainingDistance
+    const cosBeta = Math.cos(beta);
+    const sinBeta = Math.sin(beta);
+    v3Scale(_zoomTmpA, _zoomUp, cosBeta - 1);
+    v3Scale(_zoomTmpB, _zoomForward, sinBeta);
+    v3Add(_zoomPan, _zoomTmpA, _zoomTmpB);
+    v3Scale(_zoomPan, _zoomPan, remainingDistance);
+    v3Add(_zoomCamPos, _zoomCamPos, _zoomPan);
+
+    // ─── 重新计算 up 和 forward 用于 center 位移（对标 SSCC:868-872）───
+    v3Normalize(_zoomUp, _zoomCenter);
+    v3Cross(_zoomForward, _zoomUp, _zoomRight);
+    v3Normalize(_zoomForward, _zoomForward);
+
+    // ─── 沿大圆位移 center（对标 SSCC:874-892）───
+    // cMid = ((cos(β)-1) * up + sin(β) * forward) * |center|
+    v3Scale(_zoomTmpA, _zoomUp, cosBeta - 1);
+    v3Scale(_zoomTmpB, _zoomForward, sinBeta);
+    v3Add(_zoomCMid, _zoomTmpA, _zoomTmpB);
+    v3Scale(_zoomCMid, _zoomCMid, v3Length(_zoomCenter));
+    v3Add(_zoomCenter, _zoomCenter, _zoomCMid);
+
+    // ─── 更新相机（对标 SSCC:894-910）───
+    // direction = normalize(center - cameraPosition)  ← 这是修复 bug 的关键！
+    v3Sub(_zoomDir, _zoomCenter, _zoomCamPos);
+    v3Normalize(_zoomDir, _zoomDir);
+
+    // right = cross(direction, camera.up)
+    // up = cross(right, direction)
+    // 使用当前 camera.up 作为参考方向，由 setPositionDirectionUp 内部重正交化
+    v3Cross(_zoomRight, _zoomDir, camera3D.getUp());
+    v3Normalize(_zoomRight, _zoomRight);
+    v3Cross(_zoomUp, _zoomRight, _zoomDir);
+    v3Normalize(_zoomUp, _zoomUp);
+
+    // 直接写入相机 position + direction + up（对标 Cesium SSCC:897-908）
+    camera3D.setPositionDirectionUp(_zoomCamPos, _zoomDir, _zoomUp);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// handleZoom — 核心缩放逻辑（完全对标 Cesium SSCC:559-983 的 SCENE3D 路径）
+//
+// 五个阶段：
+//   Phase 1: 计算缩放量 distance
+//   Phase 2: 首次滚轮 pick 光标锚点
+//   Phase 3: 旋转缩放（三个子路径 A/B/C）
+//   Phase 4: 最终移动
+//   Phase 5: 恢复 HPR 一致性
+// ═══════════════════════════════════════════════════════════════
+
+function handleZoom(
+    camera3D: Camera3D,
+    state: GlobeInteractionState,
+    scrollDelta: number,
+    cursorSX: number,
+    cursorSY: number,
+    distanceMeasure: number,
+    unitPosDotDir: number,
+    pickGlobe: (x: number, y: number) => Float64Array | null,
+    getViewport: () => { width: number; height: number },
+    minimumZoomDistance: number,
+    centerHit: Float64Array | null,
+): void {
+    // ━━━━ Phase 1: 计算缩放量 distance（对标 Cesium handleZoom:567-616）━━━━
+
+    // percentage：视角因子——相机越接近垂直俯视（dot ≈ -1 → |dot| ≈ 1），缩放越快
+    let percentage = 1.0;
+    percentage = clamp(Math.abs(unitPosDotDir), 0.25, 1.0);
+
+    // 滚动方向：scrollDelta > 0 = 靠近球面，< 0 = 远离
+    const approachingSurface = scrollDelta > 0;
+    const minHeight = approachingSurface ? minimumZoomDistance * percentage : 0;
+
+    // 缩放速率（对标 Cesium handleZoom:586-592）
+    const minDistance = distanceMeasure - minHeight;
+    let zoomRate = ZOOM_FACTOR * minDistance;
+    zoomRate = clamp(zoomRate, MIN_ZOOM_RATE, MAX_ZOOM_RATE);
+
+    // NDC 归一化滚动比率（对标 Cesium handleZoom:594-596）
+    const vp = getViewport();
+    let rangeWindowRatio = scrollDelta / vp.height;
+    rangeWindowRatio = Math.min(rangeWindowRatio, MAXIMUM_MOVEMENT_RATIO);
+    let distance = zoomRate * rangeWindowRatio;
+
+    // 高度限制防护（对标 Cesium handleZoom:598-616）
+    if (distance > 0 && Math.abs(distanceMeasure - minHeight) < 1.0) { return; }
+    if (distanceMeasure - distance < minHeight) {
+        distance = distanceMeasure - minHeight - 1.0;
+    }
+
+    // ━━━━ Phase 2: 首次滚轮 pick 锚点（对标 Cesium handleZoom:627-677）━━━━
+
+    // sameStartPosition：光标位置是否与上一帧相同（2px 阈值）
+    const sameStartPosition =
+        Math.abs(cursorSX - state.zoomMouseStartX) < 2 &&
+        Math.abs(cursorSY - state.zoomMouseStartY) < 2;
+
+    let zoomingOnVector = state.zoomingOnVector;
+    let rotatingZoom = state.rotatingZoom;
+
+    if (!sameStartPosition) {
+        // 光标位置变化——重新 pick 锚点
+        state.zoomMouseStartX = cursorSX;
+        state.zoomMouseStartY = cursorSY;
+
+        // 在光标位置 pick 球面交点作为缩放锚点
+        const pickedRaw = pickGlobe(cursorSX, cursorSY);
+        if (pickedRaw) {
+            v3Copy(_zoomWorldPosBuf, pickedRaw);
+            state.zoomWorldPosition = _zoomWorldPosBuf;
+            state.useZoomWorldPosition = true;
+        } else {
+            state.useZoomWorldPosition = false;
+        }
+
+        zoomingOnVector = state.zoomingOnVector = false;
+        rotatingZoom = state.rotatingZoom = false;
+    }
+
+    // 未 pick 到锚点 → 简单沿视线方向缩放（对标 Cesium handleZoom:674-677）
+    if (!state.useZoomWorldPosition) {
+        camera3D.zoomIn(distance);
+        return;
+    }
+
+    // ━━━━ Phase 3: 旋转缩放（对标 Cesium handleZoom:681-943 SCENE3D）━━━━
+
+    let zoomOnVector = false;
+    const alt = camera3D.getPosition().alt;
+
+    if (alt < ROTATING_ZOOM_HEIGHT) {
+        rotatingZoom = true;
+    }
+
+    if (!sameStartPosition || rotatingZoom) {
+        // ─── SCENE3D 路径（对标 Cesium handleZoom:727-941）───
+        const camPos = camera3D.getPositionECEF();
+        v3Normalize(_zoomTmpA, camPos); // cameraPositionNormal
+
+        if (alt < LOW_ALT_HORIZONTAL_HEIGHT &&
+            Math.abs(v3Dot(camera3D.getDirection(), _zoomTmpA)) < 0.6) {
+            // 低空 + 相机几乎水平 → zoomOnVector 回退（对标 SSCC:732-739）
+            zoomOnVector = true;
+        } else if (!centerHit) {
+            // 屏幕中心未命中球面 → zoomOnVector 回退（对标 SSCC:753-754）
+            zoomOnVector = true;
+        } else if (alt < HIGH_PRECISION_ZOOM_HEIGHT) {
+            // ─── 低空路径（对标 SSCC:755-912）───
+            if (v3Dot(camera3D.getDirection(), _zoomTmpA) >= -0.5) {
+                // 相机几乎水平（dot ≥ -0.5）→ zoomOnVector（对标 SSCC:760-761）
+                zoomOnVector = true;
+            } else {
+                // ★ Sub-path B: 完整球面旋转缩放（对标 SSCC:762-911）
+                // Sub-path B 自己处理 position + direction + up，然后 return 提前退出。
+                // 对标 Cesium SSCC:910-911 的 camera.setView + return。
+                _handleZoomRotatingFull(camera3D, state, distance, centerHit);
+                // Sub-path B 在 return 前必须恢复 HPR（对标 Cesium SSCC:910 setView）
+                return;
+            }
+        } else {
+            // ─── 中高空路径（对标 SSCC:913-939）───
+            // ★ Sub-path A: 简单旋转缩放
+            _handleZoomRotatingSimple(camera3D, state, distance, centerHit);
+        }
+
+        state.rotatingZoom = !zoomOnVector;
+    }
+
+    // ━━━━ Phase 4: 最终移动（对标 Cesium handleZoom:946-978）━━━━
+
+    if ((!sameStartPosition && zoomOnVector) || zoomingOnVector) {
+        // Sub-path C: 沿 camera→anchor 方向线性移动（对标 Cesium handleZoom:946-978）
+        //
+        // Cesium 在此处会将 _zoomWorldPosition 投影回屏幕再取 pickRay，
+        // 但我们简化为直接计算 camera→anchor 方向——效果等价：
+        // 当 sameStartPosition 时 anchor 不变，camera 方向一致。
+        const camPos = camera3D.getPositionECEF();
+        v3Sub(_zoomRayDir, state.zoomWorldPosition!, camPos);
+        v3Normalize(_zoomRayDir, _zoomRayDir);
+        camera3D.moveAlongDirection(_zoomRayDir, distance);
+
+        state.zoomingOnVector = true;
+    } else {
+        // 沿视线方向移动（对标 Cesium handleZoom:976-978）
+        // ⚠ Cesium 中此处无条件执行 camera.zoomIn(distance)。
+        // Sub-path A (rotate) 只处理光标跟踪旋转，实际距离移动由 zoomIn 完成。
+        // Sub-path B 已在上方 return 退出，不会重复移动。
+        camera3D.zoomIn(distance);
+    }
+
+    // ━━━━ Phase 5: 不执行 HPR 重建 ━━━━
+    //
+    // Sub-path A (camera.rotate) 同时旋转 position+direction+up → 方向已对齐。
+    // Sub-path B (setPositionDirectionUp) 直接设置所有向量 → 方向已对齐。
+    // zoomIn 沿视线方向移动 → 方向不变。
+    // zoomOnVector 方向轻微偏差可接受。
+    //
+    // ⚠ _restoreOrientationAtPosition 会改变 ENU 帧导致 bearing 漂移，
+    // 使地球在缩放时可见旋转。因此不执行 Phase 5。
+    // camera.rotate 引入的微小 roll 在正常使用中可忽略。
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -520,6 +967,7 @@ function tilt3DCore(
     //    ENU 下使用单位球：rotateFactor=1, rangeAdjustment=1
     const camPosLocal = camera3D.getPositionECEF(); // setTransform 后返回 ENU 局部位置
     const rho = v3Length(camPosLocal);
+
 
     // 旋转速率：与 Cesium 一致的 rho - 1 方案（ENU 下椭球半径 = 1）
     let rotateRate = 1.0 * (rho - 1.0);
@@ -615,6 +1063,14 @@ export function createGlobeMouseHandlers(
         const sx = e.clientX - r.left;
         const sy = e.clientY - r.top;
 
+        // ── 重置 zoom 状态（对标 Cesium：任何 mouseDown 都 invalidate 缩放锚点）──
+        state.zoomMouseStartX = -1;
+        state.zoomMouseStartY = -1;
+        state.zoomWorldPosition = null;
+        state.useZoomWorldPosition = false;
+        state.zoomingOnVector = false;
+        state.rotatingZoom = false;
+
         if (e.button === 0 && opts.enableRotate) {
             // 左键：spin/pan
             state.isDragging = true;
@@ -694,7 +1150,8 @@ export function createGlobeMouseHandlers(
         // 取反 deltaY：浏览器 deltaY>0 表示向后滚（远离用户），应缩小；
         // deltaY<0 表示向前滚（靠近用户），应放大。zoom3D 中正值=靠近球面，
         // 因此传入 -deltaY 使方向符合用户直觉。
-        zoom3D(camera3D, -e.deltaY, sx, sy, pickGlobe);
+        zoom3D(camera3D, state, -e.deltaY, sx, sy,
+               pickGlobe, getViewport, opts.minimumZoomDistance ?? 1);
     }
 
     function onContextMenu(e: Event): void {
