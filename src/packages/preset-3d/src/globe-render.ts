@@ -11,7 +11,7 @@ import type { GlobeTileID, GlobeCamera } from '../../globe/src/globe-tile-mesh.t
 import { meshToRTE, meshToRTEInto } from '../../globe/src/globe-tile-mesh.ts';
 import { _skyUniformData, _tileParamsData } from './globe-buffers.ts';
 import type { GlobeGPURefs, TileManagerState } from './globe-types.ts';
-import { loadTileTexture, getOrCreateTileMesh, touchTileLRU } from './globe-tiles.ts';
+import { getOrCreateTileMesh, touchTileLRU } from './globe-tiles.ts';
 
 /** 每帧复用，避免每瓦片 `new Float32Array`；按需扩容以覆盖最大细分顶点数 */
 let _rteScratch = new Float32Array(4096 * 8);
@@ -96,10 +96,11 @@ export function renderGlobeTiles(
         const strKey = `${tile.z}/${tile.x}/${tile.y}`;
 
         let cached = tileState.tileCache.get(strKey);
-        if (!cached) {
-            loadTileTexture(strKey, tile.z, tile.x, tile.y, device, refs, tileState, isDestroyed);
-            cached = tileState.tileCache.get(strKey);
-        }
+        // 默认不加载瓦片影像；恢复底图时取消注释并补回 `loadTileTexture` 的 import。
+        // if (!cached) {
+        //     loadTileTexture(strKey, tile.z, tile.x, tile.y, device, refs, tileState, isDestroyed);
+        //     cached = tileState.tileCache.get(strKey);
+        // }
 
         const tileHasTexture = cached !== undefined
             && cached.textureReady
