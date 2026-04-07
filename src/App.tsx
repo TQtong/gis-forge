@@ -87,11 +87,12 @@ function bootGlobe(ctx: BootContext): { engine: Globe3D; teardown: () => void } 
     markStepDone(ctx.setEngineSteps, 1);
     ctx.setEngineProgress(35);
 
-    globe.addImageryLayer({
-        url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        type: 'xyz',
-        alpha: 1,
-    });
+    // 默认不加载在线瓦片；需要底图时取消注释。
+    // globe.addImageryLayer({
+    //     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    //     type: 'xyz',
+    //     alpha: 1,
+    // });
 
     let teardownEvents: (() => void) | undefined;
 
