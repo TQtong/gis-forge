@@ -130,7 +130,7 @@ export function createGlobeGPUResources(device: GPUDevice, refs: GlobeGPURefs): 
     });
     device.queue.writeTexture(
         { texture: refs.fallbackTexture },
-        new Uint8Array([10, 20, 50, 255]),
+        new Uint8Array([255, 255, 255, 255]),
         { bytesPerRow: 4 },
         { width: 1, height: 1 },
     );
