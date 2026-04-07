@@ -7,13 +7,12 @@
 // 投影矩阵由 Camera25D（camera-25d 包）计算：
 // - 透视 Reversed-Z（perspectiveReversedZ）替代正交投影
 // - bearing / pitch 反映到 lookAt 视图矩阵
-// - 输出 vpMatrix 已适配相机相对坐标（后乘平移矩阵）
+// - 输出 vpMatrix 原生工作在相机相对坐标系（lookAt 已减去 center）
 // ============================================================
 
 import type { LightSpec } from '../../core/src/types/style-spec.ts';
 import type { CameraState, Viewport } from '../../core/src/types/viewport.ts';
 import * as mat4 from '../../core/src/math/mat4.ts';
-import { TILE_SIZE, lngLatToPixel } from '../../core/src/geo/mercator.ts';
 import { createCamera25D, type Camera25D } from '../../camera-25d/src/Camera25D.ts';
 
 import { GeoForgeError, GeoForgeErrorCode, Map2D } from '../../preset-2d/src/map-2d.ts';
@@ -68,11 +67,6 @@ const DEFAULT_LIGHT: LightSpec = {
 // 模块级暂存缓冲区（避免每帧分配）
 // ============================================================
 
-/** lngLatToPixel 输出缓冲（Float64Array 以保留高精度）。 */
-const _pxBuf = new Float64Array(2);
-
-/** 用于 mat4.translate 的 3 分量向量。 */
-const _translateVec = new Float32Array(3);
 
 // ============================================================
 // 纯函数
@@ -429,23 +423,12 @@ export class Map25D extends Map2D {
     // deltaTime=0：Camera25D 不管理动画，仅计算矩阵
     const absState = this._cam25d.update(0, viewport);
 
-    // --- 4. 坐标适配：vpMatrix_abs → vpMatrix_rel ---
-    // Camera25D 的 vpMatrix 期望绝对世界像素坐标 (worldPx, worldPy, 0)；
-    // RasterTileLayer 发送相机相对顶点 (worldPx - centerPx, worldPy - centerPy, 0)。
-    // 后乘平移使等式成立：
-    //   vpMatrix_rel × (rx, ry, 0, 1) = vpMatrix_abs × (rx + cx, ry + cy, 0, 1)
-    //   ⇒ vpMatrix_rel = vpMatrix_abs × T(cx, cy, 0)
-    lngLatToPixel(_pxBuf, center[0], center[1], zoom);
-    const cx = _pxBuf[0];
-    const cy = _pxBuf[1];
-
-    _translateVec[0] = cx;
-    _translateVec[1] = cy;
-    _translateVec[2] = 0;
-
-    // mat4.translate(out, a, v) 等价于 out = a × T(v)
+    // --- 4. 坐标适配 ---
+    // Camera25D 的 lookAt 已在相机相对坐标系中构建（eye/target 减去 center），
+    // vpMatrix 直接接受相机相对顶点 (worldPx - centerPx, worldPy - centerPy, 0)，
+    // 无需额外平移，避免了 Float32 截断大坐标导致的精度丢失。
     const vpMatrix = new Float32Array(16);
-    mat4.translate(vpMatrix, absState.vpMatrix, _translateVec);
+    mat4.copy(vpMatrix, absState.vpMatrix);
 
     // --- 4b. X 轴镜像修正 ---
     // Mercator 像素坐标系 (X=东, Y=南, Z=上) 是右手系。

@@ -2703,13 +2703,18 @@ class Camera25DImpl implements Camera25D {
             const cosB = Math.cos(this._bearing);
 
             // eye 位置 = center + bearing旋转后的后退偏移
-            const eyeX = centerPxX - sinB * offsetBack;
-            const eyeY = centerPxY + cosB * offsetBack;
-            const eyeZ = offsetUp;
+            // 使用相机相对坐标构建 lookAt，避免 Float32 精度丢失：
+            // 在高 zoom 级别（>20）绝对世界像素坐标可达数十亿，
+            // 存入 Float32Array 后仅保留 ~7 位有效数字，导致子像素抖动和
+            // inverseVP 反投影误差（触发 computeCoveringTiles RangeError）。
+            // 相对坐标始终为 O(altPixels)（通常 <10000），Float32 绰绰有余。
+            const eyeRelX = -sinB * offsetBack;
+            const eyeRelY = cosB * offsetBack;
+            const eyeRelZ = offsetUp;
 
-            // target = 地面中心点
-            vec3.set(_eye, eyeX, eyeY, eyeZ);
-            vec3.set(_target, centerPxX, centerPxY, 0);
+            // target = 相机相对坐标系原点（地面中心点）
+            vec3.set(_eye, eyeRelX, eyeRelY, eyeRelZ);
+            vec3.set(_target, 0, 0, 0);
 
             // up 向量：绕 Z 轴旋转 bearing 角度
             // 默认 up = [0, -1, 0]（Mercator Y 轴向南增大，屏幕 up 对应 -Y）
