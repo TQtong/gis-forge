@@ -1158,11 +1158,6 @@ function computeCoveringTiles(
   // 相机中心的绝对世界像素坐标（camera-relative → absolute 转换基准）
   const [cx, cy] = lngLatToWorldPixel(camera.center[0], camera.center[1], worldSize);
 
-  // 相机自身在相机相对坐标系中的位置
-  // CameraState.position 是绝对世界像素坐标 [camAbsX, camAbsY, altPixels]
-  const camRelX = camera.position[0] - cx;
-  const camRelY = camera.position[1] - cy;
-
   // 最远可视地面距离（horizon fallback 用）
   // cameraToCenterDist ≈ vpH / 2 / tan(fov/2)
   const tanHalfFov = Math.tan(camera.fov / 2);
@@ -1171,6 +1166,13 @@ function computeCoveringTiles(
     : canvasHeight * 10;
   // 保守取 3 倍 cameraToCenterDist——覆盖 pitch≤70° 的 farZ
   const maxDist = cameraToCenterDist * 3;
+
+  // 相机在相机相对坐标系中的位置——直接从 pitch/bearing 推导，
+  // 不使用 camera.position（其存储的是 Mercator 米制坐标，与世界像素坐标系不兼容）
+  const altPixels = cameraToCenterDist; // vpH/2/tan(fov/2) 即 altPixels
+  const offsetBack = Math.sin(camera.pitch) * altPixels;
+  const camRelX = -Math.sin(camera.bearing) * offsetBack;
+  const camRelY = Math.cos(camera.bearing) * offsetBack;
 
   const invVP = camera.inverseVPMatrix;
   const W = canvasWidth;
@@ -1212,11 +1214,32 @@ function computeCoveringTiles(
   }
 
   // ═══ 步骤 2：地面 BBox → tileZ 级别瓦片坐标范围 ═══
+  // 如果所有采样点都未命中地面（BBox 无效），提前返回空列表
+  if (!Number.isFinite(minAbsX) || !Number.isFinite(maxAbsX) ||
+      !Number.isFinite(minAbsY) || !Number.isFinite(maxAbsY) ||
+      minAbsX > maxAbsX || minAbsY > maxAbsY) {
+    return [];
+  }
+
   const tileSizePx = worldSize / n;
   const minTileX = Math.max(0, Math.floor(minAbsX / tileSizePx));
   const minTileY = Math.max(0, Math.floor(minAbsY / tileSizePx));
   const maxTileX = Math.min(n - 1, Math.ceil(maxAbsX / tileSizePx));
   const maxTileY = Math.min(n - 1, Math.ceil(maxAbsY / tileSizePx));
+
+  // 安全检查：如果估算瓦片数量过大（可能由精度问题导致），截断范围
+  const estTileCount = (maxTileX - minTileX + 1) * (maxTileY - minTileY + 1);
+  if (estTileCount > MAX_COVERING_TILES * 4 || estTileCount < 0) {
+    // 回退到以中心为基准的保守范围
+    const halfRange = Math.ceil(Math.sqrt(MAX_COVERING_TILES) / 2);
+    const cTileX = Math.floor(cx / tileSizePx);
+    const cTileY = Math.floor(cy / tileSizePx);
+    return [{
+      x: Math.max(0, Math.min(n - 1, cTileX)),
+      y: Math.max(0, Math.min(n - 1, cTileY)),
+      z: tileZ,
+    }];
+  }
 
   // ═══ 步骤 3：枚举 + 按距中心排序 + 截断 ═══
   const centerTileX = cx / tileSizePx;
@@ -1285,13 +1308,16 @@ function computeViewBBox(
   const invVP = camera.inverseVPMatrix;
 
   // 相机在 camera-relative 坐标系中的位置（horizon fallback 用）
-  const camRelX = camera.position[0] - cx;
-  const camRelY = camera.position[1] - cy;
+  // 直接从 pitch/bearing 推导，避免 camera.position（Mercator 米制）与世界像素混用
   const tanHalfFov = Math.tan(camera.fov / 2);
   const cameraToCenterDist = (tanHalfFov > 1e-10)
     ? canvasH / 2 / tanHalfFov
     : canvasH * 10;
   const maxDist = cameraToCenterDist * 3;
+  const altPixels = cameraToCenterDist;
+  const offsetBack = Math.sin(camera.pitch) * altPixels;
+  const camRelX = -Math.sin(camera.bearing) * offsetBack;
+  const camRelY = Math.cos(camera.bearing) * offsetBack;
 
   // 采样 4 角 + 4 边中点 + 中心 = 9 点（IoU 节流用，不必像 coveringTiles 那样密）
   const pts: [number, number][] = [
