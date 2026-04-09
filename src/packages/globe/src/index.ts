@@ -47,3 +47,11 @@ export {
     POLAR_CAP_RINGS,
 } from './globe-tile-mesh.ts';
 export type { GlobeTileMesh, GlobeTileID, GlobeCamera, Ellipsoid } from './globe-tile-mesh.ts';
+
+export {
+    computeTileGeomorph,
+    computeTileGeomorphBatch,
+    buildParentPositions,
+    LOD_GEOMORPH_VERTEX_WGSL,
+} from './lod-geomorph.ts';
+export type { LODGeomorphConfig } from './lod-geomorph.ts';
