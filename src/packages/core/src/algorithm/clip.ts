@@ -380,4 +380,98 @@ function intersectTop(a: number[], b: number[], ymax: number): number[] {
     return [a[0] + t * (b[0] - a[0]), ymax];
 }
 
+/**
+ * 用一条无限直线把简单多边形切割为两部分（左半 + 右半）。
+ *
+ * 算法：直线 (lx1,ly1)→(lx2,ly2) 把平面分为正面 / 背面（用线方向的左右）。
+ * 对多边形分别用半平面裁剪法（Sutherland-Hodgman 的半平面退化版）：
+ *   - 保留所有"在正面或边界上"的部分 → leftPiece
+ *   - 保留所有"在背面或边界上"的部分 → rightPiece
+ * 与边的交点同时加入两个结果，确保两块沿切线严格贴合。
+ *
+ * 适用于凸/凹的简单多边形。退化情况：
+ * - 多边形完全在线一侧 → 一边为完整原多边形，另一边为空数组
+ * - 直线退化为点（lx1==lx2 && ly1==ly2）→ 返回 [polygon, []]
+ *
+ * 注：对于凹多边形被切成多块的情况，结果会是单个"自接触"的环（同一个
+ * 输出数组里包含所有分量）。需要分离为多个独立环时，应在外部做拓扑分解。
+ *
+ * @param polygon 简单多边形顶点 [[x,y], ...]
+ * @param lx1 直线起点 x
+ * @param ly1 直线起点 y
+ * @param lx2 直线终点 x
+ * @param ly2 直线终点 y
+ * @returns [leftPiece, rightPiece]（两个环）
+ *
+ * @example
+ * const square = [[0,0],[10,0],[10,10],[0,10]];
+ * polygonSplit(square, 5,-1, 5,11);
+ * // → [[[0,0],[5,0],[5,10],[0,10]], [[5,0],[10,0],[10,10],[5,10]]]
+ */
+export function polygonSplit(
+    polygon: number[][],
+    lx1: number, ly1: number,
+    lx2: number, ly2: number,
+): [number[][], number[][]] {
+    if (polygon.length < 3) {
+        return [polygon.map((p) => [p[0], p[1]]), []];
+    }
+
+    const dx = lx2 - lx1;
+    const dy = ly2 - ly1;
+    if (dx * dx + dy * dy < 1e-20) {
+        return [polygon.map((p) => [p[0], p[1]]), []];
+    }
+
+    // 有符号"侧"函数：>0 = 正面（左侧），<0 = 背面（右侧），=0 = 线上
+    const side = (px: number, py: number): number => {
+        return (px - lx1) * dy - (py - ly1) * dx;
+    };
+
+    // 与切线求交点：返回参数 t 处的 (x, y)（用 a→b 段的参数化）
+    const intersect = (
+        ax: number, ay: number, sa: number,
+        bx: number, by: number, sb: number,
+    ): [number, number] => {
+        // sa, sb 异号 → 在 a→b 上存在交点；t = sa / (sa - sb)
+        const t = sa / (sa - sb);
+        return [ax + t * (bx - ax), ay + t * (by - ay)];
+    };
+
+    const left: number[][] = [];
+    const right: number[][] = [];
+
+    const n = polygon.length;
+    for (let i = 0; i < n; i++) {
+        const a = polygon[i];
+        const b = polygon[(i + 1) % n];
+        const sa = side(a[0], a[1]);
+        const sb = side(b[0], b[1]);
+
+        // 起点分类
+        if (sa > 0) {
+            left.push([a[0], a[1]]);
+        } else if (sa < 0) {
+            right.push([a[0], a[1]]);
+        } else {
+            // 在线上 → 同时属于两边
+            left.push([a[0], a[1]]);
+            right.push([a[0], a[1]]);
+        }
+
+        // 边 a→b 是否跨越切线
+        if (sa > 0 && sb < 0) {
+            const p = intersect(a[0], a[1], sa, b[0], b[1], sb);
+            left.push(p);
+            right.push([p[0], p[1]]);
+        } else if (sa < 0 && sb > 0) {
+            const p = intersect(a[0], a[1], sa, b[0], b[1], sb);
+            right.push(p);
+            left.push([p[0], p[1]]);
+        }
+    }
+
+    return [left, right];
+}
+
 declare const __DEV__: boolean;
