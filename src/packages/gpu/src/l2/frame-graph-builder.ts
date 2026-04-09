@@ -23,6 +23,15 @@ import {
   type ResourceReference,
   RenderGraphImpl,
 } from './render-graph.ts';
+import type {
+  SSAOEffect,
+  SSAOUniforms,
+  EDLEffect,
+  EDLUniforms,
+  CSMApplyEffect,
+  CSMApplyUniforms,
+} from './post-effects.ts';
+import type { ShadowMapArray, ShadowCaster } from './shadow-map-pass.ts';
 
 // ===================== 常量 =====================
 
@@ -263,6 +272,72 @@ export interface FrameGraphBuilder {
   addPickingPass(options: { layers: Layer[]; pixelX?: number; pixelY?: number }): string;
 
   /**
+   * 添加 CSM 阴影贴图渲染 Pass：为 N 级级联分别渲染 caster 图层到
+   * 同一个 `texture_depth_2d_array`。Pass 执行后整个数组纹理可供
+   * 下游的 `addCSMApplyPass` 作为输入。
+   *
+   * @param options shadowMapArray + cascadeVPs + caster 图层
+   * @returns 新建 Pass id
+   */
+  addShadowMapPass(options: {
+    id: string;
+    shadowMapArray: ShadowMapArray;
+    cascadeVPs: Float32Array;
+    casters: readonly ShadowCaster[];
+    dependencies?: string[];
+  }): string;
+
+  /**
+   * 添加 SSAO 后处理 Pass。每帧重建 bind group；uniform 在
+   * `updateUniforms` 回调里写入。
+   *
+   * @param options ssao 效果实例 + 输入纹理来源
+   * @returns 新建 Pass id
+   */
+  addSSAOPass(options: {
+    id: string;
+    effect: SSAOEffect;
+    depthTextureName: string;
+    normalTextureName: string;
+    noiseView: GPUTextureView;
+    outputFormat?: GPUTextureFormat;
+    dependencies?: string[];
+    updateUniforms: () => SSAOUniforms;
+  }): string;
+
+  /**
+   * 添加 Eye-Dome Lighting 后处理 Pass。
+   *
+   * @param options edl 效果实例 + 场景颜色/深度来源
+   * @returns 新建 Pass id
+   */
+  addEDLPass(options: {
+    id: string;
+    effect: EDLEffect;
+    inputPassId: string;
+    outputFormat?: GPUTextureFormat;
+    dependencies?: string[];
+    updateUniforms: () => EDLUniforms;
+  }): string;
+
+  /**
+   * 添加 CSM 应用 Pass：输入场景深度 + shadow map array，输出可见度纹理。
+   *
+   * @param options csm 效果实例 + shadow map + 场景深度来源
+   * @returns 新建 Pass id
+   */
+  addCSMApplyPass(options: {
+    id: string;
+    effect: CSMApplyEffect;
+    shadowMapArray: ShadowMapArray;
+    sceneDepthPassId: string;
+    shadowPassId: string;
+    outputFormat?: GPUTextureFormat;
+    dependencies?: string[];
+    updateUniforms: () => CSMApplyUniforms;
+  }): string;
+
+  /**
    * 编译为可执行对象（内部 bindFrame → compile）。
    */
   build(): CompiledRenderGraph;
@@ -367,6 +442,18 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
   /** 单调计数：拾取 Pass。 */
   private _pickingSeq = 0;
 
+  /** 单调计数：CSM shadow map pass。 */
+  private _shadowMapSeq = 0;
+
+  /** 单调计数：SSAO pass。 */
+  private _ssaoSeq = 0;
+
+  /** 单调计数：EDL pass。 */
+  private _edlSeq = 0;
+
+  /** 单调计数：CSM apply pass。 */
+  private _csmApplySeq = 0;
+
   /** 当前帧表面（swapchain / 尺寸）。 */
   private _surface: SurfaceConfig | null = null;
 
@@ -453,6 +540,10 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
     this._labelCollisionSeq = 0;
     this._screenSeq = 0;
     this._pickingSeq = 0;
+    this._shadowMapSeq = 0;
+    this._ssaoSeq = 0;
+    this._edlSeq = 0;
+    this._csmApplySeq = 0;
   }
 
   /**
@@ -876,6 +967,257 @@ class FrameGraphBuilderImpl implements FrameGraphBuilder {
         } finally {
           pass.end();
         }
+      },
+    };
+    this._graph.addPass(node);
+    return id;
+  }
+
+  /**
+   * @inheritdoc
+   */
+  addShadowMapPass(options: {
+    id: string;
+    shadowMapArray: ShadowMapArray;
+    cascadeVPs: Float32Array;
+    casters: readonly ShadowCaster[];
+    dependencies?: string[];
+  }): string {
+    this.ensureBegin();
+    this._canReuse = false;
+    const id = options.id || `shadow-map-${this._shadowMapSeq++}`;
+    const sm = options.shadowMapArray;
+    if (!sm) {
+      throw new Error('FrameGraphBuilder.addShadowMapPass: shadowMapArray 不能为空');
+    }
+    if (!options.cascadeVPs || options.cascadeVPs.length < 16 * sm.numCascades) {
+      throw new Error('FrameGraphBuilder.addShadowMapPass: cascadeVPs 长度不足');
+    }
+    // 保留外部引用（每帧 begin 时 casters/vp 会重新传入）
+    const cascadeVPs = options.cascadeVPs;
+    const casters = [...(options.casters ?? [])];
+    const deps = [...(options.dependencies ?? [])];
+    const node: RenderPassNode = {
+      id,
+      type: 'render',
+      projection: 'shadow',
+      dependencies: deps,
+      inputs: [],
+      outputs: [],
+      execute: (ctx) => {
+        sm.encodeCascades(ctx.encoder, {
+          cascadeVPs,
+          casters,
+          camera: ctx.camera,
+        });
+      },
+    };
+    this._graph.addPass(node);
+    return id;
+  }
+
+  /**
+   * @inheritdoc
+   */
+  addSSAOPass(options: {
+    id: string;
+    effect: SSAOEffect;
+    depthTextureName: string;
+    normalTextureName: string;
+    noiseView: GPUTextureView;
+    outputFormat?: GPUTextureFormat;
+    dependencies?: string[];
+    updateUniforms: () => SSAOUniforms;
+  }): string {
+    this.ensureBegin();
+    this._canReuse = false;
+    const id = options.id || `ssao-${this._ssaoSeq++}`;
+    if (!options.effect) {
+      throw new Error('FrameGraphBuilder.addSSAOPass: effect 不能为空');
+    }
+    if (!options.depthTextureName || !options.normalTextureName) {
+      throw new Error('FrameGraphBuilder.addSSAOPass: depth/normal texture name 不能为空');
+    }
+    const effect = options.effect;
+    const depthName = options.depthTextureName;
+    const normalName = options.normalTextureName;
+    const noiseView = options.noiseView;
+    const outputFormat = options.outputFormat ?? DEFAULT_POST_OUTPUT_FORMAT;
+    const updateUniforms = options.updateUniforms;
+    const deps = [...(options.dependencies ?? [])];
+    const outName = `post-${id}-out`;
+    const outRef: ResourceReference = {
+      name: outName,
+      type: 'texture',
+      usage: 'write',
+      format: outputFormat,
+    };
+    const depthRef: ResourceReference = {
+      name: depthName,
+      type: 'texture',
+      usage: 'read',
+      format: DEFAULT_SCENE_DEPTH_FORMAT,
+    };
+    const normalRef: ResourceReference = {
+      name: normalName,
+      type: 'texture',
+      usage: 'read',
+      format: DEFAULT_SCENE_COLOR_FORMAT,
+    };
+    const node: RenderPassNode = {
+      id,
+      type: 'postprocess',
+      dependencies: deps,
+      inputs: [depthRef, normalRef],
+      outputs: [outRef],
+      execute: (ctx) => {
+        const depthView = ctx.getTextureView(depthName);
+        const normalView = ctx.getTextureView(normalName);
+        const outView = ctx.getTextureView(outName);
+        effect.updateUniforms(updateUniforms());
+        effect.execute(ctx.encoder, {
+          depthView,
+          normalView,
+          noiseView,
+          outputView: outView,
+          outputFormat,
+        });
+      },
+    };
+    this._graph.addPass(node);
+    return id;
+  }
+
+  /**
+   * @inheritdoc
+   */
+  addEDLPass(options: {
+    id: string;
+    effect: EDLEffect;
+    inputPassId: string;
+    outputFormat?: GPUTextureFormat;
+    dependencies?: string[];
+    updateUniforms: () => EDLUniforms;
+  }): string {
+    this.ensureBegin();
+    this._canReuse = false;
+    const id = options.id || `edl-${this._edlSeq++}`;
+    if (!options.effect) {
+      throw new Error('FrameGraphBuilder.addEDLPass: effect 不能为空');
+    }
+    if (!options.inputPassId) {
+      throw new Error('FrameGraphBuilder.addEDLPass: inputPassId 不能为空');
+    }
+    const effect = options.effect;
+    const inputColorName = `scene-${options.inputPassId}-color`;
+    const inputDepthName = `scene-${options.inputPassId}-depth`;
+    const outputFormat = options.outputFormat ?? DEFAULT_POST_OUTPUT_FORMAT;
+    const updateUniforms = options.updateUniforms;
+    const deps = [options.inputPassId, ...(options.dependencies ?? [])];
+    const outName = `post-${id}-out`;
+    const outRef: ResourceReference = {
+      name: outName,
+      type: 'texture',
+      usage: 'write',
+      format: outputFormat,
+    };
+    const colorRef: ResourceReference = {
+      name: inputColorName,
+      type: 'texture',
+      usage: 'read',
+      format: DEFAULT_SCENE_COLOR_FORMAT,
+    };
+    const depthRef: ResourceReference = {
+      name: inputDepthName,
+      type: 'texture',
+      usage: 'read',
+      format: DEFAULT_SCENE_DEPTH_FORMAT,
+    };
+    const node: RenderPassNode = {
+      id,
+      type: 'postprocess',
+      dependencies: deps,
+      inputs: [colorRef, depthRef],
+      outputs: [outRef],
+      execute: (ctx) => {
+        const colorView = ctx.getTextureView(inputColorName);
+        const depthView = ctx.getTextureView(inputDepthName);
+        const outView = ctx.getTextureView(outName);
+        effect.updateUniforms(updateUniforms());
+        effect.execute(ctx.encoder, {
+          colorView,
+          depthView,
+          outputView: outView,
+          outputFormat,
+        });
+      },
+    };
+    this._graph.addPass(node);
+    return id;
+  }
+
+  /**
+   * @inheritdoc
+   */
+  addCSMApplyPass(options: {
+    id: string;
+    effect: CSMApplyEffect;
+    shadowMapArray: ShadowMapArray;
+    sceneDepthPassId: string;
+    shadowPassId: string;
+    outputFormat?: GPUTextureFormat;
+    dependencies?: string[];
+    updateUniforms: () => CSMApplyUniforms;
+  }): string {
+    this.ensureBegin();
+    this._canReuse = false;
+    const id = options.id || `csm-apply-${this._csmApplySeq++}`;
+    if (!options.effect || !options.shadowMapArray) {
+      throw new Error('FrameGraphBuilder.addCSMApplyPass: effect / shadowMapArray 不能为空');
+    }
+    if (!options.sceneDepthPassId || !options.shadowPassId) {
+      throw new Error('FrameGraphBuilder.addCSMApplyPass: pass id 不能为空');
+    }
+    const effect = options.effect;
+    const shadowMapArray = options.shadowMapArray;
+    const sceneDepthName = `scene-${options.sceneDepthPassId}-depth`;
+    const outputFormat = options.outputFormat ?? 'r8unorm';
+    const updateUniforms = options.updateUniforms;
+    const deps = [
+      options.sceneDepthPassId,
+      options.shadowPassId,
+      ...(options.dependencies ?? []),
+    ];
+    const outName = `post-${id}-visibility`;
+    const outRef: ResourceReference = {
+      name: outName,
+      type: 'texture',
+      usage: 'write',
+      format: outputFormat,
+    };
+    const depthRef: ResourceReference = {
+      name: sceneDepthName,
+      type: 'texture',
+      usage: 'read',
+      format: DEFAULT_SCENE_DEPTH_FORMAT,
+    };
+    const node: RenderPassNode = {
+      id,
+      type: 'postprocess',
+      dependencies: deps,
+      inputs: [depthRef],
+      outputs: [outRef],
+      execute: (ctx) => {
+        const depthView = ctx.getTextureView(sceneDepthName);
+        const outView = ctx.getTextureView(outName);
+        const shadowArrayView = shadowMapArray.view();
+        effect.updateUniforms(updateUniforms());
+        effect.execute(ctx.encoder, {
+          depthView,
+          shadowMapArrayView: shadowArrayView,
+          outputView: outView,
+          outputFormat,
+        });
       },
     };
     this._graph.addPass(node);

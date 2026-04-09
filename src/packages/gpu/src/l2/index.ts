@@ -122,6 +122,41 @@ export {
 export type { FogConfig, FogManager, FogUniforms } from './fog-config.ts';
 export { createFogManager } from './fog-config.ts';
 
+// --- Module 16: CSM Cascades helper (stateless) ---
+export type { CSMParams, CSMCascades } from './csm-cascades.ts';
+export {
+    computeCascadeSplits,
+    computeLightSpaceVP,
+    computeCSMCascades,
+} from './csm-cascades.ts';
+
+// --- Module 17: Post Effects (SSAO / EDL / CSM Apply) ---
+export type {
+    SSAOEffect,
+    SSAOUniforms,
+    SSAOExecuteInputs,
+    EDLEffect,
+    EDLUniforms,
+    EDLExecuteInputs,
+    CSMApplyEffect,
+    CSMApplyUniforms,
+    CSMApplyExecuteInputs,
+} from './post-effects.ts';
+export {
+    createSSAOEffect,
+    createEDLEffect,
+    createCSMApplyEffect,
+} from './post-effects.ts';
+
+// --- Module 18: Shadow Map Array (for CSM) ---
+export type {
+    ShadowMapArray,
+    ShadowMapArrayOptions,
+    ShadowCaster,
+    EncodeCascadesOptions,
+} from './shadow-map-pass.ts';
+export { createShadowMapArray } from './shadow-map-pass.ts';
+
 // ============================================================
 // L2 全局初始化便捷函数
 // ============================================================
