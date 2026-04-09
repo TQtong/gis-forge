@@ -52,17 +52,23 @@ struct VsOut {
   @location(2) viewDir: vec3<f32>,
 };
 
-fn applyLogDepth(clipPos: vec4<f32>, logDepthBufFC: f32) -> vec4<f32> {
-  var pos = clipPos;
-  let logZ = log2(max(1e-6, pos.w + 1.0)) * logDepthBufFC;
-  pos.z = logZ * pos.w;
-  return pos;
-}
+// ⚠ Log depth was removed. The old vertex-shader log depth formula:
+//   logZ = log2(max(1e-6, pos.w + 1)) * logDepthBufFC;
+//   pos.z = logZ * pos.w;
+// produces GARBAGE depth values for vertices with pos.w <= 0 (behind camera).
+// Low-alt tilted views have large z=4 tile triangles (~78km edges) whose
+// vertices straddle the camera plane — one in front (w>0), one behind (w<0).
+// During near-plane clipping, the interpolated NDC z gets completely wrong,
+// producing a "red edge / sky center" or similar fragmented coverage pattern.
+//
+// The correct vertex-shader log depth requires conditional writing via
+// SV_Depth in fragment shader, which is more expensive. For now, linear depth
+// with a conservative near/far ratio (set in globe-camera.ts) gives correct
+// results across all altitudes.
 
 @vertex fn globe_vs(in: VsIn) -> VsOut {
   var out: VsOut;
-  var clip = camera.vpMatrix * vec4<f32>(in.posRTE, 1.0);
-  out.clipPos = applyLogDepth(clip, camera.logDepthBufFC);
+  out.clipPos = camera.vpMatrix * vec4<f32>(in.posRTE, 1.0);
   out.uv = tile.uvOffset + in.uv * tile.uvScale;
   out.normal = in.normal;
   out.viewDir = -normalize(in.posRTE);
@@ -72,22 +78,13 @@ fn applyLogDepth(clipPos: vec4<f32>, logDepthBufFC: f32) -> vec4<f32> {
 @fragment fn globe_fs(in: VsOut) -> @location(0) vec4<f32> {
   var color = textureSample(tileTexture, tileSampler, in.uv);
   let N = normalize(in.normal);
-  let V = in.viewDir;
 
-  // Diffuse lighting from sun (in ECEF space, consistent with all layers)
+  // Diffuse lighting from sun (ECEF space)
   let nDotL = max(dot(N, camera.sunDirection), 0.0);
   let ambient = 0.3;
   let diffuse = nDotL * 0.7;
   let lighting = ambient + diffuse;
-  color = vec4<f32>(color.rgb * lighting, color.a);
-
-  // Atmosphere edge effect (limb darkening / blue tint at horizon)
-  let nDotV = max(dot(N, V), 0.0);
-  let atmoFactor = smoothstep(0.0, 0.15, nDotV);
-  let atmoColor = vec3<f32>(0.4, 0.6, 1.0);
-  color = vec4<f32>(mix(atmoColor, color.rgb, atmoFactor), 1.0);
-
-  return color;
+  return vec4<f32>(color.rgb * lighting, color.a);
 }
 `;
 

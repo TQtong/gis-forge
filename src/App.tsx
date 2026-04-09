@@ -84,6 +84,11 @@ function bootGlobe(ctx: BootContext): { engine: Globe3D; teardown: () => void } 
         accessibleTitle: 'GIS-Forge 3D Globe',
     });
 
+    // 开发期：在 window 上暴露 globe 实例以便 console 调试
+    if (import.meta.env.DEV) {
+        (window as unknown as { __globe3d: unknown }).__globe3d = globe;
+    }
+
     markStepDone(ctx.setEngineSteps, 1);
     ctx.setEngineProgress(35);
 

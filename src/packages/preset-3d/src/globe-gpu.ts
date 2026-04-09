@@ -128,6 +128,10 @@ export function createGlobeGPUResources(device: GPUDevice, refs: GlobeGPURefs): 
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
         label: 'Globe3D:fallbackTexture',
     });
+    // 纯白 fallback：用户偏好白色地球。
+    // 视觉上能否区分地面与天空取决于：
+    //   (1) 着色器 atmoFactor 的 smoothstep 范围（已收紧到 0.05）
+    //   (2) sky 着色器的渐变颜色与白色形成的对比
     device.queue.writeTexture(
         { texture: refs.fallbackTexture },
         new Uint8Array([255, 255, 255, 255]),
@@ -266,7 +270,15 @@ export function createSkyPipeline(device: GPUDevice, format: GPUTextureFormat): 
         },
         depthStencil: {
             format: 'depth32float',
-            depthWriteEnabled: true,
+            // ⚠ sky **不能写深度**——否则 sky 会把整个深度缓冲填成 0.9999，
+            // 后续 tile 在 'less-equal' 深度测试下需要 depth ≤ 0.9999 才能渲染。
+            // 配合 log depth + 浮点精度边角，远处 tile 的 depth 经常逼近或超过
+            // 0.9999，导致 tile 被 sky 盖住 → 用户看到全蓝。
+            //
+            // depthCompare='always' + depthWriteEnabled=false：
+            //   sky 总是绘制颜色但不动深度。
+            //   清屏后深度缓冲保持 1.0，tile 的 'less-equal' 测试永远成立。
+            depthWriteEnabled: false,
             depthCompare: 'always',
         },
         label: 'Globe3D:skyPipeline',

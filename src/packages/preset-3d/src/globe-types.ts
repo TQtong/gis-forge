@@ -177,10 +177,17 @@ export interface CachedTile {
     bindGroup: GPUBindGroup | null;
     /** 是否已发起异步请求且尚未结束 */
     loading: boolean;
-    /** 最近一次请求失败（网络/解码）；为 true 时不再自动重试，避免每帧海量 fetch */
+    /** 最近一次请求失败（网络/解码）；为 true 且 retryCount >= MAX 时不再重试 */
     loadError: boolean;
     /** 影像是否已上传 GPU 可供采样 */
     textureReady: boolean;
+    /**
+     * 已重试次数（不含首次尝试）。
+     * 失败后下一次满足 `now >= retryAfter` 时由渲染循环重新发起。
+     */
+    retryCount: number;
+    /** 下次允许重试的时间戳（performance.now() + backoff_ms），仅 loadError=true 时有意义 */
+    retryAfter: number;
     /** DEM 是否已解析；未就绪时按 z=0 平面渲染 */
     demReady: boolean;
     /** 高程栅格；`null` 表示平面 */
@@ -424,8 +431,27 @@ export interface TileManagerState {
     tileLRU: string[];
     /** 键 `"z/x/y"` → {@link CachedMesh}（索引缓冲常驻 GPU） */
     meshCache: Map<string, CachedMesh>;
-    /** 当前影像图层使用的 `{z}/{x}/{y}` 模板 */
+    /**
+     * 当前影像图层使用的 `{z}/{x}/{y}` 模板。
+     * **空字符串 = 不加载任何瓦片**（默认）——所有可见瓦片用 fallback 白纹理渲染，
+     * 适合纯色地球 / 无网络环境 / 用户想自定义底图但还没设置时。
+     */
     tileUrlTemplate: string;
+    /** 是否启用瓦片影像加载。`false` 时 `loadTileTexture` 整个跳过，零网络/CPU 开销 */
+    imageryEnabled: boolean;
+    /**
+     * 待销毁纹理列表（两阶段淘汰）。
+     *
+     * 当 LRU 淘汰发生在帧渲染期间时，被淘汰的纹理可能已经在本帧的
+     * command encoder 里被引用。直接 `.destroy()` 会导致 submit 时引用
+     * 失效（"used in submit while destroyed" 报错 → 整帧丢弃 → 黑屏）。
+     *
+     * 修复：本帧的淘汰只把资源**移出 Map**并 push 到此列表；
+     * 在 `device.queue.submit()` 之后由 `flushPendingDestroys()` 真销毁。
+     */
+    pendingDestroyTextures: GPUTexture[];
+    /** 待销毁缓冲列表（mesh cache 淘汰，与 pendingDestroyTextures 同理） */
+    pendingDestroyBuffers: GPUBuffer[];
 }
 
 /**

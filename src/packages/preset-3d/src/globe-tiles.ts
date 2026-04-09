@@ -25,6 +25,17 @@ let _tileFetchInFlight = 0;
 /** 等待槽位的加载任务（与 {@link MAX_CONCURRENT_TILE_FETCHES} 配合） */
 const _tileFetchWaitQueue: Array<() => void> = [];
 
+/** 单瓦片最大重试次数（不含首次尝试）。3 次足以覆盖瞬时网络抖动而不淹没失败站点 */
+const MAX_TILE_RETRIES = 3;
+/** 重试基础延迟（毫秒）。第 n 次重试延迟 = base × 2^n（指数退避），上限 30s */
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 30_000;
+
+function _computeBackoff(retryCount: number): number {
+    const delay = RETRY_BASE_DELAY_MS * Math.pow(2, retryCount);
+    return Math.min(delay, RETRY_MAX_DELAY_MS);
+}
+
 /**
  * 有可用槽位时从队首启动任务，直至达到并发上限（单任务结束时也应调用以填补空位）。
  */
@@ -78,20 +89,47 @@ export function loadTileTexture(
     tileState: TileManagerState,
     isDestroyed: () => boolean,
 ): void {
-    if (tileState.tileCache.has(key)) { return; }
+    // ⚠ imageryEnabled === false 时直接 return：避免 CORS 失败、网络洪水、CPU 占用
+    if (!tileState.imageryEnabled || !tileState.tileUrlTemplate) {
+        return;
+    }
 
-    tileState.tileCache.set(key, {
-        texture: null,
-        bindGroup: null,
-        loading: true,
-        loadError: false,
-        textureReady: false,
-        demReady: false,
-        demData: null,
-    });
-    tileState.tileLRU.push(key);
+    const existing = tileState.tileCache.get(key);
 
-    evictTileCache(tileState);
+    // 已就绪 / 加载中 → 不动
+    if (existing && (existing.textureReady || existing.loading)) {
+        return;
+    }
+
+    // 失败但还能重试 → 检查 backoff
+    if (existing && existing.loadError) {
+        if (existing.retryCount >= MAX_TILE_RETRIES) {
+            return; // 永久失败，不再重试
+        }
+        const now = performance.now();
+        if (now < existing.retryAfter) {
+            return; // 还在 backoff 窗口里
+        }
+        // 进入下一次重试
+        existing.loading = true;
+        existing.loadError = false;
+        existing.retryCount += 1;
+    } else if (!existing) {
+        // 全新条目
+        tileState.tileCache.set(key, {
+            texture: null,
+            bindGroup: null,
+            loading: true,
+            loadError: false,
+            textureReady: false,
+            retryCount: 0,
+            retryAfter: 0,
+            demReady: false,
+            demData: null,
+        });
+        tileState.tileLRU.push(key);
+        evictTileCache(tileState);
+    }
 
     const url = tileState.tileUrlTemplate
         .replace('{z}', String(z))
@@ -138,17 +176,22 @@ export function loadTileTexture(
                     cached.bindGroup = bindGroup;
                     cached.loading = false;
                     cached.loadError = false;
+                    cached.retryCount = 0;
+                    cached.retryAfter = 0;
                     cached.textureReady = true;
                 }
             })
             .catch((err) => {
-                devWarn(`[Globe3D] Failed to load tile ${key}:`, err);
+                devWarn(`[Globe3D] Failed to load tile ${key} (retry ${
+                    tileState.tileCache.get(key)?.retryCount ?? 0
+                }/${MAX_TILE_RETRIES}):`, err);
                 const cached = tileState.tileCache.get(key);
                 if (cached) {
                     cached.loading = false;
                     cached.loadError = true;
+                    // 安排下一次重试时间（指数退避）
+                    cached.retryAfter = performance.now() + _computeBackoff(cached.retryCount);
                 }
-                // 保留 cache 项，避免下一帧再次 loadTileTexture → 无限重试与连接耗尽
             }),
     );
 }
@@ -201,20 +244,31 @@ export function getOrCreateTileMesh(
     x: number,
     y: number,
     meshCache: Map<string, CachedMesh>,
+    pendingDestroyBuffers?: GPUBuffer[],
 ): CachedMesh | null {
     const key = `${z}/${x}/${y}`;
 
     const existing = meshCache.get(key);
     if (existing) { return existing; }
 
-    // 条目数有上限：缩放会遍历大量不同 `z/x/y`，FIFO 淘汰最旧项，避免 meshCache 与 GPU 缓冲无限增长
+    // 条目数有上限：缩放会遍历大量不同 `z/x/y`，FIFO 淘汰最旧项。
+    // ⚠ **两阶段淘汰**：本帧只移出 Map 并把缓冲推到 pendingDestroyBuffers，
+    //   实际 .destroy() 由调用方在 device.queue.submit() 之后执行。
+    //   原因：被淘汰的缓冲可能已经在本帧的 command encoder 里被引用，
+    //   立即销毁会导致 "used in submit while destroyed" → 整帧丢弃 → 黑屏。
     while (meshCache.size >= MAX_MESH_CACHE_SIZE) {
         const oldestKey = meshCache.keys().next().value as string | undefined;
         if (oldestKey === undefined) { break; }
         const evicted = meshCache.get(oldestKey);
         if (evicted) {
-            evicted.indexBuffer.destroy();
-            evicted.vertexBuffer.destroy();
+            if (pendingDestroyBuffers) {
+                pendingDestroyBuffers.push(evicted.indexBuffer);
+                pendingDestroyBuffers.push(evicted.vertexBuffer);
+            } else {
+                // 后向兼容：destroy 立即生效（仅用于 clearMeshCache 等非渲染路径）
+                evicted.indexBuffer.destroy();
+                evicted.vertexBuffer.destroy();
+            }
         }
         meshCache.delete(oldestKey);
     }
@@ -257,7 +311,11 @@ export function touchTileLRU(tileState: TileManagerState, key: string): void {
 }
 
 /**
- * 当 `tileLRU.length > MAX_TILE_CACHE_SIZE` 时从头部弹出并 `destroy` 纹理。
+ * 当 `tileLRU.length > MAX_TILE_CACHE_SIZE` 时从头部弹出。
+ *
+ * **两阶段淘汰**：纹理推到 `tileState.pendingDestroyTextures`，
+ * 实际 `.destroy()` 由 {@link flushPendingDestroys} 在 submit 之后执行。
+ * 原因详见 {@link getOrCreateTileMesh} 注释。
  *
  * @param tileState - 可变状态
  */
@@ -268,11 +326,33 @@ export function evictTileCache(tileState: TileManagerState): void {
 
         if (cached) {
             if (cached.texture) {
-                cached.texture.destroy();
+                tileState.pendingDestroyTextures.push(cached.texture);
             }
             tileState.tileCache.delete(oldKey);
         }
     }
+}
+
+/**
+ * 在 `device.queue.submit()` 之后调用：真正销毁本帧推入的待销毁资源。
+ *
+ * 此时 GPU 已经接受 command buffer，引用已被驱动层固化，
+ * 销毁底层资源不再产生 "used in submit while destroyed" 错误。
+ *
+ * @param tileState - 可变状态
+ */
+export function flushPendingDestroys(tileState: TileManagerState): void {
+    const tx = tileState.pendingDestroyTextures;
+    for (let i = 0; i < tx.length; i++) {
+        try { tx[i].destroy(); } catch { /* 已被回收等 */ }
+    }
+    tx.length = 0;
+
+    const buf = tileState.pendingDestroyBuffers;
+    for (let i = 0; i < buf.length; i++) {
+        try { buf[i].destroy(); } catch { /* */ }
+    }
+    buf.length = 0;
 }
 
 /**
@@ -281,6 +361,8 @@ export function evictTileCache(tileState: TileManagerState): void {
  * @param tileState - 目标状态
  */
 export function clearTileCache(tileState: TileManagerState): void {
+    // 先 flush 上一帧 pending（避免泄漏），再销毁 cache 自身的纹理
+    flushPendingDestroys(tileState);
     for (const cached of tileState.tileCache.values()) {
         if (cached.texture) {
             cached.texture.destroy();

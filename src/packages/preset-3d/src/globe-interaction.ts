@@ -466,17 +466,33 @@ function zoom3D(
     const cy = vp.height / 2;
     const centerHitRaw = pickGlobe(cx, cy);
 
-    let distanceMeasure: number;
+    // distanceMeasure 严格对标 Cesium ScreenSpaceCameraController.zoom3D
+    // (ScreenSpaceCameraController.js:2342-2394)：
+    //
+    //   const height = ellipsoid.cartesianToCartographic(camera.position).height;
+    //   ...
+    //   if (defined(intersection)) distance = Cartesian3.distance(ray.origin, intersection);
+    //   if (!defined(distance))    distance = height;
+    //
+    // ⚠ Cesium 注释明确写道（handleZoom:578）：
+    //   "distanceMeasure should be the height above the ellipsoid."
+    //
+    // 也就是说 Cesium 默认就是用相机的几何高度，只有当相机非常贴近地面
+    // （`height < minimumPickingTerrainHeight = 150km`）才用 pickPosition
+    // 拿到更精确的 ground 距离来 refine。这个 refine 是为了 terrain 起伏，
+    // 不是为了"防穿透切向 dive"——因为 Cesium 的 `distance` 总是沿
+    // camera→pickedPosition 方向，对纯椭球几何 anchorDist ≥ height 时
+    // 取 anchorDist 反而更宽松。
+    //
+    // 我们这里没有 terrain，且 minHeight 是相对于 alt 的硬下界，
+    // **直接用 camera 的几何高度作为 distanceMeasure 即可**。
     let centerHit: Float64Array | null = null;
     if (centerHitRaw) {
         v3Copy(_zoomCenterHit, centerHitRaw);
         centerHit = _zoomCenterHit;
-        distanceMeasure = v3Distance(camPos, centerHit);
-        _preIntersectionDistance = distanceMeasure;
-    } else {
-        // 屏幕中心未命中球面 → 使用高度作为距离度量（对标 Cesium zoom3D:2392-2394）
-        distanceMeasure = camera3D.getPosition().alt;
+        _preIntersectionDistance = v3Distance(camPos, centerHit);
     }
+    const distanceMeasure = camera3D.getPosition().alt;
 
     // ─── 2. unitPositionDotDirection（对标 Cesium zoom3D:2396-2407）───
     v3Normalize(_zoomUnitPos, camPos);
@@ -1124,7 +1140,9 @@ export function createGlobeMouseHandlers(
                    state.tiltLastScreenX, state.tiltLastScreenY,
                    sx, sy,
                    pickGlobe, getViewport,
-                   opts.minimumZoomDistance ?? 100);
+                   // 优先使用相机的「effective min altitude」（动态：minZoomDist + 当前 LOD 弦割下沉量）
+                   // 这样 tilt 也不会把相机推到 mesh 之下。
+                   camera3D.effectiveMinAltitude);
             state.tiltLastScreenX = sx;
             state.tiltLastScreenY = sy;
         }
@@ -1150,8 +1168,12 @@ export function createGlobeMouseHandlers(
         // 取反 deltaY：浏览器 deltaY>0 表示向后滚（远离用户），应缩小；
         // deltaY<0 表示向前滚（靠近用户），应放大。zoom3D 中正值=靠近球面，
         // 因此传入 -deltaY 使方向符合用户直觉。
+        // ⚠ 用 effectiveMinAltitude 而不是裸 opts.minimumZoomDistance：
+        // 该值 = max(minZoomDist, minTerrainAlt)，由 globe-render 每帧根据
+        // 当前最粗 LOD 的弦割下沉量推送给相机。这是防止"视锥进入 mesh 内部
+        // → 双地平线黑屏"的关键。
         zoom3D(camera3D, state, -e.deltaY, sx, sy,
-               pickGlobe, getViewport, opts.minimumZoomDistance ?? 1);
+               pickGlobe, getViewport, camera3D.effectiveMinAltitude);
     }
 
     function onContextMenu(e: Event): void {
