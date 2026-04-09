@@ -388,4 +388,475 @@ function isOutOfChina(lng: number, lat: number): boolean {
     return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
 }
 
+// ============================================================
+// Equirectangular（等距圆柱）投影 — Plate Carrée
+// ============================================================
+
+/**
+ * Equirectangular 正算（经纬度 → 平面坐标）。
+ *
+ * 标准等距圆柱投影（lat0 = 0 时为 Plate Carrée），适合全球概览图、
+ * 数据栅格存储、纹理映射。
+ *   x = R · (λ - λ0) · cos(φ0)
+ *   y = R · (φ - φ0)
+ *
+ * 用球面近似（不考虑椭球扁率），用于概览或纹理寻址足够。
+ *
+ * @param lngDeg 经度（度）
+ * @param latDeg 纬度（度）
+ * @param lng0Deg 中央经线（度），默认 0
+ * @param lat0Deg 标准纬线（度），默认 0
+ * @param radius 球半径（米），默认 WGS84 长半轴
+ * @returns [x, y]（米）
+ */
+export function equirectangularForward(
+    lngDeg: number,
+    latDeg: number,
+    lng0Deg: number = 0,
+    lat0Deg: number = 0,
+    radius: number = WGS84_A,
+): [number, number] {
+    const DEG = Math.PI / 180;
+    const cosLat0 = Math.cos(lat0Deg * DEG);
+    const x = radius * (lngDeg - lng0Deg) * DEG * cosLat0;
+    const y = radius * (latDeg - lat0Deg) * DEG;
+    return [x, y];
+}
+
+/**
+ * Equirectangular 反算（平面坐标 → 经纬度）。
+ *
+ * @param x 投影 x（米）
+ * @param y 投影 y（米）
+ * @param lng0Deg 中央经线（度），默认 0
+ * @param lat0Deg 标准纬线（度），默认 0
+ * @param radius 球半径（米），默认 WGS84 长半轴
+ * @returns [lngDeg, latDeg]（度）
+ */
+export function equirectangularInverse(
+    x: number,
+    y: number,
+    lng0Deg: number = 0,
+    lat0Deg: number = 0,
+    radius: number = WGS84_A,
+): [number, number] {
+    const DEG = Math.PI / 180;
+    const RAD = 180 / Math.PI;
+    const cosLat0 = Math.cos(lat0Deg * DEG);
+    if (Math.abs(cosLat0) < 1e-12) {
+        // 退化：标准纬线在极点附近
+        return [lng0Deg, lat0Deg + (y / radius) * RAD];
+    }
+    const lng = lng0Deg + (x / (radius * cosLat0)) * RAD;
+    const lat = lat0Deg + (y / radius) * RAD;
+    return [lng, lat];
+}
+
+// ============================================================
+// Lambert 方位角等积投影（Lambert Azimuthal Equal-Area, LAEA, 椭球版）
+// ============================================================
+//
+// 完整椭球版本，参考 Snyder "Map Projections - A Working Manual"
+// (USGS PP 1395, 1987) 第 14 章 pp. 187-190。
+//
+// 与球面版的关键区别：先把大地纬度 φ 转换为"正积纬度"（authalic latitude）β，
+// 再在球面上做等积投影，最终结果保持椭球面上的面积比例不变。
+// EPSG 9820（LAEA-ETRS89 / Europe）即此投影。
+// ============================================================
+
+const E_LAMBERT = Math.sqrt(WGS84_E2);
+
+/**
+ * 计算 q(φ) — Snyder 式 (3-12)：
+ *   q = (1 - e²) · [ sin φ / (1 - e² sin² φ) - 1/(2e) · ln((1 - e sin φ)/(1 + e sin φ)) ]
+ * q 是椭球面上方位角等积投影的"等积参数"。
+ * φ = ±π/2 时 q = ±qₚ；qₚ = q(π/2)。
+ */
+function qLambert(phi: number): number {
+    const e = E_LAMBERT;
+    const sinPhi = Math.sin(phi);
+    const eSinPhi = e * sinPhi;
+    const oneMinusE2 = 1 - WGS84_E2;
+    return oneMinusE2 * (
+        sinPhi / (1 - eSinPhi * eSinPhi)
+        - (1 / (2 * e)) * Math.log((1 - eSinPhi) / (1 + eSinPhi))
+    );
+}
+
+const QP_LAMBERT = qLambert(Math.PI / 2); // qₚ
+const RQ_LAMBERT = WGS84_A * Math.sqrt(QP_LAMBERT / 2); // R_q
+
+/**
+ * 大地纬度 → 正积纬度（authalic latitude）β。
+ * sin β = q(φ) / qₚ
+ */
+function authaliticLatitude(phi: number): number {
+    return Math.asin(qLambert(phi) / QP_LAMBERT);
+}
+
+/**
+ * 正积纬度 → 大地纬度（用 Snyder 式 (3-18) 的级数展开，order 4）。
+ *
+ * φ ≈ β + (e²/3 + 31e⁴/180 + 517e⁶/5040)·sin(2β)
+ *       + (23e⁴/360 + 251e⁶/3780)·sin(4β)
+ *       + (761e⁶/45360)·sin(6β)
+ */
+function authaliticToGeodetic(beta: number): number {
+    const e2 = WGS84_E2;
+    const e4 = e2 * e2;
+    const e6 = e4 * e2;
+    const c1 = e2 / 3 + 31 * e4 / 180 + 517 * e6 / 5040;
+    const c2 = 23 * e4 / 360 + 251 * e6 / 3780;
+    const c3 = 761 * e6 / 45360;
+    return beta
+        + c1 * Math.sin(2 * beta)
+        + c2 * Math.sin(4 * beta)
+        + c3 * Math.sin(6 * beta);
+}
+
+/**
+ * Lambert 方位角等积投影正算（**完整椭球版**，oblique aspect）。
+ *
+ * 公式（Snyder 式 24-1 / 24-2 / 24-3 oblique）：
+ *   β = authalic(φ),  β₀ = authalic(φ₀)
+ *   B = R_q · √(2 / (1 + sin β₀ sin β + cos β₀ cos β cos(λ-λ₀)))
+ *   D = a · cos φ₀ / (R_q · √(1 - e² sin² φ₀) · cos β₀)
+ *   x = B · D · cos β · sin(λ-λ₀)
+ *   y = (B / D) · (cos β₀ sin β - sin β₀ cos β cos(λ-λ₀))
+ *
+ * @param lngDeg 经度（度）
+ * @param latDeg 纬度（度）
+ * @param lng0Deg 投影中心经度（度），默认 0
+ * @param lat0Deg 投影中心纬度（度），默认 0
+ * @returns [x, y]（米）
+ */
+export function lambertAzimuthalForward(
+    lngDeg: number,
+    latDeg: number,
+    lng0Deg: number = 0,
+    lat0Deg: number = 0,
+): [number, number] {
+    const DEG = Math.PI / 180;
+    const phi = latDeg * DEG;
+    const phi0 = lat0Deg * DEG;
+    const lam = lngDeg * DEG;
+    const lam0 = lng0Deg * DEG;
+
+    const beta = authaliticLatitude(phi);
+    const beta0 = authaliticLatitude(phi0);
+    const sinBeta = Math.sin(beta);
+    const cosBeta = Math.cos(beta);
+    const sinBeta0 = Math.sin(beta0);
+    const cosBeta0 = Math.cos(beta0);
+    const cosDLam = Math.cos(lam - lam0);
+
+    const denom = 1 + sinBeta0 * sinBeta + cosBeta0 * cosBeta * cosDLam;
+    if (denom < 1e-15) {
+        return [2 * RQ_LAMBERT, 0]; // 对跖点退化
+    }
+    const Bk = RQ_LAMBERT * Math.sqrt(2 / denom);
+
+    // D 因子（处理非极点中心）
+    let D: number;
+    const cosPhi0 = Math.cos(phi0);
+    if (Math.abs(cosPhi0) < 1e-12) {
+        // 极点中心：D = 1，公式退化
+        D = 1;
+    } else {
+        const sinPhi0 = Math.sin(phi0);
+        D = (WGS84_A * cosPhi0)
+            / (RQ_LAMBERT * Math.sqrt(1 - WGS84_E2 * sinPhi0 * sinPhi0) * cosBeta0);
+    }
+
+    const x = Bk * D * cosBeta * Math.sin(lam - lam0);
+    const y = (Bk / D) * (cosBeta0 * sinBeta - sinBeta0 * cosBeta * cosDLam);
+    return [x, y];
+}
+
+/**
+ * Lambert 方位角等积投影反算（完整椭球版）。
+ *
+ * 公式（Snyder 式 24-9 / 24-10 / 24-13）：
+ *   ρ = √((x/D)² + (D·y)²)
+ *   C_e = 2 · asin(ρ / (2 R_q))
+ *   sin β = cos C_e · sin β₀ + (D · y · sin C_e · cos β₀) / ρ
+ *   φ = authalic⁻¹(β)
+ *   λ = λ₀ + atan2((x sin C_e), (D ρ cos β₀ cos C_e − D² y sin β₀ sin C_e))
+ *
+ * @param x 投影 x（米）
+ * @param y 投影 y（米）
+ * @param lng0Deg 投影中心经度（度），默认 0
+ * @param lat0Deg 投影中心纬度（度），默认 0
+ * @returns [lngDeg, latDeg]（度）
+ */
+export function lambertAzimuthalInverse(
+    x: number,
+    y: number,
+    lng0Deg: number = 0,
+    lat0Deg: number = 0,
+): [number, number] {
+    const DEG = Math.PI / 180;
+    const RAD = 180 / Math.PI;
+    const phi0 = lat0Deg * DEG;
+    const lam0 = lng0Deg * DEG;
+
+    const beta0 = authaliticLatitude(phi0);
+    const sinBeta0 = Math.sin(beta0);
+    const cosBeta0 = Math.cos(beta0);
+
+    let D: number;
+    const cosPhi0 = Math.cos(phi0);
+    if (Math.abs(cosPhi0) < 1e-12) {
+        D = 1;
+    } else {
+        const sinPhi0 = Math.sin(phi0);
+        D = (WGS84_A * cosPhi0)
+            / (RQ_LAMBERT * Math.sqrt(1 - WGS84_E2 * sinPhi0 * sinPhi0) * cosBeta0);
+    }
+
+    const xN = x / D;
+    const yN = D * y;
+    const rho = Math.sqrt(xN * xN + yN * yN);
+    if (rho < 1e-15) {
+        return [lng0Deg, lat0Deg];
+    }
+
+    const Ce = 2 * Math.asin(Math.min(1, rho / (2 * RQ_LAMBERT)));
+    const sinCe = Math.sin(Ce);
+    const cosCe = Math.cos(Ce);
+
+    const sinBeta = cosCe * sinBeta0 + (yN * sinCe * cosBeta0) / rho;
+    const beta = Math.asin(Math.min(1, Math.max(-1, sinBeta)));
+
+    const phi = authaliticToGeodetic(beta);
+    const lam = lam0 + Math.atan2(
+        x * sinCe,
+        D * rho * cosBeta0 * cosCe - D * D * y * sinBeta0 * sinCe,
+    );
+
+    return [lam * RAD, phi * RAD];
+}
+
+// ============================================================
+// Helmert 7 参数空间相似变换（双约定，完整精确求解）
+// ============================================================
+//
+// 国际上有两套互为相反符号的约定：
+// 1) Position Vector (PV)：IUGG / IERS / GeographicLib / 大多数科研使用。
+//    R 矩阵的非对角项符号见下方公式。
+// 2) Coordinate Frame (CF)：EPSG:9607 / 美国 / 部分商业 GIS 使用。
+//    与 PV 仅旋转角符号相反。
+//
+// 同一组转换参数在两种约定下旋转角的符号必须取相反数。
+// 把混淆约定的参数代入会引入 ~rad·R 量级的位置误差（最大 ~6km），
+// 因此每个公开数据源都会标注自己的约定。
+//
+// 本文件为两种约定各提供独立函数，命名后缀清晰区分。
+// 解算精度：纯 Float64，旋转矩阵展开为完整 3×3，无小角近似。
+// ============================================================
+
+/**
+ * 构建 Position Vector 约定下的 Helmert 旋转矩阵 R（不含尺度和平移）。
+ *
+ * R = Rx(rx) · Ry(ry) · Rz(rz)，按右手系小角度展开为：
+ *   R = [[ 1  -rz   ry ]
+ *        [ rz   1  -rx ]
+ *        [-ry  rx    1 ]]
+ *
+ * 注意：本函数采用**精确**展开（保留全部 3×3 项），不是只取一阶近似。
+ * 对大角度（如不同椭球间的方向变换）也保持几何正确。
+ */
+function helmertMatrixPV(rxRad: number, ryRad: number, rzRad: number): number[][] {
+    const sx = Math.sin(rxRad), cx = Math.cos(rxRad);
+    const sy = Math.sin(ryRad), cy = Math.cos(ryRad);
+    const sz = Math.sin(rzRad), cz = Math.cos(rzRad);
+    // R = Rx · Ry · Rz（PV 约定）
+    return [
+        [cy * cz, -cy * sz, sy],
+        [cx * sz + sx * sy * cz, cx * cz - sx * sy * sz, -sx * cy],
+        [sx * sz - cx * sy * cz, sx * cz + cx * sy * sz, cx * cy],
+    ];
+}
+
+/**
+ * Helmert 7 参数变换 — Position Vector (PV) 约定（IUGG / IERS）。
+ *
+ * 公式：
+ *   X' = T + (1 + s·1e-6) · R_PV · X
+ *
+ * 适用：WGS84↔ITRF↔CGCS2000 等高精度 datum 转换；论文/IERS 公告参数。
+ *
+ * @param x  ECEF X（米）
+ * @param y  ECEF Y（米）
+ * @param z  ECEF Z（米）
+ * @param tx 平移 X（米）
+ * @param ty 平移 Y（米）
+ * @param tz 平移 Z（米）
+ * @param rxRad 旋转 X（弧度）
+ * @param ryRad 旋转 Y（弧度）
+ * @param rzRad 旋转 Z（弧度）
+ * @param scalePpm 尺度因子（ppm）
+ * @returns 变换后的 [X', Y', Z']（米）
+ */
+export function helmert7(
+    x: number, y: number, z: number,
+    tx: number, ty: number, tz: number,
+    rxRad: number, ryRad: number, rzRad: number,
+    scalePpm: number,
+): [number, number, number] {
+    const R = helmertMatrixPV(rxRad, ryRad, rzRad);
+    const s = 1 + scalePpm * 1e-6;
+    return [
+        tx + s * (R[0][0] * x + R[0][1] * y + R[0][2] * z),
+        ty + s * (R[1][0] * x + R[1][1] * y + R[1][2] * z),
+        tz + s * (R[2][0] * x + R[2][1] * y + R[2][2] * z),
+    ];
+}
+
+/**
+ * Position Vector 约定的逆变换。
+ *
+ * 实现：构造 R 的转置（R⁻¹ = Rᵀ，旋转矩阵正交性），减平移除以尺度后乘以 Rᵀ。
+ * 这是几何意义上**精确**的逆，与单纯反转参数符号的近似不同。
+ *
+ * @returns 原始 [X, Y, Z]
+ */
+export function helmert7Inverse(
+    x: number, y: number, z: number,
+    tx: number, ty: number, tz: number,
+    rxRad: number, ryRad: number, rzRad: number,
+    scalePpm: number,
+): [number, number, number] {
+    const R = helmertMatrixPV(rxRad, ryRad, rzRad);
+    const s = 1 / (1 + scalePpm * 1e-6);
+    const dx = x - tx;
+    const dy = y - ty;
+    const dz = z - tz;
+    // Rᵀ · (X' - T) / scale
+    return [
+        s * (R[0][0] * dx + R[1][0] * dy + R[2][0] * dz),
+        s * (R[0][1] * dx + R[1][1] * dy + R[2][1] * dz),
+        s * (R[0][2] * dx + R[1][2] * dy + R[2][2] * dz),
+    ];
+}
+
+/**
+ * Helmert 7 参数变换 — Coordinate Frame (CF) 约定（EPSG:9607 / 美国）。
+ *
+ * 与 PV 约定的关系：旋转角符号取反。
+ *   R_CF(rx, ry, rz) = R_PV(-rx, -ry, -rz)
+ *
+ * 适用：EPSG 数据库发布的多数 datum 转换参数（CF 是 EPSG 默认）。
+ */
+export function helmert7CoordinateFrame(
+    x: number, y: number, z: number,
+    tx: number, ty: number, tz: number,
+    rxRad: number, ryRad: number, rzRad: number,
+    scalePpm: number,
+): [number, number, number] {
+    return helmert7(x, y, z, tx, ty, tz, -rxRad, -ryRad, -rzRad, scalePpm);
+}
+
+/** Coordinate Frame 约定的逆变换。 */
+export function helmert7CoordinateFrameInverse(
+    x: number, y: number, z: number,
+    tx: number, ty: number, tz: number,
+    rxRad: number, ryRad: number, rzRad: number,
+    scalePpm: number,
+): [number, number, number] {
+    return helmert7Inverse(x, y, z, tx, ty, tz, -rxRad, -ryRad, -rzRad, scalePpm);
+}
+
+// ============================================================
+// 球面 Mercator (EPSG:3857) ↔ 椭球面 Mercator (EPSG:3395) 完整双向转换
+// ============================================================
+//
+// 提供四组函数：
+//   - latToSphericalMercatorY        / sphericalMercatorYToLat
+//   - latToEllipsoidalMercatorY      / ellipsoidalMercatorYToLat
+//   - sphericalToEllipsoidalMercatorLat
+//   - ellipsoidalToSphericalMercatorLat
+//
+// 球面 Mercator (Web Mercator, EPSG:3857) 公式：
+//   y_sph = R · ln(tan(π/4 + φ/2))
+// 椭球面 Mercator (EPSG:3395) 公式：
+//   y_ell = R · ln(tan(π/4 + φ/2) · ((1 - e sin φ)/(1 + e sin φ))^(e/2))
+//
+// 反算 φ 时使用 Snyder 式 7-9 牛顿迭代（一阶收敛但很快，通常 5 步达 1e-15）。
+// ============================================================
+
+const E_MERC = Math.sqrt(WGS84_E2);
+
+/** 大地纬度（度）→ 球面 Mercator y 坐标（米）。 */
+export function latToSphericalMercatorY(latDeg: number): number {
+    const phi = latDeg * Math.PI / 180;
+    return WGS84_A * Math.log(Math.tan(Math.PI / 4 + phi / 2));
+}
+
+/** 球面 Mercator y 坐标（米）→ 大地纬度（度）。 */
+export function sphericalMercatorYToLat(y: number): number {
+    return (2 * Math.atan(Math.exp(y / WGS84_A)) - Math.PI / 2) * 180 / Math.PI;
+}
+
+/** 大地纬度（度）→ 椭球 Mercator y 坐标（米）。 */
+export function latToEllipsoidalMercatorY(latDeg: number): number {
+    const phi = latDeg * Math.PI / 180;
+    const eSinPhi = E_MERC * Math.sin(phi);
+    return WGS84_A * Math.log(
+        Math.tan(Math.PI / 4 + phi / 2)
+        * Math.pow((1 - eSinPhi) / (1 + eSinPhi), E_MERC / 2),
+    );
+}
+
+/**
+ * 椭球 Mercator y 坐标（米）→ 大地纬度（度）。
+ *
+ * 反解使用 Snyder 式 7-9 的不动点迭代：
+ *   t = exp(-y / a)
+ *   φ_{n+1} = π/2 − 2 · atan(t · ((1 − e sin φ_n)/(1 + e sin φ_n))^(e/2))
+ *
+ * 收敛准则：|φ_{n+1} − φ_n| < 1e-15 弧度（机器精度），最多 32 步。
+ */
+export function ellipsoidalMercatorYToLat(y: number): number {
+    const t = Math.exp(-y / WGS84_A);
+    let phi = Math.PI / 2 - 2 * Math.atan(t);
+    for (let i = 0; i < 32; i++) {
+        const eSinPhi = E_MERC * Math.sin(phi);
+        const next = Math.PI / 2 - 2 * Math.atan(
+            t * Math.pow((1 - eSinPhi) / (1 + eSinPhi), E_MERC / 2),
+        );
+        if (Math.abs(next - phi) < 1e-15) {
+            phi = next;
+            break;
+        }
+        phi = next;
+    }
+    return phi * 180 / Math.PI;
+}
+
+/**
+ * 球面 Mercator 纬度 → 椭球面 Mercator 纬度。
+ *
+ * "用 EPSG:3857 反算得到的纬度"换算成"对应椭球 Mercator y 上的纬度"。
+ * 实现：先把球面纬度转成等轴纬度 ψ，再用 ψ 通过迭代反解椭球纬度。
+ */
+export function sphericalToEllipsoidalMercatorLat(sphericalLatDeg: number): number {
+    // 球面 Mercator 的等距纬度 ψ = ln(tan(π/4 + φ/2))
+    const phi = sphericalLatDeg * Math.PI / 180;
+    const psi = Math.log(Math.tan(Math.PI / 4 + phi / 2));
+    // ψ = y / R，等价于把 y = R·ψ 输入椭球反算
+    return ellipsoidalMercatorYToLat(WGS84_A * psi);
+}
+
+/**
+ * 椭球 Mercator 纬度 → 球面 Mercator 纬度。
+ *
+ * 即：椭球 y = R · ln(tan(π/4 + φ_e/2) · ((1 − e sin φ_e)/(1 + e sin φ_e))^(e/2))
+ * 解出 φ_s 使球面 y = R · ln(tan(π/4 + φ_s/2)) 与之相等。
+ */
+export function ellipsoidalToSphericalMercatorLat(ellipsoidalLatDeg: number): number {
+    const y = latToEllipsoidalMercatorY(ellipsoidalLatDeg);
+    return sphericalMercatorYToLat(y);
+}
+
 declare const __DEV__: boolean;
