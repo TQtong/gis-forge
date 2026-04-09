@@ -61,6 +61,13 @@ export type BuiltinComputeTask =
 
 /**
  * 单次计算任务描述：管线、BindGroup、三维 workgroup 网格与可选依赖。
+ *
+ * 常规路径：encodeAll 在 beginComputePass 后自动执行
+ *   setPipeline(pipeline) → setBindGroup(0..) → dispatchWorkgroups(workgroupCount)
+ *
+ * 需要多 pass（如 Bitonic Sort 的 O(log²N) 个 dispatch）时，可提供
+ * `executeOverride` 回调自行在 compute pass encoder 上编码任意序列。
+ * 回调返回后 encodeAll 会调用 pass.end()。
  */
 export interface ComputeTaskDescriptor {
   /** 任务唯一 id，用于依赖边与调试。 */
@@ -80,6 +87,15 @@ export interface ComputeTaskDescriptor {
 
   /** 必须先完成的其它任务 id（拓扑边：依赖 -> 本任务）。 */
   readonly dependencies?: string[];
+
+  /**
+   * 可选自定义编码回调：完全接管"setPipeline / setBindGroup / dispatch"序列。
+   * 若提供，encodeAll 将忽略 pipeline / bindGroups / workgroupCount，仅调用此
+   * 函数（在 beginComputePass 和 pass.end 之间）。
+   *
+   * 典型用法：Bitonic Sort / 多 pass 卷积 / 需要循环 dispatch 的算法。
+   */
+  readonly executeOverride?: (pass: GPUComputePassEncoder) => void;
 }
 
 /**
@@ -211,6 +227,17 @@ function assertPositiveFinite(value: number, name: string): void {
  * @param workgroupSize - 每 workgroup 线程数
  * @returns workgroup 数量（至少为 1）
  */
+/**
+ * 返回大于等于 n 的最小 2 的幂。n ≤ 1 时返回 1。
+ */
+function nextPowerOf2(n: number): number {
+  if (!Number.isFinite(n) || n <= 1) return 1;
+  // 2^ceil(log2(n))
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+
 function computeWorkgroupCount1D(elementCount: number, workgroupSize: number): number {
   if (!Number.isFinite(elementCount) || elementCount <= 0) {
     throw new TypeError('computeWorkgroupCount1D: elementCount must be positive.');
@@ -412,12 +439,22 @@ export function createComputePassManager(device: GPUDevice, pipelineCache: Pipel
       assertBufferHandle(options.valueBuffer, 'valueBuffer');
       assertPositiveInt(options.count, 'count');
 
-      const need = options.count * BYTES_PER_F32;
-      if (options.keyBuffer.size < need) {
-        throw new RangeError(`createDepthSortTask: keyBuffer.size (${options.keyBuffer.size}) < ${need} bytes.`);
+      // 全局 Bitonic Sort 要求 nPad = nextPowerOf2(count)，
+      // 且 [count, nPad) 区间已预填 PAD_KEY (=f32::MAX) 哨兵（由调用方负责）。
+      const count = options.count;
+      const nPad = nextPowerOf2(count);
+      const needKey = nPad * BYTES_PER_F32;
+      const needVal = nPad * BYTES_PER_U32;
+      if (options.keyBuffer.size < needKey) {
+        throw new RangeError(
+          `createDepthSortTask: keyBuffer.size (${options.keyBuffer.size}) < ${needKey} bytes. ` +
+          `Bitonic Sort 要求缓冲区大小至少为 nextPowerOf2(count)*4 字节，并把超出 count 的位置填 PAD_KEY。`,
+        );
       }
-      if (options.valueBuffer.size < options.count * BYTES_PER_U32) {
-        throw new RangeError('createDepthSortTask: valueBuffer too small for count u32 elements.');
+      if (options.valueBuffer.size < needVal) {
+        throw new RangeError(
+          `createDepthSortTask: valueBuffer.size (${options.valueBuffer.size}) < ${needVal} bytes.`,
+        );
       }
 
       let pipeline: GPUComputePipeline;
@@ -428,36 +465,62 @@ export function createComputePassManager(device: GPUDevice, pipelineCache: Pipel
         throw new Error(`createDepthSortTask: pipeline creation failed: ${msg}`);
       }
 
-      let bindGroup: GPUBindGroup;
+      // 计算 (stage, pass_of_stage) 序列
+      //   stage = 2, 4, 8, ..., nPad
+      //   pass  = stage/2, stage/4, ..., 1
+      // 为每个 (j=pass, k=stage) 组合预分配一个独立的 uniform buffer + bind group。
+      interface Phase { j: number; k: number; bindGroup: GPUBindGroup; uniformBuffer: GPUBuffer; }
+      const phases: Phase[] = [];
+      const SORT_UNIFORM_SIZE = 16; // 4 × u32
       try {
         const layout = pipeline.getBindGroupLayout(0);
-        bindGroup = device.createBindGroup({
-          label: 'depth-sort-bg0',
-          layout,
-          entries: [
-            {
-              binding: 0,
-              resource: { buffer: options.keyBuffer.buffer, offset: 0, size: options.keyBuffer.size },
-            },
-            {
-              binding: 1,
-              resource: { buffer: options.valueBuffer.buffer, offset: 0, size: options.valueBuffer.size },
-            },
-          ],
-        });
+        for (let k = 2; k <= nPad; k <<= 1) {
+          for (let j = k >> 1; j > 0; j >>= 1) {
+            const uniformBuffer = device.createBuffer({
+              label: `depth-sort-uniform-k${k}-j${j}`,
+              size: SORT_UNIFORM_SIZE,
+              usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            const data = new Uint32Array([j, k, nPad, 0]);
+            device.queue.writeBuffer(uniformBuffer, 0, data.buffer, data.byteOffset, data.byteLength);
+
+            const bindGroup = device.createBindGroup({
+              label: `depth-sort-bg-k${k}-j${j}`,
+              layout,
+              entries: [
+                { binding: 0, resource: { buffer: options.keyBuffer.buffer, offset: 0, size: options.keyBuffer.size } },
+                { binding: 1, resource: { buffer: options.valueBuffer.buffer, offset: 0, size: options.valueBuffer.size } },
+                { binding: 2, resource: { buffer: uniformBuffer } },
+              ],
+            });
+            phases.push({ j, k, bindGroup, uniformBuffer });
+          }
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`createDepthSortTask: createBindGroup failed: ${msg}`);
+        throw new Error(`createDepthSortTask: bind group setup failed: ${msg}`);
       }
 
-      const wx = computeWorkgroupCount1D(options.count, DEPTH_SORT_WORKGROUP_SIZE);
+      const workgroupsPerPhase = computeWorkgroupCount1D(nPad, DEPTH_SORT_WORKGROUP_SIZE);
 
+      // executeOverride：循环 dispatch 所有 phases
+      const executeOverride = (pass: GPUComputePassEncoder): void => {
+        pass.setPipeline(pipeline);
+        for (let i = 0; i < phases.length; i++) {
+          pass.setBindGroup(0, phases[i].bindGroup);
+          pass.dispatchWorkgroups(workgroupsPerPhase, 1, 1);
+        }
+      };
+
+      // 任务描述：bindGroups / workgroupCount 在 executeOverride 路径下被忽略，
+      // 但仍保留为占位以便调试器可读取。
       return {
         id: `depth-sort-${uniqueId()}`,
         type: 'depth-sort',
         pipeline,
-        bindGroups: [bindGroup],
-        workgroupCount: [wx, 1, 1],
+        bindGroups: [phases[0]!.bindGroup],
+        workgroupCount: [workgroupsPerPhase, 1, 1],
+        executeOverride,
       };
     },
 
@@ -668,11 +731,15 @@ export function createComputePassManager(device: GPUDevice, pipelineCache: Pipel
           throw new Error(`encodeAll: beginComputePass failed for task "${task.id}": ${msg}`);
         }
         try {
-          pass.setPipeline(task.pipeline);
-          for (let g = 0; g < task.bindGroups.length; g++) {
-            pass.setBindGroup(g, task.bindGroups[g]!);
+          if (task.executeOverride) {
+            task.executeOverride(pass);
+          } else {
+            pass.setPipeline(task.pipeline);
+            for (let g = 0; g < task.bindGroups.length; g++) {
+              pass.setBindGroup(g, task.bindGroups[g]!);
+            }
+            pass.dispatchWorkgroups(task.workgroupCount[0], task.workgroupCount[1], task.workgroupCount[2]);
           }
-          pass.dispatchWorkgroups(task.workgroupCount[0], task.workgroupCount[1], task.workgroupCount[2]);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           try {
