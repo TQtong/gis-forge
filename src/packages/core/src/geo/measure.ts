@@ -187,6 +187,74 @@ export function centroid(ring: number[][]): [number, number] {
     return [sx / n, sy / n];
 }
 
+/**
+ * 计算多边形的**面积加权质心**（Center of Mass / 几何重心）。
+ *
+ * 与 `centroid()` 的区别：
+ * - `centroid()` 是顶点坐标的算术平均，不考虑形状，受顶点分布密度影响。
+ * - `centerOfMass()` 是真正的几何重心（假设均匀密度），等于多边形按
+ *   有向三角剖分后每个三角形重心的面积加权平均，与顶点采样密度无关。
+ *
+ * 实现：标准多边形形心公式
+ *   Cx = (1/(6A)) * Σ (x_i + x_{i+1}) * (x_i*y_{i+1} - x_{i+1}*y_i)
+ *   Cy = (1/(6A)) * Σ (y_i + y_{i+1}) * (x_i*y_{i+1} - x_{i+1}*y_i)
+ *
+ * 退化处理：面积为 0（共线/退化多边形）时回退到顶点算术平均。
+ *
+ * @param ring - 多边形外环顶点 [[x,y], ...]，首尾可不闭合
+ * @returns 重心坐标 [cx, cy]
+ *
+ * @example
+ * // L 形：顶点平均会偏向密集顶点处，重心位于真实形心
+ * centerOfMass([[0,0],[4,0],[4,2],[2,2],[2,4],[0,4]]); // ≈ [1.333, 1.333]
+ */
+export function centerOfMass(ring: number[][]): [number, number] {
+    const n = ring.length;
+    if (n === 0) {
+        return [0, 0];
+    }
+    if (n < 3) {
+        // 退化：1 或 2 个点 → 算术平均
+        let sx = 0;
+        let sy = 0;
+        for (let i = 0; i < n; i++) {
+            sx += ring[i][0];
+            sy += ring[i][1];
+        }
+        return [sx / n, sy / n];
+    }
+
+    let cx = 0;
+    let cy = 0;
+    let signedArea2 = 0;
+
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+        const x0 = ring[j][0];
+        const y0 = ring[j][1];
+        const x1 = ring[i][0];
+        const y1 = ring[i][1];
+        const cross = x0 * y1 - x1 * y0;
+        signedArea2 += cross;
+        cx += (x0 + x1) * cross;
+        cy += (y0 + y1) * cross;
+    }
+
+    // signedArea2 实际为 2A
+    if (Math.abs(signedArea2) < 1e-20) {
+        // 退化为零面积 → 回退到顶点平均
+        let sx = 0;
+        let sy = 0;
+        for (let i = 0; i < n; i++) {
+            sx += ring[i][0];
+            sy += ring[i][1];
+        }
+        return [sx / n, sy / n];
+    }
+
+    const factor = 1.0 / (3.0 * signedArea2);
+    return [cx * factor, cy * factor];
+}
+
 // ======================== 视觉中心 (Polylabel) ========================
 
 /**
