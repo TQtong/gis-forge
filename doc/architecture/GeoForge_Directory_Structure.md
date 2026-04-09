@@ -524,7 +524,8 @@ gis-forge/
 │       └── src/
 │           ├── index.ts
 │           ├── boolean/
-│           │   └── index.ts                   # Martinez-Rueda-Feito：intersection/union/difference/xor/kinks/makeValid
+│           │   ├── index.ts                   # Sutherland-Hodgman 凸裁剪 + kinks/makeValid/isValid；martinezBoolean 封装
+│           │   └── martinez.ts                # polygon-clipping 薄封装（Martinez 2009，支持凹/带孔）
 │           ├── buffer/
 │           │   └── index.ts                   # pointBuffer/lineBuffer/polygonBuffer/offsetCurve
 │           ├── interpolation/
