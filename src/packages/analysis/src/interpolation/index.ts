@@ -8,6 +8,35 @@
 import type { Position, PolygonGeometry, LineStringGeometry } from '../../../core/src/types/geometry.ts';
 import type { Feature, FeatureCollection } from '../../../core/src/types/feature.ts';
 import type { BBox2D } from '../../../core/src/types/math-types.ts';
+import {
+    ordinaryKriging,
+    fitVariogram,
+    variogram as variogramFn,
+    type VariogramModel,
+    type VariogramParams,
+    type KrigingResult,
+} from './kriging.ts';
+import { naturalNeighbor } from './natural-neighbor.ts';
+import {
+    marchingCubes,
+    type ScalarField3D,
+    type IsoSurface,
+} from './marching-cubes.ts';
+
+export {
+    ordinaryKriging,
+    fitVariogram,
+    naturalNeighbor,
+    marchingCubes,
+};
+export { variogramFn as variogram };
+export type {
+    VariogramModel,
+    VariogramParams,
+    KrigingResult,
+    ScalarField3D,
+    IsoSurface,
+};
 
 /**
  * 全局开发模式标记，生产构建定义为 false 以便 tree-shake 剥离调试代码。
@@ -812,6 +841,59 @@ export const InterpolationOps = {
         }
 
         return result;
+    },
+
+    /**
+     * 普通克里金插值（Ordinary Kriging）。
+     *
+     * 与 IDW 不同的是它通过拟合变差函数（variogram）显式建模空间相关性，
+     * 并给出估计方差。适合地统计学应用：土壤、气象、地质采样。
+     *
+     * 若未提供 params，则用 fitVariogram 启发式自动估计。
+     *
+     * @stability experimental
+     */
+    kriging(
+        points: readonly WeightedPoint[],
+        qx: number,
+        qy: number,
+        params?: VariogramParams,
+    ): KrigingResult {
+        const p = params ?? fitVariogram(points as ReadonlyArray<{ x: number; y: number; value: number }>);
+        return ordinaryKriging(
+            points as ReadonlyArray<{ x: number; y: number; value: number }>,
+            p,
+            qx,
+            qy,
+        );
+    },
+
+    /**
+     * 自然邻域插值（蒙特卡洛 Sibson 近似）。
+     *
+     * @stability experimental
+     */
+    naturalNeighbor(
+        points: readonly WeightedPoint[],
+        qx: number,
+        qy: number,
+        nSamples: number = 1024,
+    ): number {
+        return naturalNeighbor(
+            points as ReadonlyArray<{ x: number; y: number; value: number }>,
+            qx,
+            qy,
+            nSamples,
+        );
+    },
+
+    /**
+     * Marching Cubes 3D 等值面提取。
+     *
+     * @stability experimental
+     */
+    marchingCubes(field: ScalarField3D, iso: number): IsoSurface {
+        return marchingCubes(field, iso);
     },
 } as const;
 

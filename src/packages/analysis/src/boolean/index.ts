@@ -8,6 +8,17 @@
 
 import type { Position, PolygonGeometry, LinearRing } from '../../../core/src/types/geometry.ts';
 import type { Feature, FeatureCollection } from '../../../core/src/types/feature.ts';
+import {
+    martinez as _martinez,
+    type MartinezOp,
+    type MartinezPolygon,
+} from './martinez.ts';
+
+export {
+    martinez,
+    type MartinezOp,
+    type MartinezPolygon,
+} from './martinez.ts';
 
 /**
  * 全局开发模式标记，生产构建定义为 false 以便 tree-shake 剥离调试代码。
@@ -632,6 +643,78 @@ export const BooleanOps = {
      * @example
      * const valid = BooleanOps.makeValid(invalidPolygon);
      */
+    /**
+     * Martinez-Rueda-Feito 布尔运算（凹多边形 / 多孔洞正确）。
+     *
+     * 与 `intersection/union/difference/xor` 不同：那些方法底层是
+     * Sutherland-Hodgman 仅适合凸裁剪多边形；本方法是真正的扫描线
+     * 算法，对任意简单多边形都正确。
+     *
+     * @param subject 主多边形 Feature
+     * @param clipping 裁剪多边形 Feature
+     * @param op 'intersection' | 'union' | 'difference' | 'xor'
+     * @returns 结果 FeatureCollection（每个 Feature 是一个独立的输出环）
+     *
+     * @stability experimental
+     */
+    martinezBoolean(
+        subject: Feature<PolygonGeometry>,
+        clipping: Feature<PolygonGeometry>,
+        op: MartinezOp,
+    ): FeatureCollection<PolygonGeometry> {
+        if (!subject?.geometry || subject.geometry.type !== 'Polygon' ||
+            !clipping?.geometry || clipping.geometry.type !== 'Polygon') {
+            return { type: 'FeatureCollection', features: [] };
+        }
+        const subjectPoly: MartinezPolygon = subject.geometry.coordinates.map(
+            (ring) => ring.map((p) => [p[0]!, p[1]!] as [number, number]),
+        );
+        const clipPoly: MartinezPolygon = clipping.geometry.coordinates.map(
+            (ring) => ring.map((p) => [p[0]!, p[1]!] as [number, number]),
+        );
+        const result = _martinez(subjectPoly, clipPoly, op);
+        const features: Feature<PolygonGeometry>[] = result.map((rings) => ({
+            type: 'Feature' as const,
+            geometry: {
+                type: 'Polygon' as const,
+                coordinates: rings as Position[][],
+            },
+            properties: {},
+        }));
+        return { type: 'FeatureCollection', features };
+    },
+
+    /**
+     * 多边形有效性谓词。
+     *
+     * 当且仅当满足以下全部条件时返回 true：
+     * - 是合法的 Polygon Feature
+     * - 每个环至少 4 个顶点（即 ≥3 不重复 + 闭合）
+     * - 没有自相交（kinks）
+     *
+     * 这是一个布尔判断，不修改几何。要修复请用 `makeValid()`。
+     *
+     * @stability experimental
+     *
+     * @example
+     * if (!BooleanOps.isValid(poly)) {
+     *     poly = BooleanOps.makeValid(poly);
+     * }
+     */
+    isValid(polygon: Feature<PolygonGeometry>): boolean {
+        if (!polygon || !polygon.geometry || polygon.geometry.type !== 'Polygon') {
+            return false;
+        }
+        const rings = polygon.geometry.coordinates;
+        if (!rings || rings.length === 0) return false;
+        for (const ring of rings) {
+            if (!ring || ring.length < MIN_RING_VERTICES) return false;
+        }
+        // 复用 kinks() 检测自相交
+        // eslint-disable-next-line @typescript-eslint/no-use-before-define
+        return BooleanOps.kinks(polygon).length === 0;
+    },
+
     makeValid(polygon: Feature<PolygonGeometry>): Feature<PolygonGeometry> {
         // 校验输入
         if (!polygon || !polygon.geometry || polygon.geometry.type !== 'Polygon') {

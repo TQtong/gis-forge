@@ -1,7 +1,8 @@
 // ============================================================
 // analysis/buffer/index.ts — 缓冲区分析
 // 职责：对点、线、面几何对象创建指定距离的缓冲区多边形。
-// 使用 Haversine 公式计算测地线距离下的缓冲区顶点位置。
+// 使用 Vincenty 椭球测地线（WGS84）计算缓冲区顶点位置，
+// 高纬度精度优于球面 Haversine（典型 < 0.5mm）。
 // 依赖层级：analysis 可选分析包，仅消费 L0 类型。
 // ============================================================
 
@@ -12,6 +13,7 @@ import type {
     PointGeometry,
 } from '../../../core/src/types/geometry.ts';
 import type { Feature } from '../../../core/src/types/feature.ts';
+import { vincentyDirect } from '../../../core/src/geo/geodesic.ts';
 
 /**
  * 全局开发模式标记，生产构建定义为 false 以便 tree-shake 剥离调试代码。
@@ -82,34 +84,19 @@ function destination(
     distanceM: number,
     bearingDeg: number
 ): Position {
-    // 将输入转换为弧度
-    const lonRad = lon * DEG_TO_RAD;
-    const latRad = lat * DEG_TO_RAD;
-    const bearingRad = bearingDeg * DEG_TO_RAD;
-
-    // 角距离 = 地面距离 / 地球半径
-    const angularDist = distanceM / EARTH_RADIUS_M;
-
-    // Haversine 终点公式
-    const sinLat = Math.sin(latRad);
-    const cosLat = Math.cos(latRad);
-    const sinAngDist = Math.sin(angularDist);
-    const cosAngDist = Math.cos(angularDist);
-
-    // 终点纬度
-    const destLatRad = Math.asin(
-        sinLat * cosAngDist + cosLat * sinAngDist * Math.cos(bearingRad)
-    );
-
-    // 终点经度
-    const destLonRad = lonRad + Math.atan2(
-        Math.sin(bearingRad) * sinAngDist * cosLat,
-        cosAngDist - sinLat * Math.sin(destLatRad)
+    // Vincenty 椭球测地线（WGS84）：相比球面 Haversine 在高纬度精度好得多
+    // （典型距离误差 < 0.5mm vs Haversine 的 ~30m / 10km）。
+    // vincentyDirect 接口用弧度，直接转换并提取 lon/lat。
+    const result = vincentyDirect(
+        lon * DEG_TO_RAD,
+        lat * DEG_TO_RAD,
+        bearingDeg * DEG_TO_RAD,
+        distanceM,
     );
 
     // 经度归一化到 [-180, 180]
-    const destLon = ((destLonRad * RAD_TO_DEG + 540) % 360) - 180;
-    const destLat = destLatRad * RAD_TO_DEG;
+    const destLon = ((result.lon * RAD_TO_DEG + 540) % 360) - 180;
+    const destLat = result.lat * RAD_TO_DEG;
 
     return [destLon, destLat] as Position;
 }
