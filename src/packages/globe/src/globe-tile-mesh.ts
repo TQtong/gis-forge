@@ -382,6 +382,39 @@ export function getSegments(tileZ: number): number {
     return 4;                                  // z=9+: < 0.35°
 }
 
+/**
+ * 计算 z 级 / segments 段瓦片的最大弦割下沉量（chord sag），单位：米。
+ *
+ * 几何意义：当球面被三角形（弦）逼近时，弦的中点比真实球面**低 sag 米**。
+ * 这是一个**几何下界**——任何 alt < sag 的相机一定会落到 mesh 多边形面之下，
+ * 从而被 backface culling 干掉，产生「视锥进入地球内部」的错觉。
+ *
+ * 公式（一段段最大半角）：
+ *   arc_per_segment = (180° / 2^z / segments) × π/180
+ *   sag = R × (1 - cos(arc/2))
+ *
+ * 取最大维度（赤道方向 = 180°/2^z，比经度方向更大）作为最坏情形。
+ *
+ * @param tileZ - 瓦片 zoom level
+ * @param segments - 该 zoom 的细分段数（来自 {@link getSegments}）
+ * @param ellipsoidA - 椭球长半轴（默认 WGS84_A）
+ * @returns 最大弦割下沉量（米）
+ *
+ * @example
+ * tileChordSag(0, 64);  // ≈ 7600 米（最粗 LOD）
+ * tileChordSag(20, 4);  // ≈ 6e-9 米（街景级，可忽略）
+ */
+export function tileChordSag(
+    tileZ: number,
+    segments: number,
+    ellipsoidA: number = WGS84_A,
+): number {
+    const angularSpanDeg = 180 / (1 << tileZ);
+    const arcPerSegment = (angularSpanDeg / segments) * (Math.PI / 180);
+    const halfArc = arcPerSegment * 0.5;
+    return ellipsoidA * (1 - Math.cos(halfArc));
+}
+
 // ════════════════════════════════════════════════════════════════
 // §3.2 瓦片曲面细分（含裙边抗接缝）
 // ════════════════════════════════════════════════════════════════
@@ -1437,6 +1470,14 @@ export function isTileVisible_Horizon(
     ellipsoid: Ellipsoid = WGS84_ELLIPSOID,
     scheme: TilingScheme = WebMercator,
 ): boolean {
+    // ⚠ Root z=0 (WebMercator: 1 tile, Geographic: 2×1 tiles) 覆盖整个地球，
+    // 中心点的 back-face 测试没意义——无论相机在哪里，中心点的法线方向
+    // 都很可能和 cam→tile 向量同向。公式里 `tileAngularRadius = π/maxTiles`
+    // 在 maxTiles ≤ 1 时给出 π 或更大，sin(π)=0 → margin=0 → 永远返回 false。
+    // 这会导致 coveringTilesGlobe 整棵树都递归不进来。
+    // 根瓦片永远可见（它就是整个地球，总有一部分被看到）。
+    if (tz === 0) return true;
+
     // v3：通过 scheme 获取瓦片中心经纬度，替代硬编码 Mercator 公式
     const center = tileCenterInto(scheme, tz, tx, ty);
     const lngRad = center[0] * DEG2RAD;
@@ -1478,58 +1519,67 @@ export function isTileVisible_Horizon(
  * 从 VP 矩阵提取 6 个视锥平面（Gribb-Hartmann 方法）。
  * 每个平面 [a, b, c, d]，满足 ax+by+cz+d >= 0 表示在视锥内。
  *
+ * ⚠ **WebGPU/D3D 约定**（depth ∈ [0,1]）：near plane = row2（仅 row2，不加 row3）。
+ * OpenGL 约定（depth ∈ [-1,1]）near = row3 + row2 在这里是错的——会让所有 z>0
+ * 子瓦片被错误地 near-cull，最后只剩 sky 渲染。
+ *
+ * 项目的 `mat4.perspective` 输出 WebGPU 风格 ([0,1] NDC)，详见
+ * `core/src/math/mat4.ts` line 237 注释。
+ *
+ * ⚠ **零分配**：写入模块级 `_frustumPlanes` 缓冲（6 × Float32Array(4)）。
+ *
+ * 命名约定：变量 `mCR` = column C, row R（即 vp[C*4 + R]）。
+ * "math row r" = [m0r, m1r, m2r, m3r]（即点 p 的 c.r 分量）。
+ *
  * @param vp - VP 矩阵（Float32Array[16]，column-major）
- * @returns 6 个平面，顺序：Left, Right, Bottom, Top, Near, Far
  */
 function extractFrustumPlanes(vp: Float32Array): Float32Array[] {
-    // column-major 访问：m[row][col] = vp[col * 4 + row]
-    const row = (r: number, c: number): number => vp[c * 4 + r];
+    // column-major 索引：mCR = vp[C*4 + R]
+    const m00 = vp[0],  m01 = vp[1],  m02 = vp[2],  m03 = vp[3];
+    const m10 = vp[4],  m11 = vp[5],  m12 = vp[6],  m13 = vp[7];
+    const m20 = vp[8],  m21 = vp[9],  m22 = vp[10], m23 = vp[11];
+    const m30 = vp[12], m31 = vp[13], m32 = vp[14], m33 = vp[15];
 
-    const planes: Float32Array[] = [];
+    // "math row r" 是 [m0r, m1r, m2r, m3r]——计算 c.r = (row r) · p
+    // Left:   c.x + c.w >= 0  →  (row 0) + (row 3)
+    _normalizePlaneInto(_frustumPlanes[0],
+        m00 + m03, m10 + m13, m20 + m23, m30 + m33);
+    // Right:  -c.x + c.w >= 0  →  (row 3) - (row 0)
+    _normalizePlaneInto(_frustumPlanes[1],
+        m03 - m00, m13 - m10, m23 - m20, m33 - m30);
+    // Bottom: c.y + c.w >= 0  →  (row 1) + (row 3)
+    _normalizePlaneInto(_frustumPlanes[2],
+        m01 + m03, m11 + m13, m21 + m23, m31 + m33);
+    // Top:    -c.y + c.w >= 0  →  (row 3) - (row 1)
+    _normalizePlaneInto(_frustumPlanes[3],
+        m03 - m01, m13 - m11, m23 - m21, m33 - m31);
+    // Near (WebGPU [0,1]): c.z >= 0  →  (row 2)  ← 与 OpenGL 不同！
+    _normalizePlaneInto(_frustumPlanes[4],
+        m02, m12, m22, m32);
+    // Far:    -c.z + c.w >= 0  →  (row 3) - (row 2)
+    _normalizePlaneInto(_frustumPlanes[5],
+        m03 - m02, m13 - m12, m23 - m22, m33 - m32);
 
-    // Left:   row3 + row0
-    planes.push(normalizePlane(
-        row(3, 0) + row(0, 0), row(3, 1) + row(0, 1),
-        row(3, 2) + row(0, 2), row(3, 3) + row(0, 3),
-    ));
-    // Right:  row3 - row0
-    planes.push(normalizePlane(
-        row(3, 0) - row(0, 0), row(3, 1) - row(0, 1),
-        row(3, 2) - row(0, 2), row(3, 3) - row(0, 3),
-    ));
-    // Bottom: row3 + row1
-    planes.push(normalizePlane(
-        row(3, 0) + row(1, 0), row(3, 1) + row(1, 1),
-        row(3, 2) + row(1, 2), row(3, 3) + row(1, 3),
-    ));
-    // Top:    row3 - row1
-    planes.push(normalizePlane(
-        row(3, 0) - row(1, 0), row(3, 1) - row(1, 1),
-        row(3, 2) - row(1, 2), row(3, 3) - row(1, 3),
-    ));
-    // Near:   row3 + row2
-    planes.push(normalizePlane(
-        row(3, 0) + row(2, 0), row(3, 1) + row(2, 1),
-        row(3, 2) + row(2, 2), row(3, 3) + row(2, 3),
-    ));
-    // Far:    row3 - row2
-    planes.push(normalizePlane(
-        row(3, 0) - row(2, 0), row(3, 1) - row(2, 1),
-        row(3, 2) - row(2, 2), row(3, 3) - row(2, 3),
-    ));
-
-    return planes;
+    return _frustumPlanes;
 }
 
+/** 模块级常驻 frustum plane 缓冲——零分配复用 */
+const _frustumPlanes: Float32Array[] = [
+    new Float32Array(4), new Float32Array(4), new Float32Array(4),
+    new Float32Array(4), new Float32Array(4), new Float32Array(4),
+];
+
 /**
- * 归一化平面方程 (a,b,c,d)，使 (a,b,c) 为单位向量。
- * 归一化后 dist = a*x + b*y + c*z + d 直接是到平面的有符号距离。
+ * 把 (a,b,c,d) 归一化（让 (a,b,c) 为单位向量）后写入指定缓冲。
+ * 零分配版本，替代旧的 `normalizePlane` (返回新 Float32Array)。
  */
-function normalizePlane(a: number, b: number, c: number, d: number): Float32Array {
+function _normalizePlaneInto(out: Float32Array, a: number, b: number, c: number, d: number): void {
     const len = Math.sqrt(a * a + b * b + c * c);
-    // 防御除零：平面法线长度不应为零，但退化矩阵可能导致此情况
     const invLen = len > 1e-10 ? 1.0 / len : 0;
-    return new Float32Array([a * invLen, b * invLen, c * invLen, d * invLen]);
+    out[0] = a * invLen;
+    out[1] = b * invLen;
+    out[2] = c * invLen;
+    out[3] = d * invLen;
 }
 
 /**
@@ -1548,21 +1598,31 @@ export function isTileVisible_Frustum(
     vpMatrix: Float32Array,
     camECEF: [number, number, number],
 ): boolean {
-    const planes = extractFrustumPlanes(vpMatrix);
+    extractFrustumPlanes(vpMatrix); // 写入 _frustumPlanes
+    return _testSphereAgainstCachedFrustum(bsCenter, bsRadius, camECEF);
+}
 
+/**
+ * 内部：用上一次 `extractFrustumPlanes` 留在 `_frustumPlanes` 里的 6 个平面，
+ * 测试给定 ECEF 包围球的可见性。**不重新提取平面**，零分配。
+ *
+ * 调用方必须保证 `_frustumPlanes` 自上一次 `extractFrustumPlanes` 后没被覆盖。
+ */
+function _testSphereAgainstCachedFrustum(
+    bsCenter: [number, number, number],
+    bsRadius: number,
+    camECEF: [number, number, number],
+): boolean {
     // 包围球中心转为 RTE 坐标（Float64 减法保持精度）
     const cx = bsCenter[0] - camECEF[0];
     const cy = bsCenter[1] - camECEF[1];
     const cz = bsCenter[2] - camECEF[2];
 
-    for (let pi = 0; pi < planes.length; pi++) {
-        const p = planes[pi];
-        // 有符号距离：正值 = 在平面内侧，负值 = 在平面外侧
+    for (let pi = 0; pi < 6; pi++) {
+        const p = _frustumPlanes[pi];
         const dist = p[0] * cx + p[1] * cy + p[2] * cz + p[3];
-        // 完全在平面外（距离 < -半径）→ 不可见
         if (dist < -bsRadius) { return false; }
     }
-
     return true;
 }
 
@@ -1575,6 +1635,141 @@ const SSE_THRESHOLD = 2.0;
 
 /** 四叉树递归栈上限（防止无限递归） */
 const MAX_RECURSE_DEPTH = 25;
+
+// ── per-frame frustum-culling 工具（模块级复用） ──
+/** 当前 coveringTilesGlobe 调用的 vpMatrix Float32 副本（避免每次 _subdivide 转换） */
+const _vpF32 = new Float32Array(16);
+/** 当前 coveringTilesGlobe 调用的相机 ECEF 元组 */
+const _camEcefTuple: [number, number, number] = [0, 0, 0];
+
+// ── per-tile geometric error 缓存 ──
+//
+// SSE 公式 = (geomError × viewportH) / (camDist × 2 × tanHalfFov)
+// 其中 geomError = 瓦片地面对角线长度（米）只取决于 (z, x, y)，与相机无关，
+// 可以**永久缓存**，避免每帧 / 每子分裂时重算 sin/cos/sqrt。
+//
+// 对于 WebMercator scheme，几何误差只取决于 (z, y)（相同纬度行的瓦片大小相同），
+// 但为了支持 Geographic / 自定义 scheme，我们仍按 (schemeId, z, x, y) 缓存。
+// 用 Map<number, number> 比 Map<string, number> 更快。
+/** 几何误差缓存：key = encode(schemeId, z, x, y) → meters */
+const _geomErrorCache = new Map<number, number>();
+/** 缓存命中阈值：超过这个值就清空（防止极端缩放下无限增长） */
+const GEOM_ERROR_CACHE_LIMIT = 65536;
+
+function _geomErrorKey(schemeId: number, z: number, x: number, y: number): number {
+    // 4-bit scheme + 5-bit z + 24-bit x + 24-bit y → 57 bits, fits in JS number
+    return (schemeId * 0x20 + z) * 0x1000000 * 0x1000000 + x * 0x1000000 + y;
+}
+
+function _getOrComputeGeomError(
+    scheme: TilingScheme,
+    z: number, x: number, y: number,
+    ell: Ellipsoid,
+): number {
+    const key = _geomErrorKey(scheme.id, z, x, y);
+    const cached = _geomErrorCache.get(key);
+    if (cached !== undefined) return cached;
+
+    const bounds = tileBoundsInto(scheme, z, x, y);
+    const latSpan = (bounds[3] - bounds[1]) * DEG2RAD;
+    const lngSpan = (bounds[2] - bounds[0]) * DEG2RAD;
+    const avgLatRad = ((bounds[3] + bounds[1]) / 2) * DEG2RAD;
+    const dLat = latSpan * ell.a;
+    const dLng = lngSpan * ell.a * Math.cos(avgLatRad);
+    const diag = Math.sqrt(dLat * dLat + dLng * dLng);
+
+    if (_geomErrorCache.size >= GEOM_ERROR_CACHE_LIMIT) {
+        _geomErrorCache.clear();
+    }
+    _geomErrorCache.set(key, diag);
+    return diag;
+}
+
+/**
+ * 计算瓦片的真实 ECEF 包围球。
+ *
+ * **必须用真实 3D 坐标**——之前的平面近似 `0.5 * sqrt(dLat² + dLng²)` 在低 z
+ * （大瓦片）下严重偏小，因为地球曲率导致角落到中心的 3D 距离远大于
+ * 投影到切平面的距离。例如 z=1 的 90°×85° 瓦片：
+ *   - 平面近似 ≈ 6 M 米（错误）
+ *   - 真实 3D 距离 ≈ 4.5 M 米但中心点也偏离（综合更大）
+ *
+ * 实现：取瓦片中心 + 4 个角共 5 个 ECEF 点，半径 = max(centerToCorner)。
+ *
+ * @param scheme - 瓦片方案
+ * @param z - zoom
+ * @param x - 列号
+ * @param y - 行号
+ * @param ell - 椭球体参数
+ * @param outCenter - 输出中心 ECEF [x, y, z]
+ * @returns 半径（米）
+ */
+function _tileBoundingSphere(
+    scheme: TilingScheme,
+    z: number, x: number, y: number,
+    ell: Ellipsoid,
+    outCenter: [number, number, number],
+): number {
+    // 检查缓存
+    const cacheKey = _geomErrorKey(scheme.id, z, x, y);
+    const cachedBS = _bsCache.get(cacheKey);
+    if (cachedBS !== undefined) {
+        outCenter[0] = cachedBS[0];
+        outCenter[1] = cachedBS[1];
+        outCenter[2] = cachedBS[2];
+        return cachedBS[3];
+    }
+
+    // 中心 ECEF
+    const center = tileCenterInto(scheme, z, x, y);
+    const cLngR = center[0] * DEG2RAD;
+    const cLatR = center[1] * DEG2RAD;
+    localGeodeticToECEF(_ecefBuf, cLngR, cLatR, 0, ell);
+    const cx = _ecefBuf[0];
+    const cy = _ecefBuf[1];
+    const cz = _ecefBuf[2];
+
+    // 4 个角 ECEF
+    const bounds = tileBoundsInto(scheme, z, x, y);
+    const w = bounds[0] * DEG2RAD;
+    const s = bounds[1] * DEG2RAD;
+    const e = bounds[2] * DEG2RAD;
+    const n = bounds[3] * DEG2RAD;
+
+    let maxR2 = 0;
+    const corners: Array<[number, number]> = [[w, s], [e, s], [e, n], [w, n]];
+    for (let i = 0; i < 4; i++) {
+        localGeodeticToECEF(_ecefBuf, corners[i][0], corners[i][1], 0, ell);
+        const dx = _ecefBuf[0] - cx;
+        const dy = _ecefBuf[1] - cy;
+        const dz = _ecefBuf[2] - cz;
+        const r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 > maxR2) maxR2 = r2;
+    }
+    const radius = Math.sqrt(maxR2) + 1.0; // +1m 数值边距
+
+    outCenter[0] = cx;
+    outCenter[1] = cy;
+    outCenter[2] = cz;
+
+    // 缓存
+    if (_bsCache.size >= GEOM_ERROR_CACHE_LIMIT) {
+        _bsCache.clear();
+    }
+    _bsCache.set(cacheKey, new Float64Array([cx, cy, cz, radius]));
+
+    return radius;
+}
+
+/** 包围球缓存：key 编码同 _geomErrorCache，值 = Float64Array[4] = [cx, cy, cz, radius] */
+const _bsCache = new Map<number, Float64Array>();
+
+/**
+ * 把 Float64 vpMatrix 截断为 Float32（写入模块级 _vpF32 缓冲）。
+ */
+function _toF32VP(vp64: Float64Array): void {
+    for (let i = 0; i < 16; i++) _vpF32[i] = vp64[i];
+}
 
 /**
  * 计算 3D Globe 视口覆盖的瓦片列表。
@@ -1616,6 +1811,15 @@ export function coveringTilesGlobe(
     const result: GlobeTileID[] = [];
     const ell = camera.ellipsoid ?? WGS84_ELLIPSOID;
 
+    // ── 准备 frustum culling 所需缓冲（每帧一次） ──
+    _toF32VP(camera.vpMatrix);
+    _camEcefTuple[0] = camera.cameraECEF[0];
+    _camEcefTuple[1] = camera.cameraECEF[1];
+    _camEcefTuple[2] = camera.cameraECEF[2];
+    // **每帧一次**提取 6 个 frustum 平面，写入 _frustumPlanes 缓冲。
+    // _subdivide 内部直接读 _frustumPlanes，不再每瓦片重提取。
+    extractFrustumPlanes(_vpF32);
+
     // 从 zoom=0 根瓦片开始递归（Geographic: 2×1, WebMercator: 1×1）
     const rootNumX = scheme.numX(0);
     const rootNumY = scheme.numY(0);
@@ -1634,6 +1838,9 @@ export function coveringTilesGlobe(
     }
     return result;
 }
+
+/** _subdivide 内复用的瓦片包围球中心缓冲 */
+const _subdivBSCenter: [number, number, number] = [0, 0, 0];
 
 /**
  * 四叉树递归：Horizon Cull → SSE 判定 → 分裂或输出。
@@ -1658,25 +1865,36 @@ function _subdivide(
     // 防御：递归深度保护
     if (z > MAX_RECURSE_DEPTH) return;
 
-    // 1. Horizon Cull——背面则整棵子树跳过
+    // 1. Horizon Cull——背面则整棵子树跳过（廉价检查，先做）
     if (!isTileVisible_Horizon(x, y, z, camera.cameraECEF, ell, scheme)) {
         return;
     }
 
-    // 2. 到达最大 zoom → 输出
+    // 2. Frustum Cull——视锥外则整棵子树跳过
+    //    z=0 不做（一定可见且 root 必须递归进入）
+    //    使用 _testSphereAgainstCachedFrustum：依赖 coveringTilesGlobe 入口已调用
+    //    extractFrustumPlanes，此处零分配。
+    if (z > 0) {
+        const radius = _tileBoundingSphere(scheme, z, x, y, ell, _subdivBSCenter);
+        if (!_testSphereAgainstCachedFrustum(_subdivBSCenter, radius, _camEcefTuple)) {
+            return;
+        }
+    }
+
+    // 3. 到达最大 zoom → 输出
     if (z >= targetZoom) {
         _emitTile(scheme, z, x, y, camera, result);
         return;
     }
 
-    // 3. SSE 判定——屏幕空间误差低于阈值则不再分裂
+    // 4. SSE 判定——屏幕空间误差低于阈值则不再分裂
     const sse = _estimateSSE(scheme, z, x, y, camera);
     if (sse < SSE_THRESHOLD) {
         _emitTile(scheme, z, x, y, camera, result);
         return;
     }
 
-    // 4. 分裂为 4 个子节点
+    // 5. 分裂为 4 个子节点
     const cz = z + 1;
     const cx = x * 2;
     const cy = y * 2;
@@ -1739,15 +1957,9 @@ function _estimateSSE(
         center[0] * DEG2RAD, center[1] * DEG2RAD,
     );
 
-    // 瓦片地面对角线长度（米）的粗略估计
-    const bounds = tileBoundsInto(scheme, z, x, y);
-    const latSpan = (bounds[3] - bounds[1]) * DEG2RAD;
-    const lngSpan = (bounds[2] - bounds[0]) * DEG2RAD;
-    // 纬度中点用于经度→米的 cos 修正
-    const avgLatRad = ((bounds[3] + bounds[1]) / 2) * DEG2RAD;
-    const dLat = latSpan * WGS84_A;
-    const dLng = lngSpan * WGS84_A * Math.cos(avgLatRad);
-    const diag = Math.sqrt(dLat * dLat + dLng * dLng);
+    // 瓦片地面对角线长度（米）——从永久缓存读取
+    const ell = camera.ellipsoid ?? WGS84_ELLIPSOID;
+    const diag = _getOrComputeGeomError(scheme, z, x, y, ell);
 
     // 到相机的距离（米），取大圆距离 + 海拔，至少 1m 防除零
     const camDist = Math.max(dist + camera.altitude, 1.0);
