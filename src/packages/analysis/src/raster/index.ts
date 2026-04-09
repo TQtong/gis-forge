@@ -8,6 +8,64 @@
 import type { BBox2D } from '../../../core/src/types/math-types.ts';
 import type { LineStringGeometry } from '../../../core/src/types/geometry.ts';
 import type { FeatureCollection } from '../../../core/src/types/feature.ts';
+import {
+    fillSinks as _fillSinks,
+    flowDirection as _flowDirection,
+    flowAccumulation as _flowAccumulation,
+    watershed as _watershed,
+    D8_DIRECTIONS,
+    type FlowDirectionResult,
+    type FlowAccumulationResult,
+} from './hydrology.ts';
+
+export {
+    fillSinks,
+    flowDirection,
+    flowAccumulation,
+    watershed,
+    D8_DIRECTIONS,
+} from './hydrology.ts';
+export type { FlowDirectionResult, FlowAccumulationResult } from './hydrology.ts';
+
+import {
+    localAdd as _localAdd,
+    localSub as _localSub,
+    localMul as _localMul,
+    localDiv as _localDiv,
+    localPow as _localPow,
+    localMin as _localMin,
+    localMax as _localMax,
+    localSum as _localSum,
+    localMean as _localMean,
+    localAbs as _localAbs,
+    localSqrt as _localSqrt,
+    localLog as _localLog,
+    localExp as _localExp,
+    localClamp as _localClamp,
+    localCondition as _localCondition,
+    localCombine as _localCombine,
+    evaluate as _mapAlgebraEvaluate,
+} from './map-algebra.ts';
+
+export {
+    localAdd,
+    localSub,
+    localMul,
+    localDiv,
+    localPow,
+    localMin,
+    localMax,
+    localSum,
+    localMean,
+    localAbs,
+    localSqrt,
+    localLog,
+    localExp,
+    localClamp,
+    localCondition,
+    localCombine,
+    evaluate as mapAlgebraEvaluate,
+} from './map-algebra.ts';
 
 /**
  * 全局开发模式标记，生产构建定义为 false 以便 tree-shake 剥离调试代码。
@@ -702,6 +760,98 @@ export const RasterOps = {
         }
 
         return { values: result, rows: dem.rows, cols: dem.cols, bbox: dem.bbox };
+    },
+
+    /**
+     * 填洼（Priority-Flood）。消除 DEM 中的局部最低点，返回填洼后的 DEMData。
+     * 所有后续水文分析（流向/流量/流域）的先决条件。
+     *
+     * @stability experimental
+     */
+    fillSinks(dem: DEMData): DEMData {
+        return _fillSinks(dem);
+    },
+
+    /**
+     * D8 流向。每格指向 8 邻居中最陡下坡方向，使用 ESRI 编码
+     * (1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE, 0=NONE)。
+     * 建议先调用 fillSinks。
+     *
+     * @stability experimental
+     */
+    flowDirection(dem: DEMData): FlowDirectionResult {
+        return _flowDirection(dem);
+    },
+
+    /**
+     * 流量累积（基于 D8 流向的拓扑 BFS，O(N)）。
+     * 每个 cell 的值 = 汇入此 cell 的上游 cell 数量 + 1（自身贡献）。
+     * 阈值化后可得到河网。
+     *
+     * @stability experimental
+     */
+    flowAccumulation(flow: FlowDirectionResult): FlowAccumulationResult {
+        return _flowAccumulation(flow);
+    },
+
+    /**
+     * 流域范围提取。从出水口反向 BFS 追溯所有上游 cell，返回 Uint8Array mask。
+     *
+     * @stability experimental
+     */
+    watershed(flow: FlowDirectionResult, outletRow: number, outletCol: number): Uint8Array {
+        return _watershed(flow, outletRow, outletCol);
+    },
+
+    // ========================================================
+    // Map Algebra（Tomlin 栅格代数）
+    // ========================================================
+
+    /** 逐像元加（栅格+栅格 或 栅格+标量）。NaN 传播。 */
+    localAdd(a: DEMData | number, b: DEMData | number): DEMData { return _localAdd(a, b); },
+    /** 逐像元减。 */
+    localSub(a: DEMData | number, b: DEMData | number): DEMData { return _localSub(a, b); },
+    /** 逐像元乘。 */
+    localMul(a: DEMData | number, b: DEMData | number): DEMData { return _localMul(a, b); },
+    /** 逐像元除（除 0 → NaN）。 */
+    localDiv(a: DEMData | number, b: DEMData | number): DEMData { return _localDiv(a, b); },
+    /** 逐像元幂。 */
+    localPow(a: DEMData | number, b: DEMData | number): DEMData { return _localPow(a, b); },
+    /** 逐像元最小。 */
+    localMin(a: DEMData | number, b: DEMData | number): DEMData { return _localMin(a, b); },
+    /** 逐像元最大。 */
+    localMax(a: DEMData | number, b: DEMData | number): DEMData { return _localMax(a, b); },
+    /** N 个栅格逐像元求和。 */
+    localSum(rasters: readonly DEMData[]): DEMData { return _localSum(rasters); },
+    /** N 个栅格逐像元求算术平均。 */
+    localMean(rasters: readonly DEMData[]): DEMData { return _localMean(rasters); },
+    /** 逐像元绝对值。 */
+    localAbs(a: DEMData): DEMData { return _localAbs(a); },
+    /** 逐像元平方根。 */
+    localSqrt(a: DEMData): DEMData { return _localSqrt(a); },
+    /** 逐像元自然对数。 */
+    localLog(a: DEMData): DEMData { return _localLog(a); },
+    /** 逐像元 e^x。 */
+    localExp(a: DEMData): DEMData { return _localExp(a); },
+    /** 逐像元钳位到 [lo, hi]。 */
+    localClamp(a: DEMData, lo: number, hi: number): DEMData { return _localClamp(a, lo, hi); },
+    /** 条件选择：cond > 0 则 trueVal，否则 falseVal。 */
+    localCondition(cond: DEMData, trueVal: DEMData | number, falseVal: DEMData | number): DEMData {
+        return _localCondition(cond, trueVal, falseVal);
+    },
+    /** 自定义 per-cell 多栅格运算。 */
+    localCombine(rasters: readonly DEMData[], fn: (values: number[]) => number): DEMData {
+        return _localCombine(rasters, fn);
+    },
+    /**
+     * 表达式求值：对栅格应用算术表达式，支持 + - * / ^ ( ) 与内置函数
+     * abs/sqrt/log/exp/sin/cos/tan/min/max/pow。
+     *
+     * @example
+     * RasterOps.mapAlgebraEvaluate("sqrt(a*a + b*b)", { a: dx, b: dy });
+     */
+    mapAlgebraEvaluate(expression: string, rasterMap: Readonly<Record<string, DEMData>>): DEMData {
+        return _mapAlgebraEvaluate(expression, rasterMap);
     },
 } as const;
 
