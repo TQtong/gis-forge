@@ -495,3 +495,151 @@ export function batchGeodeticToECEF(
         );
     }
 }
+
+// ============================================================
+// ENU 局部切平面坐标
+// ============================================================
+
+const _enuTmpO: Vec3d = new Float64Array(3) as Vec3d;
+
+/**
+ * ECEF → ENU（East-North-Up）局部切平面坐标。
+ *
+ * 给定参考原点（lonRad0, latRad0, alt0），把一个 ECEF 点变换到以原点为中心、
+ * X=East / Y=North / Z=Up 的局部直角坐标系。
+ *
+ * 推导：相对原点的 ECEF 偏移 → 通过原点处旋转矩阵投影到局部三轴。
+ *   R = [[-sinλ,        cosλ,         0     ],
+ *        [-sinφ·cosλ,  -sinφ·sinλ,    cosφ ],
+ *        [ cosφ·cosλ,   cosφ·sinλ,    sinφ ]]
+ *
+ * 适用范围：原点附近 km 量级（建模 / Camera-Relative Render / AR）。
+ * 离原点越远精度越差。
+ *
+ * @param out 输出 [east, north, up]（米），可重用避免分配
+ * @param x   被测点 ECEF x（米）
+ * @param y   被测点 ECEF y（米）
+ * @param z   被测点 ECEF z（米）
+ * @param lonRad0 参考原点经度（弧度）
+ * @param latRad0 参考原点纬度（弧度）
+ * @param alt0 参考原点高程（米）
+ * @returns out 引用
+ */
+export function ecefToENU(
+    out: Vec3d,
+    x: number, y: number, z: number,
+    lonRad0: number, latRad0: number, alt0: number = 0,
+): Vec3d {
+    geodeticToECEF(_enuTmpO, lonRad0, latRad0, alt0);
+    const dx = x - _enuTmpO[0];
+    const dy = y - _enuTmpO[1];
+    const dz = z - _enuTmpO[2];
+
+    const sinL = Math.sin(lonRad0);
+    const cosL = Math.cos(lonRad0);
+    const sinP = Math.sin(latRad0);
+    const cosP = Math.cos(latRad0);
+
+    out[0] = -sinL * dx + cosL * dy;
+    out[1] = -sinP * cosL * dx - sinP * sinL * dy + cosP * dz;
+    out[2] = cosP * cosL * dx + cosP * sinL * dy + sinP * dz;
+    return out;
+}
+
+/**
+ * ENU → ECEF 反变换（ecefToENU 的逆运算）。
+ *
+ * @param out 输出 ECEF [x, y, z]（米）
+ * @param east 被测点东向（米）
+ * @param north 被测点北向（米）
+ * @param up 被测点天向（米）
+ * @param lonRad0 参考原点经度（弧度）
+ * @param latRad0 参考原点纬度（弧度）
+ * @param alt0 参考原点高程（米）
+ * @returns out 引用
+ */
+export function enuToECEF(
+    out: Vec3d,
+    east: number, north: number, up: number,
+    lonRad0: number, latRad0: number, alt0: number = 0,
+): Vec3d {
+    geodeticToECEF(_enuTmpO, lonRad0, latRad0, alt0);
+
+    const sinL = Math.sin(lonRad0);
+    const cosL = Math.cos(lonRad0);
+    const sinP = Math.sin(latRad0);
+    const cosP = Math.cos(latRad0);
+
+    // R^T 应用于 (east, north, up)
+    const dx = -sinL * east - sinP * cosL * north + cosP * cosL * up;
+    const dy = cosL * east - sinP * sinL * north + cosP * sinL * up;
+    const dz = cosP * north + sinP * up;
+
+    out[0] = _enuTmpO[0] + dx;
+    out[1] = _enuTmpO[1] + dy;
+    out[2] = _enuTmpO[2] + dz;
+    return out;
+}
+
+const _enuTmpEcef: Vec3d = new Float64Array(3) as Vec3d;
+
+/**
+ * 经纬度（弧度）→ ENU 便捷函数：先 geodeticToECEF 再 ecefToENU。
+ */
+export function geodeticToENU(
+    out: Vec3d,
+    lonRad: number, latRad: number, alt: number,
+    lonRad0: number, latRad0: number, alt0: number = 0,
+): Vec3d {
+    geodeticToECEF(_enuTmpEcef, lonRad, latRad, alt);
+    return ecefToENU(out, _enuTmpEcef[0], _enuTmpEcef[1], _enuTmpEcef[2], lonRad0, latRad0, alt0);
+}
+
+// ============================================================
+// 椭球面最近点
+// ============================================================
+
+/**
+ * 给定 ECEF 空间中一个任意点 P，求 WGS84 椭球面上**距离 P 最近**的点 Q。
+ *
+ * 思路：把 P 转换为大地坐标 (lon, lat, alt) 后，把 alt 设为 0 再转回 ECEF。
+ * 这是标准方法——`ecefToGeodetic` 的几何含义就是"P 到椭球面的垂足"加上
+ * 沿法线方向的高度偏移 alt。丢弃 alt 后剩下的即为最近点。
+ *
+ * 精度：与 `ecefToGeodetic` 的 Bowring / Heiskanen-Moritz 迭代精度一致
+ * （通常 < 1cm）。
+ *
+ * @param out 输出 ECEF [x, y, z]
+ * @param px 查询点 ECEF x（米）
+ * @param py 查询点 ECEF y（米）
+ * @param pz 查询点 ECEF z（米）
+ * @returns out 引用
+ */
+const _closestTmpGeo: Vec3d = new Float64Array(3) as Vec3d;
+
+export function closestPointOnEllipsoid(
+    out: Vec3d,
+    px: number, py: number, pz: number,
+): Vec3d {
+    // 转成大地坐标：geodetic[0] = lon (rad), [1] = lat (rad), [2] = alt (m)
+    ecefToGeodetic(_closestTmpGeo, px, py, pz);
+    // alt = 0 再转回 ECEF
+    geodeticToECEF(out, _closestTmpGeo[0], _closestTmpGeo[1], 0);
+    return out;
+}
+
+/**
+ * 计算任意点到椭球面的距离（沿椭球面法线方向的高度，可为负）。
+ *
+ * 返回 `ecefToGeodetic` 解算出的 altitude，即该点相对椭球面的高度：
+ * 正值 = 在椭球面外部，负值 = 在椭球面内部。
+ *
+ * @param px ECEF x
+ * @param py ECEF y
+ * @param pz ECEF z
+ * @returns 高度（米）
+ */
+export function distanceToEllipsoid(px: number, py: number, pz: number): number {
+    ecefToGeodetic(_closestTmpGeo, px, py, pz);
+    return _closestTmpGeo[2];
+}

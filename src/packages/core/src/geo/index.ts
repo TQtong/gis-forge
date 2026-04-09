@@ -20,6 +20,11 @@ export {
     vincentyDistance,
     haversineDistance,
     batchGeodeticToECEF,
+    ecefToENU,
+    enuToECEF,
+    geodeticToENU,
+    closestPointOnEllipsoid,
+    distanceToEllipsoid,
 } from './ellipsoid.ts';
 
 export type { Vec2d, Vec3d } from './ellipsoid.ts';
@@ -54,7 +59,13 @@ export {
     midpoint,
     intermediatePoint,
     nearestPointOnLine,
+    karneyDistance,
+    karneyInitialBearing,
+    karneyInverse,
+    karneyDirect,
 } from './geodesic.ts';
+
+export type { KarneyInverseResult, KarneyDirectResult } from './geodesic.ts';
 
 export type { VincentyDirectResult, NearestPointResult } from './geodesic.ts';
 
@@ -67,6 +78,7 @@ export {
     length,
     geodesicLength,
     centroid,
+    centerOfMass,
     polylabel,
     minBoundingCircle,
     pointToLineDistance,
@@ -83,6 +95,20 @@ export {
     wgs84ToGcj02,
     bd09ToGcj02,
     gcj02ToBd09,
+    equirectangularForward,
+    equirectangularInverse,
+    lambertAzimuthalForward,
+    lambertAzimuthalInverse,
+    helmert7,
+    helmert7Inverse,
+    helmert7CoordinateFrame,
+    helmert7CoordinateFrameInverse,
+    latToSphericalMercatorY,
+    sphericalMercatorYToLat,
+    latToEllipsoidalMercatorY,
+    ellipsoidalMercatorYToLat,
+    sphericalToEllipsoidalMercatorLat,
+    ellipsoidalToSphericalMercatorLat,
 } from './projection-math.ts';
 
 // ============================================================
