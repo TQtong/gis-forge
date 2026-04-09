@@ -69,6 +69,8 @@ import {
     renderAtmosphere,
     renderGlobeTiles,
     renderSkyDome,
+    computeMinSafeAltitudeFromTiles,
+    flushPendingDestroys,
 } from './globe-render.ts';
 import {
     clearMeshCache,
@@ -139,7 +141,12 @@ export class Globe3D {
         tileCache: new Map(),
         tileLRU: [],
         meshCache: new Map(),
-        tileUrlTemplate: TILE_URL_TEMPLATE_DEFAULT,
+        // 默认 tileUrlTemplate = ''（imageryEnabled=false），用户没显式提供
+        // imagery.url 时不发起任何网络请求——纯色地球 / 离线场景适用。
+        tileUrlTemplate: '',
+        imageryEnabled: false,
+        pendingDestroyTextures: [],
+        pendingDestroyBuffers: [],
     };
 
     // ─── 极地冰盖（见 globe-polar-cap）────────────────────
@@ -397,7 +404,15 @@ export class Globe3D {
         this._southPolarTextureUrl = options.polarCaps?.southTextureUrl;
 
         // ── 影像 URL ──
-        this._tileState.tileUrlTemplate = options.imagery?.url ?? TILE_URL_TEMPLATE_DEFAULT;
+        // 仅当用户显式提供 imagery.url 时才启用瓦片加载；否则保持纯色地球（fallback 白纹理 + lighting）。
+        // 这避免了"用户什么都没设置就给 OSM 发请求 → CORS 失败 → 重试洪水 → CPU 100%"的问题。
+        if (options.imagery?.url) {
+            this._tileState.tileUrlTemplate = options.imagery.url;
+            this._tileState.imageryEnabled = true;
+        } else {
+            this._tileState.tileUrlTemplate = '';
+            this._tileState.imageryEnabled = false;
+        }
 
         // ── 交互选项 ──
         this._enableRotate = options.enableRotate !== false;
@@ -871,8 +886,9 @@ export class Globe3D {
             alpha: options.alpha ?? 1.0,
         });
 
-        // 切换瓦片 URL 模板为最新添加的图层
+        // 切换瓦片 URL 模板为最新添加的图层 + 启用影像加载
         this._tileState.tileUrlTemplate = options.url;
+        this._tileState.imageryEnabled = true;
 
         // 清空缓存以加载新瓦片
         clearTileCache(this._tileState);
@@ -902,12 +918,14 @@ export class Globe3D {
 
         this._imageryLayers.delete(id);
 
-        // 回退到默认 URL 或最后一个图层
+        // 回退到最后一个图层；如果没有图层，关闭瓦片加载（不再用 OSM 默认）
         if (this._imageryLayers.size > 0) {
             const last = Array.from(this._imageryLayers.values()).pop()!;
             this._tileState.tileUrlTemplate = last.url;
+            this._tileState.imageryEnabled = true;
         } else {
-            this._tileState.tileUrlTemplate = TILE_URL_TEMPLATE_DEFAULT;
+            this._tileState.tileUrlTemplate = '';
+            this._tileState.imageryEnabled = false;
         }
 
         clearTileCache(this._tileState);
@@ -1871,11 +1889,18 @@ export class Globe3D {
 
         // ── 计算可见瓦片 ──
         let tiles = coveringTilesGlobe(globeCam);
+
+        // ── B 阶段：基于本帧最粗 LOD 的弦割下沉量动态推送相机的最小安全高度 ──
+        const minSafeAlt = computeMinSafeAltitudeFromTiles(tiles);
+        this._camera3D.setMinAltitudeAboveTerrain(minSafeAlt);
         // coveringTilesGlobe 依赖 screenToGlobe 射线-椭球面求交。
         // 高空（altitude > 地球半径）时，viewport 边缘可能全部指向太空（pitch=-90 正俯视），
         // 导致所有采样点未命中椭球面 → tiles=[]。此时手动生成 zoom-0 全部瓦片作为兜底。
+        //
+        // ⚠ 必须**封顶 fallbackZoom**：否则 numFallback = 1<<fallbackZoom 在 zoom>=10 时
+        // 立即变成百万级 push 循环，浏览器秒爆。fallbackZoom=2 → 16 个 root 瓦片足以画出地球。
         if (tiles.length === 0) {
-            const fallbackZoom = Math.max(0, Math.floor(globeCam.zoom));
+            const fallbackZoom = Math.min(2, Math.max(0, Math.floor(globeCam.zoom)));
             const numFallback = 1 << fallbackZoom;
             tiles = [];
             for (let y = 0; y < numFallback; y++) {
@@ -1949,6 +1974,11 @@ export class Globe3D {
         // ── 结束渲染通道并提交 ──
         pass.end();
         device.queue.submit([encoder.finish()]);
+
+        // ── 两阶段淘汰：submit 之后才真销毁本帧推入的待销毁 mesh 缓冲 / 纹理 ──
+        // 必须放在 submit 之后；放在 submit 之前会复现
+        // "Buffer used in submit while destroyed" 错误，导致整帧被丢弃 → 黑屏。
+        flushPendingDestroys(this._tileState);
 
         // ── 更新统计 ──
         this._statsTilesRendered = tilesRendered;

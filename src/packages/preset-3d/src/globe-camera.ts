@@ -60,9 +60,24 @@ export function computeGlobeCamera(
     const fov = camState.fov;
     const aspect = vp.width / Math.max(vp.height, 1);
 
-    const nearZ = Math.max(alt * NEAR_PLANE_FACTOR, NEAR_PLANE_MIN);
+    // ⚠ 线性深度的 near/far 比例需控制在 ~5×10⁴ 以内，否则 24 位深度缓冲
+    // 在远端精度不足：远处地表像素 z-fighting 或被 sky 的 0.9999 盖住。
+    //
+    // 策略：
+    //   nearBase = max(alt * 0.05, 1.0)       // 约 alt / 20
+    //   farZ     = horizonDist * 2 + alt       // 覆盖可见地表
+    //   clamp：far/near > 5e4 时提升 near 到 far/5e4
+    //   兜底：nearZ 必须 < alt 否则相机正下方被 near 平面裁掉
     const horizonDist = computeHorizonDist(alt);
-    const farZ = horizonDist * FAR_PLANE_HORIZON_FACTOR + alt;
+    const farZ = horizonDist * 2.0 + alt;
+    let nearZ = Math.max(alt * 0.05, 1.0);
+    const MAX_FAR_NEAR_RATIO = 5e4;
+    if (farZ / nearZ > MAX_FAR_NEAR_RATIO) {
+        nearZ = farZ / MAX_FAR_NEAR_RATIO;
+    }
+    if (nearZ >= alt && alt > 0.1) {
+        nearZ = alt * 0.5;
+    }
 
     mat4d.perspective(_tmpMat4A, fov, aspect, nearZ, farZ);
 
