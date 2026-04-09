@@ -13,17 +13,65 @@ export {
     deviation,
 } from './earcut.ts';
 export type { EarcutChunkBBox, EarcutChunkedStats } from './earcut.ts';
-export { douglasPeucker, visvalingam } from './simplify.ts';
-export { pointInPolygon, pointInTriangle, pointInBBox, pointOnLine } from './contain.ts';
+export { douglasPeucker, visvalingam, chaikin, douglasPeucker3D, bspline } from './simplify.ts';
+export {
+    weilerAtherton,
+    greinerHormann,
+    type WAOp,
+} from './polygon-clip.ts';
+export {
+    pointInPolygon,
+    pointInTriangle,
+    pointInBBox,
+    pointOnLine,
+    pointInPolygonWinding,
+    pointToPolygonDistance,
+} from './contain.ts';
 export {
     segmentSegment,
     rayAABB,
+    rayOBB,
+    rayTriangle,
+    planeSphere,
+    PlaneSphereRelation,
     bboxOverlap,
     type SegmentIntersection,
+    type RayTriangleHit,
 } from './intersect.ts';
 export { delaunay, voronoi } from './delaunay.ts';
-export { convexHull } from './convex-hull.ts';
-export { sutherlandHodgman, cohenSutherland, liangBarsky } from './clip.ts';
+export {
+    constrainedDelaunay,
+    type Constraint,
+    type CDTResult,
+    type CDTOptions,
+} from './constrained-delaunay.ts';
+export {
+    monotoneDecompose,
+    type MonotoneDecomposition,
+} from './monotone.ts';
+export {
+    bentleyOttmann,
+    type Segment,
+    type IntersectionReport,
+} from './bentley-ottmann.ts';
+export {
+    convexHull,
+    quickHull,
+    concaveHull,
+    minBoundingBox,
+    type MinBoundingBox,
+} from './convex-hull.ts';
+export {
+    sutherlandHodgman,
+    cohenSutherland,
+    liangBarsky,
+    polygonSplit,
+} from './clip.ts';
+export {
+    bezierFit,
+    bezierSample,
+    type CubicBezier,
+} from './curve-fit.ts';
 export {
     supercluster,
     dbscan,

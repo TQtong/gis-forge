@@ -276,3 +276,233 @@ export function bboxOverlap(a: BBox2D, b: BBox2D): boolean {
     // 两个轴都有重叠
     return true;
 }
+
+/**
+ * 射线-三角形相交结果。
+ */
+export interface RayTriangleHit {
+    /** 沿射线方向的参数距离，hitPoint = origin + t * dir */
+    readonly t: number;
+    /** 重心坐标 u（对应顶点 v1 的权重） */
+    readonly u: number;
+    /** 重心坐标 v（对应顶点 v2 的权重） */
+    readonly v: number;
+}
+
+/**
+ * Möller-Trumbore 射线-三角形相交算法。
+ *
+ * 不需要预先计算三角形平面方程，对每个三角形只用 1 次叉积 + 4 次点积。
+ * 是 3D Picking、BVH 遍历、LIDAR 与 Mesh 交互等场景的核心算法。
+ *
+ * 退化处理：
+ * - 三角形退化（面积 0）→ 行列式接近 0 → 返回 null
+ * - 射线与三角形平面平行 → 返回 null
+ * - 仅返回 t ≥ 0 的命中（射线起点之前的命中视为未命中）
+ *
+ * 注：默认双面命中（不做背面剔除）。需要单面命中时调用方判断 det 符号。
+ *
+ * @param ox 射线起点 x
+ * @param oy 射线起点 y
+ * @param oz 射线起点 z
+ * @param dx 射线方向 x（无需归一化，但 t 的物理含义会随之变化）
+ * @param dy 射线方向 y
+ * @param dz 射线方向 z
+ * @param v0x 三角形顶点 0 x
+ * @param v0y 三角形顶点 0 y
+ * @param v0z 三角形顶点 0 z
+ * @param v1x 三角形顶点 1 x
+ * @param v1y 三角形顶点 1 y
+ * @param v1z 三角形顶点 1 z
+ * @param v2x 三角形顶点 2 x
+ * @param v2y 三角形顶点 2 y
+ * @param v2z 三角形顶点 2 z
+ * @returns 命中信息或 null
+ */
+export function rayTriangle(
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+    v0x: number, v0y: number, v0z: number,
+    v1x: number, v1y: number, v1z: number,
+    v2x: number, v2y: number, v2z: number,
+): RayTriangleHit | null {
+    // NaN 防御
+    if (
+        ox !== ox || oy !== oy || oz !== oz ||
+        dx !== dx || dy !== dy || dz !== dz
+    ) {
+        return null;
+    }
+
+    // 边向量 e1 = v1 - v0, e2 = v2 - v0
+    const e1x = v1x - v0x;
+    const e1y = v1y - v0y;
+    const e1z = v1z - v0z;
+
+    const e2x = v2x - v0x;
+    const e2y = v2y - v0y;
+    const e2z = v2z - v0z;
+
+    // p = dir × e2
+    const px = dy * e2z - dz * e2y;
+    const py = dz * e2x - dx * e2z;
+    const pz = dx * e2y - dy * e2x;
+
+    // 行列式 det = e1 · p
+    const det = e1x * px + e1y * py + e1z * pz;
+
+    // 行列式接近 0 → 射线与三角形平行（或三角形退化）
+    if (det > -1e-12 && det < 1e-12) {
+        return null;
+    }
+
+    const invDet = 1.0 / det;
+
+    // t-vector: tvec = origin - v0
+    const tvx = ox - v0x;
+    const tvy = oy - v0y;
+    const tvz = oz - v0z;
+
+    // 重心坐标 u = (tvec · p) * invDet
+    const u = (tvx * px + tvy * py + tvz * pz) * invDet;
+    if (u < 0 || u > 1) {
+        return null;
+    }
+
+    // q = tvec × e1
+    const qx = tvy * e1z - tvz * e1y;
+    const qy = tvz * e1x - tvx * e1z;
+    const qz = tvx * e1y - tvy * e1x;
+
+    // 重心坐标 v = (dir · q) * invDet
+    const v = (dx * qx + dy * qy + dz * qz) * invDet;
+    if (v < 0 || u + v > 1) {
+        return null;
+    }
+
+    // 沿射线的距离 t = (e2 · q) * invDet
+    const t = (e2x * qx + e2y * qy + e2z * qz) * invDet;
+
+    // 仅接受射线正方向的命中
+    if (t < 0) {
+        return null;
+    }
+
+    return { t, u, v };
+}
+
+/**
+ * 平面-球体相交关系常量。
+ *  1 → 球体完全在平面正面（n·p + d > r）
+ * -1 → 球体完全在平面背面（n·p + d < -r）
+ *  0 → 球体与平面相交
+ */
+export const PlaneSphereRelation = {
+    FRONT: 1 as const,
+    BACK: -1 as const,
+    INTERSECTING: 0 as const,
+} as const;
+
+export type PlaneSphereRelation = 1 | -1 | 0;
+
+/**
+ * 射线-OBB（有向包围盒）相交检测。
+ *
+ * 算法：把射线从世界坐标变换到 OBB 的局部坐标系，再用 Slab 法
+ * 与 OBB 的等效 AABB（中心在原点、半边长为 halfX/Y/Z）求交。
+ * 局部变换 = 平移到 OBB 中心 + 用三个轴向量做正交投影。
+ *
+ * 三个轴向量必须两两正交且为单位向量；调用方负责保证。
+ *
+ * 用途：3D 模型 Picking、相机碰撞、3D Tiles 选择性命中。
+ *
+ * @param ox 射线起点 x
+ * @param oy 射线起点 y
+ * @param oz 射线起点 z
+ * @param dx 射线方向 x
+ * @param dy 射线方向 y
+ * @param dz 射线方向 z
+ * @param cx OBB 中心 x
+ * @param cy OBB 中心 y
+ * @param cz OBB 中心 z
+ * @param uxX OBB X 轴 x 分量（单位向量）
+ * @param uxY OBB X 轴 y 分量
+ * @param uxZ OBB X 轴 z 分量
+ * @param uyX OBB Y 轴 x 分量
+ * @param uyY OBB Y 轴 y 分量
+ * @param uyZ OBB Y 轴 z 分量
+ * @param uzX OBB Z 轴 x 分量
+ * @param uzY OBB Z 轴 y 分量
+ * @param uzZ OBB Z 轴 z 分量
+ * @param hx OBB X 半边长
+ * @param hy OBB Y 半边长
+ * @param hz OBB Z 半边长
+ * @returns 沿射线的入射 t（≥0），未命中返回 -1
+ */
+export function rayOBB(
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+    cx: number, cy: number, cz: number,
+    uxX: number, uxY: number, uxZ: number,
+    uyX: number, uyY: number, uyZ: number,
+    uzX: number, uzY: number, uzZ: number,
+    hx: number, hy: number, hz: number,
+): number {
+    // 射线起点相对于 OBB 中心的偏移
+    const px = ox - cx;
+    const py = oy - cy;
+    const pz = oz - cz;
+
+    // 把起点投影到 OBB 局部坐标
+    const localOx = px * uxX + py * uxY + pz * uxZ;
+    const localOy = px * uyX + py * uyY + pz * uyZ;
+    const localOz = px * uzX + py * uzY + pz * uzZ;
+
+    // 把方向也投影到 OBB 局部坐标
+    const localDx = dx * uxX + dy * uxY + dz * uxZ;
+    const localDy = dx * uyX + dy * uyY + dz * uyZ;
+    const localDz = dx * uzX + dy * uzY + dz * uzZ;
+
+    // 复用 rayAABB 的 Slab 思路
+    return rayAABB(
+        localOx, localOy, localOz,
+        localDx, localDy, localDz,
+        -hx, -hy, -hz,
+        hx, hy, hz,
+    );
+}
+
+/**
+ * 平面-球体相交检测。
+ *
+ * 平面方程形式：n · p + d = 0，其中 (nx,ny,nz) 必须是单位法向量。
+ * 计算球心到平面的有符号距离 dist = n · center + d，再与半径比较：
+ *   dist > r  → 球体在平面正面
+ *   dist < -r → 球体在平面背面
+ *   否则      → 相交
+ *
+ * 用途：视锥剔除（每个面单独判断）、球体切割（半空间裁剪）、地球可见半球计算。
+ *
+ * @param nx 平面法向量 x（需为单位向量）
+ * @param ny 平面法向量 y
+ * @param nz 平面法向量 z
+ * @param d 平面常数项（n·p + d = 0）
+ * @param cx 球心 x
+ * @param cy 球心 y
+ * @param cz 球心 z
+ * @param r 球半径（必须 ≥ 0）
+ * @returns 相交关系（FRONT/BACK/INTERSECTING）
+ */
+export function planeSphere(
+    nx: number, ny: number, nz: number, d: number,
+    cx: number, cy: number, cz: number, r: number,
+): PlaneSphereRelation {
+    const dist = nx * cx + ny * cy + nz * cz + d;
+    if (dist > r) {
+        return PlaneSphereRelation.FRONT;
+    }
+    if (dist < -r) {
+        return PlaneSphereRelation.BACK;
+    }
+    return PlaneSphereRelation.INTERSECTING;
+}
