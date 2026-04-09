@@ -316,6 +316,15 @@ export interface Camera3DOptions {
     readonly fov?: number;
     readonly minimumZoomDistance?: number;
     readonly maximumZoomDistance?: number;
+    /**
+     * 是否启用椭球碰撞检测（默认 true）。
+     * 启用时所有改变 position 的原语（zoomIn / moveAlongDirection /
+     * setPositionDirectionUp）都会做 ray-ellipsoid 求交拒入，
+     * 保证相机不会穿透 (R + minimumZoomDistance) 的安全椭球。
+     * 关闭时允许相机进入地球内部（地下视角，对标 Cesium
+     * ScreenSpaceCameraController.enableCollisionDetection=false）。
+     */
+    readonly enableCollisionDetection?: boolean;
 }
 
 export interface Camera3D extends CameraController {
@@ -328,6 +337,26 @@ export interface Camera3D extends CameraController {
     setTerrainCollisionEnabled(enabled: boolean): void;
     setMinAltitudeAboveTerrain(meters: number): void;
     queryTerrainHeight(lon: number, lat: number): Promise<number>;
+
+    /**
+     * 椭球碰撞检测开关。
+     * 对标 Cesium ScreenSpaceCameraController.enableCollisionDetection。
+     * 启用时（默认）相机不能穿透 (R + minimumZoomDistance) 椭球；
+     * 关闭时允许相机进入地球内部（地下视角）。
+     */
+    readonly ellipsoidCollisionEnabled: boolean;
+    setEllipsoidCollisionEnabled(enabled: boolean): void;
+
+    /** 当前 minimumZoomDistance（米）——硬性配置下界 */
+    readonly minimumZoomDistance: number;
+    /** 当前 maximumZoomDistance（米） */
+    readonly maximumZoomDistance: number;
+    /**
+     * 当前有效的最小高度（米）= max(minimumZoomDistance, minTerrainAlt)。
+     * 由 globe-render 每帧基于最粗 LOD 弦割下沉量动态推送 minTerrainAlt。
+     * globe-interaction.handleZoom 应使用这个值作为 minHeight，而不是裸 minimumZoomDistance。
+     */
+    readonly effectiveMinAltitude: number;
     flyToPosition(options: { lon: number; lat: number; alt: number; heading?: number; bearing?: number; pitch?: number; duration?: number }): CameraAnimation;
 
     getOrientation(): { bearing: number; pitch: number; roll: number };
@@ -397,11 +426,18 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
     let _hasTransform = false;
 
     const _fov = opts.fov ?? DEFAULT_FOV;
-    const _minZoomDist = opts.minimumZoomDistance ?? 100;
-    const _maxZoomDist = opts.maximumZoomDistance ?? 5e7;
+    // 默认值对标 Cesium ScreenSpaceCameraController：
+    //   Cesium: minimumZoomDistance = 1.0, maximumZoomDistance = +Infinity
+    // 这里取 0.1m 让用户能近距离贴近地面（街景级别）。
+    // ⚠ 不要设置成 100 这种"高空"值——会出现"放大到一定程度卡住 + 近平面把地面裁掉"的现象。
+    const _minZoomDist = opts.minimumZoomDistance ?? 0.1;
+    const _maxZoomDist = opts.maximumZoomDistance ?? Number.POSITIVE_INFINITY;
 
     let _terrainCollision = false;
     let _minTerrainAlt = 10;
+
+    // 椭球碰撞检测开关（对标 Cesium SSCC.enableCollisionDetection）
+    let _ellipsoidCollision = opts.enableCollisionDetection ?? true;
 
     // 约束
     let _constraints: CameraConstraints = {
@@ -599,6 +635,18 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
     }
 
     // ─── 高度约束 ─────────────────────────────────────
+    //
+    // 设计：position 原语只做"硬上界"和退化兜底，**不做几何拒入**。
+    // 真正的"防穿透"由 globe-interaction.handleZoom Phase 1 的
+    //   if (distanceMeasure - distance < minHeight) distance = distanceMeasure - minHeight - 1.0
+    // 完成——这是 Cesium ScreenSpaceCameraController.handleZoom 的原始逻辑
+    // （ScreenSpaceCameraController.js:611）。前提是 distanceMeasure 必须是
+    // **相机的几何高度 (alt)**，而不是切向锚点距离。
+    //
+    // _clampAltitude 在这里只兜底两件事：
+    //   1. alt > maxZoomDist 时拉回 maxZoomDist（数值上不会发生穿透）
+    //   2. _ellipsoidCollision = true 且 alt < minZoomDist 时，沿法线推回安全壳
+    //      （处理 setPosition / flyTo 等绕开 handleZoom 的入口）
 
     function _getAlt(): number {
         ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
@@ -608,9 +656,16 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
     function _clampAltitude(): void {
         ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
         const alt = _geodetic[2];
-        if (alt < _minZoomDist || alt > _maxZoomDist) {
-            const clamped = clamp(alt, _minZoomDist, _maxZoomDist);
-            // 沿法线方向调整位置
+        // 下界 = max(minimumZoomDistance, minTerrainAlt)
+        //   minTerrainAlt 由 globe-render 每帧根据当前最粗 LOD 的弦割下沉量推送，
+        //   防止相机进入 mesh 多边形面之下产生 backface culling 黑洞。
+        const lo = _ellipsoidCollision
+            ? Math.max(_minZoomDist, _minTerrainAlt)
+            : -Infinity;
+        const hi = _maxZoomDist;
+        if (alt < lo || alt > hi) {
+            const clamped = alt < lo ? lo : hi;
+            // 沿地表法线方向调整位置
             surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
             const delta = clamped - alt;
             v3ScaleAndAdd(_position, _position, _normalUp, delta);
@@ -664,13 +719,37 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         const w = Math.max(1, vp.width);
         const h = Math.max(1, vp.height);
         const aspect = w / h;
-        const nearZ = Math.max(alt * 0.1, 100);
-        // horizon distance
-        const R = WGS84_A;
-        const horizonDist = alt > 0 ? Math.sqrt((R + alt) * (R + alt) - R * R) : R;
-        const farZ = horizonDist * 1.5 + alt;
 
-        mat4.perspective(_projMat, _fov, aspect, nearZ, Math.max(farZ, nearZ + 1));
+        // ─── near/far 平面 ───
+        //
+        // 关键约束：sky shader 写 NDC depth = 0.9999（"几乎最远"）。
+        // 对于 WebGPU [0,1] 深度，距离 d 处 tile 的 NDC depth =
+        //   (f/(f-n)) × (1 - n/d)
+        // 要让 tile 赢过 sky（depth < 0.9999），必须 n/d > 0.0001，即 **d < 10000·n**。
+        //
+        // 因此 nearZ 不能太小——否则远处地面深度全部 ≈ 1.0 被 sky 盖住。
+        // 设 nearZ ≈ alt * 0.5 即可：
+        //   - 相机正下方地面距离 = alt → d/n = 2 → NDC ≈ 0.5（远低于 0.9999）✓
+        //   - 距离 d = 10·alt 的地面 → d/n = 20 → NDC ≈ 0.95 ✓
+        //   - 距离 d = 100·alt 的地面 → NDC ≈ 0.995 ✓
+        //   - 距离 d = 5000·alt 的地面 → NDC ≈ 0.9998 ✓（刚好 < 0.9999）
+        //
+        // 这样 horizonDist ≈ √(2Rh) 范围内的所有地面都能正确渲染。
+        const R = WGS84_A;
+        const safeAlt = Math.max(alt, 0.1);
+        // nearZ = alt 的一半，floor 0.1m（极近距离贴地）
+        // 不能 ≥ alt，否则正下方地面被 near 平面裁掉
+        let nearZ = Math.max(0.1, safeAlt * 0.5);
+        // 强约束：留 1cm 余量保证 nearZ < alt
+        nearZ = Math.min(nearZ, Math.max(safeAlt - 0.01, 0.1));
+
+        const horizonDist = alt > 0 ? Math.sqrt((R + alt) * (R + alt) - R * R) : R;
+        // farZ 覆盖整个可见地面 + 一点冗余
+        let farZ = horizonDist * 2.0 + alt + nearZ * 10;
+        // 极端情况：保证 far > near
+        if (farZ <= nearZ) farZ = nearZ * 100;
+
+        mat4.perspective(_projMat, _fov, aspect, nearZ, farZ);
 
         // RTE view matrix: eye at origin, target = direction（使用实际视线方向，不假设俯视）
         _eyeF32[0] = 0; _eyeF32[1] = 0; _eyeF32[2] = 0;
@@ -837,9 +916,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         handleZoom(delta: number, _sx: number, _sy: number) {
             const alt = _getAlt();
             const amount = alt * 0.001 * delta;
-            _position[0] += _direction[0] * amount;
-            _position[1] += _direction[1] * amount;
-            _position[2] += _direction[2] * amount;
+            v3ScaleAndAdd(_position, _position, _direction, amount);
             _clampAltitude();
         },
         handleRotate(bearingDelta: number, pitchDelta: number) {
@@ -873,7 +950,16 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         // ─── 3D 专用 API ────────────────────────────
 
         setPosition(lon: number, lat: number, alt: number) {
-            _initFromGeodetic(lon, lat, clamp(alt, _minZoomDist, _maxZoomDist), 0, -HALF_PI * 0.5);
+            // ⚠ 必须传 pitch = -HALF_PI（nadir），否则 _initFromGeodetic 内部的
+            // `if (Math.abs(pitch + HALF_PI) > 0.001) _applyRotate(_right, ...)`
+            // 会**绕地心旋转相机位置**，把相机从目标经纬度挪走。
+            //
+            // 之前的 `-HALF_PI * 0.5` 会强制 45° 旋转：
+            //   setPosition(116.4, 39.9, 500) → 实际到 (116.4, -5.3, -8072)
+            // 即 lat 偏移 45°，alt 变成地下。
+            //
+            // 姿态应该由调用方随后用 setHeadingPitchRoll/setOrientation 显式设置。
+            _initFromGeodetic(lon, lat, clamp(alt, _minZoomDist, _maxZoomDist), 0, -HALF_PI);
         },
 
         getPosition() {
@@ -882,9 +968,8 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         },
 
         setHeadingPitchRoll(heading: number, pitch: number, _roll: number) {
-            // 从当前位置重新计算方向
+            // 从当前位置重新计算方向（nadir 基准）
             ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
-            // 重建到正下方
             geodeticToECEF(_targetECEF, _geodetic[0], _geodetic[1], 0);
             v3Sub(_direction, _targetECEF, _position);
             v3Normalize(_direction, _direction);
@@ -895,13 +980,16 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
             _right[2] = 0;
             v3Cross(_up, _right, _direction);
             v3Normalize(_up, _up);
-            // 应用 pitch 然后 heading
+
+            // ⚠ 只能用 _look（原地旋转 direction/up/right）——
+            // 不能用 _applyRotate（_applyRotate 会把 position 一起旋转 →
+            // 每次 setOrientation 相机都会被搬到地球另一侧）。
             if (Math.abs(pitch + HALF_PI) > 0.001) {
                 const rotateDelta = -(HALF_PI + pitch);
-                _applyRotate(_right, rotateDelta);
+                _look(_right, rotateDelta);
             }
             if (Math.abs(heading) > 0.001) {
-                _applyRotate(_constrainedAxis ?? _defaultAxis, -heading);
+                _look(_constrainedAxis ?? _defaultAxis, -heading);
             }
         },
 
@@ -977,6 +1065,19 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         setMinAltitudeAboveTerrain(meters: number) { _minTerrainAlt = meters; },
         async queryTerrainHeight(_lon: number, _lat: number): Promise<number> { return 0; },
 
+        get ellipsoidCollisionEnabled() { return _ellipsoidCollision; },
+        setEllipsoidCollisionEnabled(enabled: boolean) {
+            _ellipsoidCollision = enabled;
+            // 启用时立刻把当前位置拉回安全椭球外（防止从 underground 模式切回时滞留）
+            if (enabled) _clampAltitude();
+        },
+
+        get minimumZoomDistance() { return _minZoomDist; },
+        get maximumZoomDistance() { return _maxZoomDist; },
+        get effectiveMinAltitude() {
+            return Math.max(_minZoomDist, _minTerrainAlt);
+        },
+
         flyToPosition(options) {
             if (_anim) { _anim.handle.cancel(); _anim = null; }
 
@@ -1039,6 +1140,9 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         look(axis: Float64Array, angle: number) { _look(axis, angle); },
 
         zoomIn(amount: number) {
+            // 对标 Cesium Camera.zoomIn —— 沿视线方向直接前进。
+            // 防穿透由调用方（globe-interaction.handleZoom Phase 1）保证：
+            //   if (distanceMeasure - distance < minHeight) distance = distanceMeasure - minHeight - 1
             v3ScaleAndAdd(_position, _position, _direction, amount);
             _clampAltitude();
         },
