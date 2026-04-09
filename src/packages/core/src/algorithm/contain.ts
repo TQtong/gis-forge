@@ -217,3 +217,145 @@ export function pointOnLine(
     // 与容差比较
     return distSq <= tolerance * tolerance;
 }
+
+/**
+ * 使用绕数法（Winding Number）判断点是否在多边形内部。
+ *
+ * 绕数法相比射线法（pointInPolygon）的优势：
+ * - 正确处理自相交多边形：射线法对自相交区域结果不稳定（依赖奇偶规则），
+ *   绕数法返回真实的旋转圈数。
+ * - 对极端退化输入更稳健（不依赖单一射线方向）。
+ *
+ * 实现：累加每条边相对测试点的有符号扫过角度。
+ * 使用 Sunday 提出的整数化优化版本：根据边端点是否跨越水平射线，
+ * 用叉积符号判断绕向，避免昂贵的 atan2。
+ *
+ * @param point - 测试点 [x, y]
+ * @param polygon - 多边形顶点数组（首尾可不闭合）
+ * @returns 绕数 ≠ 0 表示在内部
+ *
+ * @example
+ * const star = [[0,3],[1,1],[3,1],[1.5,-0.5],[2.5,-3],[0,-1.5],[-2.5,-3],[-1.5,-0.5],[-3,1],[-1,1]];
+ * pointInPolygonWinding([0, 0], star); // → true（即使是自相交星形）
+ */
+export function pointInPolygonWinding(
+    point: [number, number],
+    polygon: number[][],
+): boolean {
+    if (polygon.length < 3) {
+        return false;
+    }
+
+    const px = point[0];
+    const py = point[1];
+
+    if (px !== px || py !== py) {
+        return false;
+    }
+
+    let wn = 0;
+    const n = polygon.length;
+
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+        const ax = polygon[j][0];
+        const ay = polygon[j][1];
+        const bx = polygon[i][0];
+        const by = polygon[i][1];
+
+        if (ay <= py) {
+            // 边 a→b 向上跨越测试点的水平线
+            if (by > py) {
+                // 叉积 > 0 → b 在 a→p 的左侧 → 逆时针绕一圈
+                const cross = (bx - ax) * (py - ay) - (px - ax) * (by - ay);
+                if (cross > 0) {
+                    wn++;
+                }
+            }
+        } else {
+            // 边 a→b 向下跨越测试点的水平线
+            if (by <= py) {
+                const cross = (bx - ax) * (py - ay) - (px - ax) * (by - ay);
+                if (cross < 0) {
+                    wn--;
+                }
+            }
+        }
+    }
+
+    return wn !== 0;
+}
+
+/**
+ * 计算点到多边形边界的最短距离（欧氏距离）。
+ *
+ * 遍历多边形所有边（包括所有内环），计算点到每条线段的最短距离，取最小值。
+ * 注意：返回的是到**边界**的距离，不区分点在内部还是外部。
+ * 若需要带符号距离（内部为负），调用方可结合 pointInPolygon 自行加符号。
+ *
+ * 性能：O(n)，n 为多边形顶点总数。批量查询场景应配合 R-Tree 加速。
+ *
+ * @param px 测试点 x
+ * @param py 测试点 y
+ * @param polygon 多边形（GeoJSON Polygon 风格）：第一个环为外环，其余为内环（孔洞）
+ * @returns 点到边界的最短欧氏距离
+ *
+ * @example
+ * const square = [[[0,0],[10,0],[10,10],[0,10],[0,0]]];
+ * pointToPolygonDistance(15, 5, square); // → 5（外部，到右边界）
+ * pointToPolygonDistance(5, 5, square);  // → 5（内部，到任一边界）
+ */
+export function pointToPolygonDistance(
+    px: number, py: number,
+    polygon: number[][][],
+): number {
+    if (px !== px || py !== py) {
+        return NaN;
+    }
+    if (polygon.length === 0) {
+        return Infinity;
+    }
+
+    let minDistSq = Infinity;
+
+    for (let r = 0; r < polygon.length; r++) {
+        const ring = polygon[r];
+        const n = ring.length;
+        if (n < 2) continue;
+
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+            const ax = ring[j][0];
+            const ay = ring[j][1];
+            const bx = ring[i][0];
+            const by = ring[i][1];
+
+            // 点到线段 a-b 的最短距离平方
+            const dx = bx - ax;
+            const dy = by - ay;
+            const lenSq = dx * dx + dy * dy;
+
+            let cx: number;
+            let cy: number;
+
+            if (lenSq < 1e-20) {
+                // 退化为点
+                cx = ax;
+                cy = ay;
+            } else {
+                let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+                if (t < 0) t = 0;
+                else if (t > 1) t = 1;
+                cx = ax + t * dx;
+                cy = ay + t * dy;
+            }
+
+            const ddx = px - cx;
+            const ddy = py - cy;
+            const distSq = ddx * ddx + ddy * ddy;
+            if (distSq < minDistSq) {
+                minDistSq = distSq;
+            }
+        }
+    }
+
+    return Math.sqrt(minDistSq);
+}
