@@ -84,11 +84,6 @@ function bootGlobe(ctx: BootContext): { engine: Globe3D; teardown: () => void } 
         accessibleTitle: 'GIS-Forge 3D Globe',
     });
 
-    // 开发期：在 window 上暴露 globe 实例以便 console 调试
-    if (import.meta.env.DEV) {
-        (window as unknown as { __globe3d: unknown }).__globe3d = globe;
-    }
-
     markStepDone(ctx.setEngineSteps, 1);
     ctx.setEngineProgress(35);
 
@@ -316,6 +311,26 @@ function bootMap25D(ctx: BootContext): { engine: Map25D; teardown: () => void } 
         paint: { 'raster-opacity': 1, 'raster-fade-duration': 300 },
     });
 
+    // Cesium quantized-mesh 真实地形（自建 ugis terrain 服务）
+    map.addSource('ugis-terrain', {
+        type: 'cesium-terrain',
+        url: 'https://sooncps.xwbuilders.com/api/ugis-dataprocess/v1/terrain/NhBLlMx3/',
+    });
+    map.addLayer({
+        id: 'terrain-3d',
+        type: 'cesium-terrain',
+        source: 'ugis-terrain',
+        paint: {
+            'terrain-exaggeration': 1.8,
+            'terrain-opacity': 1,
+            'terrain-light-direction': [-0.5, -0.7, 1.0],
+            'terrain-ambient': 0.3,
+        },
+        layout: {
+            'terrain-max-screen-space-error': 4,
+        },
+    });
+
     let teardownEvents: (() => void) | undefined;
 
     const wireEvents = (): void => {
@@ -423,7 +438,7 @@ export function App(): React.ReactElement {
     const leftPanelRef = React.useRef<ImperativePanelHandle>(null);
     const rightPanelRef = React.useRef<ImperativePanelHandle>(null);
 
-    const [viewMode, setViewMode] = React.useState<MapViewMode>('globe');
+    const [viewMode, setViewMode] = React.useState<MapViewMode>('2.5d');
 
     const [engineStatus, setEngineStatus] = React.useState<'loading' | 'ready'>('loading');
     const [engineProgress, setEngineProgress] = React.useState(0);
