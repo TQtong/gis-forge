@@ -592,6 +592,24 @@ export interface RasterTileLayer extends Layer {
    * 当前是否处于 idle（无进行中的瓦片加载）。
    */
   isIdle(): boolean;
+
+  /**
+   * 启/停该图层的绘制编码。保留瓦片下载 / 缓存等所有能力，仅禁用 `encode` 的实际 draw call。
+   * 用于 2.5D 模式：地形层接管底图渲染时，平面 raster 层需停绘，但缓存继续供地形层 drape 使用。
+   */
+  setRenderEnabled(enabled: boolean): void;
+
+  /**
+   * 同步读取已就绪瓦片的 GPU 纹理（若存在）。
+   * 供地形层 drape 借用，避免重复下载 OSM。
+   */
+  getTextureForTile(z: number, x: number, y: number): GPUTexture | null;
+
+  /**
+   * 异步触发指定瓦片的加载（若缓存/待队列中都没有）。
+   * 地形层在 drape 贴图未命中时调用，让下次命中可立即拿到。
+   */
+  requireTile(z: number, x: number, y: number): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -2341,6 +2359,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
   const styleUniforms: StyleUniformData = parseStyleUniforms(cfg.paint, cfg.opacity);
   let fadeDurationMs = cfg.fadeDuration;
   let mounted = false;
+  /** 是否编码实际 draw call（2.5D 下地形接管底图时可关闭） */
+  let renderEnabled = true;
   let styleDirty = true;
   const paintProps = new Map<string, unknown>();
   const layoutProps = new Map<string, unknown>();
@@ -2530,7 +2550,13 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         frontFace: 'ccw',
         cullMode: 'none',
       },
-      // 2D 不使用深度缓冲（正交投影无深度）
+      // 与 Map2D 的 render pass 的深度附件保持一致（供地形层等使用深度测试）。
+      // 栅格瓦片自身不做深度比较也不写入，避免影响其它层。
+      depthStencil: {
+        format: 'depth24plus',
+        depthWriteEnabled: false,
+        depthCompare: 'always',
+      },
     });
 
     // Uniform 缓冲区
@@ -3186,7 +3212,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         cameraBindGroup === null || styleBindGroup === null ||
         vertexBuffer === null || indexBuffer === null ||
         cameraUniformBuffer === null || styleUniformBuffer === null ||
-        currentVisibleTiles.length === 0 || !layer.visible
+        currentVisibleTiles.length === 0 || !layer.visible ||
+        !renderEnabled
       ) {
         return;
       }
@@ -3435,6 +3462,28 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
 
     isIdle(): boolean {
       return idlePendingCount === 0 && inflightRequests.size === 0 && pendingQueue.length === 0;
+    },
+
+    setRenderEnabled(enabled: boolean): void {
+      renderEnabled = enabled;
+    },
+
+    getTextureForTile(z: number, x: number, y: number): GPUTexture | null {
+      const key = tileKey(z, x, y);
+      const entry = cache.get(key);
+      if (entry === undefined || entry.state !== 'ready' || entry.texture === null) {
+        return null;
+      }
+      return entry.texture;
+    },
+
+    requireTile(z: number, x: number, y: number): void {
+      const key = tileKey(z, x, y);
+      const entry = cache.get(key);
+      if (entry !== undefined && entry.state === 'ready') { return; }
+      if (inflightRequests.has(key)) { return; }
+      // 以中等优先级入队（真实调度会在下一帧 onUpdate 中重排）
+      scheduleTileLoad(key, z, x, y, 50);
     },
   };
 
