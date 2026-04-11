@@ -11,6 +11,8 @@ import type { PickResult, CameraState } from '../../core/src/types/viewport.ts';
 import type { Layer } from '../../scene/src/scene-graph.ts';
 import type { RasterTileLayer } from '../../layer-tile-raster/src/RasterTileLayer.ts';
 import { createRasterTileLayer } from '../../layer-tile-raster/src/RasterTileLayer.ts';
+import { createCesiumTerrainLayer } from '../../layer-cesium-terrain/src/index.ts';
+import { createTerrainDrapeLayer } from '../../layer-terrain-drape/src/index.ts';
 
 // ===================== 常量（避免魔法数字）=====================
 
@@ -789,10 +791,10 @@ export class Map2D {
     private _lastFrameTime = 0;
 
     /** 当前帧相机状态快照 */
-    private _cameraState: CameraState | null = null;
+    protected _cameraState: CameraState | null = null;
 
     /** 实际 Layer 实例（由 addLayer 时根据类型创建） */
-    private readonly _layerInstances: Map<string, Layer> = new Map();
+    protected readonly _layerInstances: Map<string, Layer> = new Map();
 
     /** 左键拖拽平移进行中。 */
     private _dragPanActive = false;
@@ -974,10 +976,33 @@ export class Map2D {
         const sourceId = this._layers.get(layerId)?.base.source;
         const sourceSpec = typeof sourceId === 'string' ? this._sources.get(sourceId) : undefined;
         const tiles = sourceSpec?.tiles ?? [];
+
+        // 为 terrain 层注入 rasterTileCache service：委派给第一个有 raster
+        // 实例的图层，让 terrain 可以借用其已下载的 GPU 纹理作为 drape。
+        const rasterTileCache = {
+            getTexture: (z: number, x: number, y: number): GPUTexture | null => {
+                for (const inst of this._layerInstances.values()) {
+                    const rl = inst as RasterTileLayer;
+                    if (rl.type !== 'raster') { continue; }
+                    const tex = rl.getTextureForTile?.(z, x, y);
+                    if (tex != null) { return tex; }
+                }
+                return null;
+            },
+            require: (z: number, x: number, y: number): void => {
+                for (const inst of this._layerInstances.values()) {
+                    const rl = inst as RasterTileLayer;
+                    if (rl.type !== 'raster') { continue; }
+                    rl.requireTile?.(z, x, y);
+                    return;
+                }
+            },
+        };
+
         return {
             gpuDevice: this._device,
             canvasSize: [Math.max(1, rect.width), Math.max(1, rect.height)] as const,
-            services: { tiles },
+            services: { tiles, rasterTileCache },
             map: this,
         };
     }
@@ -1348,7 +1373,25 @@ export class Map2D {
         // 创建命令编码器
         const encoder = this._device.createCommandEncoder();
 
+        // 深度纹理：按 canvas 像素尺寸按需创建（供 2.5D 透视 reversed-Z 深度测试使用）
+        const targetW = currentTexture.width;
+        const targetH = currentTexture.height;
+        if (
+            this._depthTexture === null ||
+            this._depthTexture.width !== targetW ||
+            this._depthTexture.height !== targetH
+        ) {
+            this._depthTexture?.destroy();
+            this._depthTexture = this._device.createTexture({
+                size: [targetW, targetH],
+                format: 'depth24plus',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+        }
+
         // 开始渲染通道（清除为深色背景）
+        // 注意：Camera25D 使用 reversed-Z，远平面 clip.z=0、近平面 clip.z=1；
+        // 因此 depth 清除值为 0，CesiumTerrainLayer 使用 depthCompare='greater-equal'
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
                 view: textureView,
@@ -1356,6 +1399,12 @@ export class Map2D {
                 storeOp: 'store',
                 clearValue: { r: 0.06, g: 0.08, b: 0.12, a: 1.0 },
             }],
+            depthStencilAttachment: {
+                view: this._depthTexture.createView(),
+                depthLoadOp: 'clear',
+                depthClearValue: 0.0,
+                depthStoreOp: 'store',
+            },
         });
 
         // 编码所有可见图层的绘制命令
@@ -2126,7 +2175,7 @@ export class Map2D {
      *
      * @param spec - 图层规格
      */
-    private _createLayerInstance(spec: LayerSpec): void {
+    protected _createLayerInstance(spec: LayerSpec): void {
         if (spec.type === 'raster') {
             // 获取 source 的 tile URL 模板
             const sourceId = typeof spec.source === 'string' ? spec.source : undefined;
@@ -2153,6 +2202,90 @@ export class Map2D {
             if (this._device !== null) {
                 const ctx = this._buildLayerContext(spec.id);
                 rasterLayer.onAdd(ctx);
+            }
+        } else if (spec.type === 'cesium-terrain') {
+            // Cesium quantized-mesh 地形图层
+            const sourceId = typeof spec.source === 'string' ? spec.source : '';
+            const sourceSpec = this._sources.get(sourceId);
+            const url = typeof sourceSpec?.url === 'string' ? sourceSpec.url : '';
+            if (url === '') {
+                devError('[Map2D] cesium-terrain 图层缺少 source.url', { id: spec.id });
+                return;
+            }
+            // 找出一个 raster source 作为 drape 贴图来源：
+            // 优先使用 paint['terrain-drape-source'] 指定的 source；
+            // 否则取第一个 type==='raster' 的 source 的 tiles[0]。
+            let drapeTemplate: string | undefined;
+            let drapeSourceId: string | undefined;
+            const explicitDrape = spec.paint?.['terrain-drape-source'];
+            if (typeof explicitDrape === 'string') {
+                const rs = this._sources.get(explicitDrape);
+                if (rs?.tiles && rs.tiles.length > 0) {
+                    drapeTemplate = rs.tiles[0];
+                    drapeSourceId = explicitDrape;
+                }
+            }
+            if (drapeTemplate === undefined) {
+                for (const [sid, s] of this._sources) {
+                    if (s.type === 'raster' && s.tiles && s.tiles.length > 0) {
+                        drapeTemplate = s.tiles[0];
+                        drapeSourceId = sid;
+                        break;
+                    }
+                }
+            }
+            const terrainLayer = createCesiumTerrainLayer({
+                id: spec.id,
+                source: sourceId,
+                url,
+                drapeUrlTemplate: drapeTemplate,
+                exaggeration: (spec.paint?.['terrain-exaggeration'] as number | undefined) ?? 1.5,
+                opacity: (spec.paint?.['terrain-opacity'] as number | undefined) ?? 1,
+                maxScreenSpaceError:
+                    (spec.layout?.['terrain-max-screen-space-error'] as number | undefined) ?? 4,
+                lightDirection:
+                    spec.paint?.['terrain-light-direction'] as [number, number, number] | undefined,
+                ambient: (spec.paint?.['terrain-ambient'] as number | undefined) ?? 0.3,
+                minZoom: spec.minzoom ?? 0,
+                maxZoom: spec.maxzoom ?? sourceSpec?.maxzoom ?? 14,
+                paint: spec.paint,
+                layout: spec.layout,
+            });
+            this._layerInstances.set(spec.id, terrainLayer);
+            if (this._device !== null) {
+                const ctx = this._buildLayerContext(spec.id);
+                terrainLayer.onAdd(ctx);
+            }
+            // 保留平面 raster 底图：未加载地形的区域由其兜底显示；
+            // 地形所在区域通过 depth test 自动覆盖 raster。
+            void drapeSourceId;
+        } else if (spec.type === 'terrain-drape') {
+            // ── 单层地形 (Mapbox GL v3 / MapLibre 风格) ──
+            const sourceId = typeof spec.source === 'string' ? spec.source : '';
+            const sourceSpec = this._sources.get(sourceId);
+            const rasterUrl = sourceSpec?.tiles?.[0] ?? '';
+            if (rasterUrl === '') {
+                devError('[Map2D] terrain-drape 图层缺少 source.tiles', { id: spec.id });
+                return;
+            }
+            const tdLayer = createTerrainDrapeLayer({
+                id: spec.id,
+                rasterUrlTemplate: rasterUrl,
+                rasterMaxZoom: sourceSpec?.maxzoom ?? 19,
+                elevationUrl: (sourceSpec as unknown as Record<string, unknown>)?.elevationUrl as string | undefined,
+                elevationMaxZoom: (sourceSpec as unknown as Record<string, unknown>)?.elevationMaxZoom as number | undefined,
+                exaggeration: (spec.paint?.['terrain-exaggeration'] as number | undefined) ?? 1.5,
+                opacity: (spec.paint?.['terrain-opacity'] as number | undefined) ?? 1,
+                hillshadeStrength: (spec.paint?.['terrain-hillshade'] as number | undefined) ?? 0.15,
+                lightDirection:
+                    spec.paint?.['terrain-light-direction'] as [number, number, number] | undefined,
+                minZoom: spec.minzoom ?? 0,
+                maxZoom: spec.maxzoom ?? sourceSpec?.maxzoom ?? 19,
+            });
+            this._layerInstances.set(spec.id, tdLayer);
+            if (this._device !== null) {
+                const ctx = this._buildLayerContext(spec.id);
+                tdLayer.onAdd(ctx);
             }
         }
     }

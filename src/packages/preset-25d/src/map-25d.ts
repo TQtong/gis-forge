@@ -17,6 +17,8 @@ import { createCamera25D, type Camera25D } from '../../camera-25d/src/Camera25D.
 
 import { GeoForgeError, GeoForgeErrorCode, Map2D } from '../../preset-2d/src/map-2d.ts';
 import type { AnimationOptions, Map2DOptions } from '../../preset-2d/src/map-2d.ts';
+import type { LayerSpec } from '../../scene/src/layer-manager.ts';
+import type { RasterTileLayer } from '../../layer-tile-raster/src/RasterTileLayer.ts';
 
 // --- 从 L0 再导出光照类型（与 StyleSpec.light 一致） ---
 export type { LightSpec } from '../../core/src/types/style-spec.ts';
@@ -365,6 +367,110 @@ export class Map25D extends Map2D {
    * @example
    * map.remove();
    */
+  // ==================== 屏幕反投影（考虑 pitch/bearing） ====================
+  //
+  // Map2D 的 unproject 是纯正交反投影，无法处理 pitch 与 bearing。2.5D
+  // 场景下必须用 inverseVPMatrix 做真正的屏幕射线与地面平面的相交，
+  // 否则拖拽时屏幕 Y 方向像素变化对应的 lat 变化会被严重低估，造成
+  // "只能左右拖不能上下拖"的假象。
+
+  public override unproject(point: [number, number]): [number, number] {
+    const camera = this._cameraState;
+    if (camera === null || camera.inverseVPMatrix === null) {
+      return super.unproject(point);
+    }
+    const rect = this._canvas.getBoundingClientRect();
+    const w = Math.max(1, rect.width);
+    const h = Math.max(1, rect.height);
+
+    // 屏幕像素 → NDC（x:[-1,1] 右正，y:[-1,1] 上正）
+    const ndcX = (point[0] / w) * 2 - 1;
+    const ndcY = 1 - (point[1] / h) * 2;
+
+    // Reversed-Z：near clip.z=1，far clip.z=0；取两个端点反投影得到相机
+    // 相对的当前 zoom 世界像素空间中的射线
+    const inv = camera.inverseVPMatrix;
+    const unprojectToWorld = (nx: number, ny: number, nz: number): [number, number, number] => {
+      const x = inv[0] * nx + inv[4] * ny + inv[8] * nz + inv[12];
+      const y = inv[1] * nx + inv[5] * ny + inv[9] * nz + inv[13];
+      const z = inv[2] * nx + inv[6] * ny + inv[10] * nz + inv[14];
+      const wRec = inv[3] * nx + inv[7] * ny + inv[11] * nz + inv[15];
+      const invW = wRec === 0 ? 1 : 1 / wRec;
+      return [x * invW, y * invW, z * invW];
+    };
+
+    const near = unprojectToWorld(ndcX, ndcY, 1);
+    const far = unprojectToWorld(ndcX, ndcY, 0);
+    const dx = far[0] - near[0];
+    const dy = far[1] - near[1];
+    const dz = far[2] - near[2];
+
+    // 与地面 z=0 平面求交
+    let groundRelX: number;
+    let groundRelY: number;
+    if (Math.abs(dz) < 1e-9) {
+      // 射线与地面近乎平行（俯仰接近水平）—— 退化为中心点
+      groundRelX = near[0];
+      groundRelY = near[1];
+    } else {
+      const t = -near[2] / dz;
+      groundRelX = near[0] + t * dx;
+      groundRelY = near[1] + t * dy;
+    }
+
+    // (groundRelX, groundRelY) 为当前 zoom 下、相机中心为原点的 mercator 像素
+    // → 加回相机中心的绝对世界像素得到绝对坐标
+    const zoom = this.getZoom();
+    const center = this.getCenter();
+    const worldSize = 512 * Math.pow(2, zoom);
+    const cLat = Math.max(-85.05, Math.min(85.05, center[1]));
+    const cLatRad = (cLat * Math.PI) / 180;
+    const cxAbs = ((center[0] + 180) / 360) * worldSize;
+    const cyAbs = (1 - Math.log(Math.tan(cLatRad) + 1 / Math.cos(cLatRad)) / Math.PI) / 2 * worldSize;
+
+    const worldPx = cxAbs + groundRelX;
+    const worldPy = cyAbs + groundRelY;
+
+    const lng = (worldPx / worldSize) * 360 - 180;
+    const yNorm = 1 - (2 * worldPy) / worldSize;
+    const lat = Math.atan(Math.sinh(Math.PI * yNorm)) * (180 / Math.PI);
+    return [lng, lat];
+  }
+
+  // ==================== 地形接管底图渲染 ====================
+  //
+  // 参考 Mapbox GL v3 / Cesium：开启 cesium-terrain 后，所有平面 raster
+  // 图层停止 encode draw call，但保留瓦片下载/缓存能力供地形层 drape 借用。
+  // 切回 2D 模式（移除地形层）时自动恢复。
+
+  protected override _createLayerInstance(spec: LayerSpec): void {
+    super._createLayerInstance(spec);
+    this._syncRasterRenderState();
+  }
+
+  public override removeLayer(id: string): this {
+    super.removeLayer(id);
+    this._syncRasterRenderState();
+    return this;
+  }
+
+  /**
+   * 在 2.5D + 直接 QM 渲染架构下，CesiumTerrainLayer 只覆盖 available 矩阵
+   * 内的地形瓦片（如北京局部），其它区域仍需底图 RasterTileLayer 提供
+   * 平面 OSM。因此**不再禁用 raster 层渲染**，让两层共存：
+   *   • RasterTileLayer：平面底图，全球覆盖
+   *   • CesiumTerrainLayer：局部 3D 地形，深度测试让山脊盖住同位置底图
+   */
+  private _syncRasterRenderState(): void {
+    // 保持所有 raster 层渲染开启（No-op）
+    for (const inst of this._layerInstances.values()) {
+      if (inst.type === 'raster') {
+        const rl = inst as RasterTileLayer;
+        rl.setRenderEnabled?.(true);
+      }
+    }
+  }
+
   public override remove(): void {
     // 清理 2.5D 专属交互监听器
     if (this._pitchDragCleanup !== null) {
