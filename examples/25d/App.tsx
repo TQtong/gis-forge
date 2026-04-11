@@ -91,21 +91,29 @@ export function App(): React.ReactElement {
             });
             setEngineProgress(35);
 
-            map.addSource('osm-raster', {
-                type: 'raster',
+            // ── 单层地形 drape（参照 Mapbox GL v3 / MapLibre）──
+            // 一个 source + 一个 layer 同时处理底图 + 地形。
+            // 无 DEM 区域（如美国/非洲）自动退化为平面 OSM。
+            map.addSource('terrain-base', {
+                type: 'terrain-drape',
                 tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
                 tileSize: 256,
                 maxzoom: 19,
+                // 可选 elevation（Cesium QM 格式）
+                elevationUrl: 'https://sooncps.xwbuilders.com/api/ugis-dataprocess/v1/terrain/NhBLlMx3/',
+                elevationMaxZoom: 12,
                 attribution: '© OpenStreetMap contributors',
-            });
+            } as Record<string, unknown>);
 
             map.addLayer({
-                id: 'osm-tiles',
-                type: 'raster',
-                source: 'osm-raster',
+                id: 'basemap',
+                type: 'terrain-drape',
+                source: 'terrain-base',
                 paint: {
-                    'raster-opacity': 1,
-                    'raster-fade-duration': 300,
+                    'terrain-exaggeration': 1.5,
+                    'terrain-opacity': 1,
+                    'terrain-hillshade': 0.15,
+                    'terrain-light-direction': [-0.5, -0.7, 1.0],
                 },
             });
 
