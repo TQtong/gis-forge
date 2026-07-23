@@ -7,13 +7,14 @@
  * @stability experimental
  */
 
-import type { GlobeTileID, GlobeCamera } from '../../globe/src/globe-tile-mesh.ts';
+import type { GlobeTileID, GlobeCamera } from '../../globe/src/index.ts';
+import type { TilingScheme } from '../../core/src/geo/tiling-scheme.ts';
 import {
     meshToRTE,
     meshToRTEInto,
     getSegments,
     tileChordSag,
-} from '../../globe/src/globe-tile-mesh.ts';
+} from '../../globe/src/index.ts';
 import { _skyUniformData, _tileParamsData } from './globe-buffers.ts';
 import type { GlobeGPURefs, TileManagerState } from './globe-types.ts';
 import { getOrCreateTileMesh, touchTileLRU, loadTileTexture, flushPendingDestroys } from './globe-tiles.ts';
@@ -174,15 +175,16 @@ export function renderGlobeTiles(
     tiles: GlobeTileID[],
     refs: GlobeGPURefs,
     tileState: TileManagerState,
+    scheme: TilingScheme,
+    opacity: number,
     isDestroyed: () => boolean,
 ): { tilesRendered: number; drawCalls: number } {
-    if (!refs.globePipeline || !refs.cameraBindGroup || !refs.tileParamsBindGroup) {
+    if (!refs.globePipeline || !refs.cameraBindGroup || !refs.tileParamsBindGroupLayout) {
         return { tilesRendered: 0, drawCalls: 0 };
     }
 
     pass.setPipeline(refs.globePipeline);
     pass.setBindGroup(0, refs.cameraBindGroup);
-    pass.setBindGroup(2, refs.tileParamsBindGroup);
 
     let tilesRendered = 0;
     let drawCalls = 0;
@@ -238,6 +240,8 @@ export function renderGlobeTiles(
             device,
             tile.z, tile.x, tile.y,
             tileState.meshCache,
+            scheme,
+            refs.tileParamsBindGroupLayout,
             tileState.pendingDestroyBuffers,
         );
         if (!meshData) { continue; }
@@ -261,9 +265,14 @@ export function renderGlobeTiles(
         _tileParamsData[1] = uvOffsetV;
         _tileParamsData[2] = uvScaleU;
         _tileParamsData[3] = uvScaleV;
-        device.queue.writeBuffer(refs.tileParamsBuffer!, 0, _tileParamsData);
+        _tileParamsData[4] = opacity;
+        _tileParamsData[5] = 0;
+        _tileParamsData[6] = 0;
+        _tileParamsData[7] = 0;
+        device.queue.writeBuffer(meshData.tileParamsBuffer, 0, _tileParamsData);
 
         pass.setBindGroup(1, tileBG);
+        pass.setBindGroup(2, meshData.tileParamsBindGroup);
 
         pass.setVertexBuffer(0, meshData.vertexBuffer);
         pass.setIndexBuffer(meshData.indexBuffer, 'uint32');

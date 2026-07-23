@@ -4,8 +4,6 @@
 // 使用命名导出，无 default export，确保 Tree-Shake 友好。
 // ============================================================
 
-export { createGlobeRenderer } from './GlobeRenderer.ts';
-export type { GlobeRenderer, GlobeOptions } from './GlobeRenderer.ts';
 export type { AtmosphereConstants, StarfieldData, EllipsoidMeshData } from './GlobeRenderer.ts';
 export { generateEllipsoidMesh, generateStarfield, computeSunPositionECEF, computeTransmittanceLUT, computeCascadeSplits, buildAtmosphereConstants } from './GlobeRenderer.ts';
 
@@ -24,6 +22,7 @@ export type { SunPosition } from './sun.ts';
 // --- 3D Globe 瓦片网格 + 覆盖算法 ---
 export {
     getSegments,
+    tileChordSag,
     tessellateGlobeTile,
     tessellateGlobePolarCap,
     meshToRTE,

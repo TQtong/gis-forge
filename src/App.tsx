@@ -77,6 +77,12 @@ function bootGlobe(ctx: BootContext): { engine: Globe3D; teardown: () => void } 
         pitch: -90,
         atmosphere: true,
         skybox: true,
+        imagery: {
+            url: '/NaturalEarthII/{z}/{x}/{y}.jpg',
+            type: 'xyz',
+            scheme: 'geographic',
+            maximumLevel: 2,
+        },
         enableRotate: true,
         enableZoom: true,
         enableTilt: true,
@@ -86,13 +92,6 @@ function bootGlobe(ctx: BootContext): { engine: Globe3D; teardown: () => void } 
 
     markStepDone(ctx.setEngineSteps, 1);
     ctx.setEngineProgress(35);
-
-    // 默认不加载在线瓦片；需要底图时取消注释。
-    // globe.addImageryLayer({
-    //     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    //     type: 'xyz',
-    //     alpha: 1,
-    // });
 
     let teardownEvents: (() => void) | undefined;
 
@@ -137,11 +136,14 @@ function bootGlobe(ctx: BootContext): { engine: Globe3D; teardown: () => void } 
     }, 150);
 
     let minimumOverlayTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
     void globe.ready().then(() => {
+        if (cancelled) { return; }
         const elapsed = performance.now() - bootStartedAt;
         const remaining = Math.max(0, MIN_LOADING_SCREEN_MS - elapsed);
         minimumOverlayTimer = setTimeout(() => {
+            if (cancelled) { return; }
             minimumOverlayTimer = null;
             clearInterval(progressTimer);
             ctx.setEngineProgress(100);
@@ -149,9 +151,16 @@ function bootGlobe(ctx: BootContext): { engine: Globe3D; teardown: () => void } 
             ctx.setEngineStatus('ready');
             wireEvents();
         }, remaining);
+    }).catch((err) => {
+        if (cancelled) { return; }
+        clearInterval(progressTimer);
+        ctx.setEngineProgress(100);
+        ctx.setEngineStatus('ready');
+        console.error('[App] Globe3D 初始化失败', err);
     });
 
     const teardown = (): void => {
+        cancelled = true;
         clearInterval(progressTimer);
         if (minimumOverlayTimer !== null) { clearTimeout(minimumOverlayTimer); }
         teardownEvents?.();
@@ -256,11 +265,14 @@ function bootMap2D(ctx: BootContext): { engine: Map2D; teardown: () => void } {
     }, 150);
 
     let minimumOverlayTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
     void map.ready().then(() => {
+        if (cancelled) { return; }
         const elapsed = performance.now() - bootStartedAt;
         const remaining = Math.max(0, MIN_LOADING_SCREEN_MS - elapsed);
         minimumOverlayTimer = setTimeout(() => {
+            if (cancelled) { return; }
             minimumOverlayTimer = null;
             clearInterval(progressTimer);
             ctx.setEngineProgress(100);
@@ -271,6 +283,7 @@ function bootMap2D(ctx: BootContext): { engine: Map2D; teardown: () => void } {
     });
 
     const teardown = (): void => {
+        cancelled = true;
         clearInterval(progressTimer);
         if (minimumOverlayTimer !== null) { clearTimeout(minimumOverlayTimer); }
         teardownEvents?.();
@@ -401,11 +414,14 @@ function bootMap25D(ctx: BootContext): { engine: Map25D; teardown: () => void } 
     }, 150);
 
     let minimumOverlayTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
     void map.ready().then(() => {
+        if (cancelled) { return; }
         const elapsed = performance.now() - bootStartedAt;
         const remaining = Math.max(0, MIN_LOADING_SCREEN_MS - elapsed);
         minimumOverlayTimer = setTimeout(() => {
+            if (cancelled) { return; }
             minimumOverlayTimer = null;
             clearInterval(progressTimer);
             ctx.setEngineProgress(100);
@@ -416,6 +432,7 @@ function bootMap25D(ctx: BootContext): { engine: Map25D; teardown: () => void } 
     });
 
     const teardown = (): void => {
+        cancelled = true;
         clearInterval(progressTimer);
         if (minimumOverlayTimer !== null) { clearTimeout(minimumOverlayTimer); }
         teardownEvents?.();

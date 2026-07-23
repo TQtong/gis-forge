@@ -6,6 +6,7 @@ import {
   DEG_TO_RAD,
   EARTH_CIRCUMFERENCE,
   TILE_PIXEL_SIZE,
+  type DrapeTileCoverage,
 } from './types.ts';
 
 const MAX_LAT = 85.051128779806604;
@@ -141,6 +142,74 @@ export function lngLatToOsmTileUv(
 ): [number, number] {
   const [xf, yf] = lngLatToOsmTileFloat(lng, lat, z);
   return [xf - tileX, yf - tileY];
+}
+
+/** Compute the inclusive Web-Mercator XYZ tile range covering a geographic bbox. */
+export function computeOsmTileCoverage(
+  west: number,
+  south: number,
+  east: number,
+  north: number,
+  zoom: number,
+): DrapeTileCoverage {
+  const z = Math.max(0, Math.min(22, Math.floor(zoom)));
+  const tileCount = Math.pow(2, z);
+  const [westX, northY] = lngLatToOsmTileFloat(west, north, z);
+  const [eastX, southY] = lngLatToOsmTileFloat(east, south, z);
+  const clampTile = (value: number): number => Math.max(
+    0,
+    Math.min(tileCount - 1, Math.floor(value)),
+  );
+
+  return {
+    z,
+    xMin: clampTile(westX),
+    yMin: clampTile(northY),
+    xMax: clampTile(eastX - 1e-9),
+    yMax: clampTile(southY - 1e-9),
+  };
+}
+
+/** Map a geographic point into the normalized UV space of a drape tile atlas. */
+export function lngLatToOsmAtlasUv(
+  lng: number,
+  lat: number,
+  coverage: DrapeTileCoverage,
+): [number, number] {
+  const [xf, yf] = lngLatToOsmTileFloat(lng, lat, coverage.z);
+  const columns = coverage.xMax - coverage.xMin + 1;
+  const rows = coverage.yMax - coverage.yMin + 1;
+  return [
+    (xf - coverage.xMin) / columns,
+    (yf - coverage.yMin) / rows,
+  ];
+}
+
+export interface OSMTileCoord {
+  readonly z: number;
+  readonly x: number;
+  readonly y: number;
+}
+
+/** Map UVs from a source OSM tile into an ancestor OSM texture. */
+export function computeOsmAncestorUvTransform(
+  sourceTile: OSMTileCoord,
+  textureTile: OSMTileCoord,
+): { scale: readonly [number, number]; offset: readonly [number, number] } | null {
+  if (textureTile.z > sourceTile.z) {
+    return null;
+  }
+  const divisor = Math.pow(2, sourceTile.z - textureTile.z);
+  const scale = 1 / divisor;
+  const offsetX = sourceTile.x * scale - textureTile.x;
+  const offsetY = sourceTile.y * scale - textureTile.y;
+  if (
+    offsetX < -1e-9 || offsetY < -1e-9 ||
+    offsetX + scale > 1 + 1e-9 || offsetY + scale > 1 + 1e-9
+  ) {
+    return null;
+  }
+  return { scale: [scale, scale], offset: [offsetX, offsetY] };
 }
 
 /** 展开 OSM URL 模板（`{z}/{x}/{y}`） */

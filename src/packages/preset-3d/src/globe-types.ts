@@ -7,7 +7,7 @@
  * @stability experimental
  */
 
-import type { GlobeTileMesh } from '../../globe/src/globe-tile-mesh.ts';
+import type { GlobeTileMesh } from '../../globe/src/index.ts';
 
 /**
  * 构造 {@link import('./globe-3d.ts').Globe3D} 时的选项。
@@ -21,7 +21,7 @@ export interface Globe3DOptions {
     readonly container: string | HTMLElement;
 
     /**
-     * 地形数据源（DEM）。未实现完整管线时仅保留字段供后续 TerrainLayer 使用。
+     * 地形数据源（DEM）。当前稳定 Globe3D 路径不支持；显式提供会抛出 FEATURE_NOT_IMPLEMENTED。
      */
     readonly terrain?: {
         /** DEM 或 TileJSON 根 URL */
@@ -44,21 +44,23 @@ export interface Globe3DOptions {
     readonly imagery?: {
         /** `{z}/{x}/{y}` 模板 URL */
         readonly url?: string;
-        /** 方案标识，如 `xyz` / `wmts`（调度器扩展用） */
+        /** 方案标识；当前仅支持省略或 `xyz`，其它值会显式抛错 */
         readonly type?: string;
         /** 瓦片投影方案：Web Mercator 或地理经纬格网 */
         readonly scheme?: 'webmercator' | 'geographic';
-        /** 子域轮询列表，替换 URL 中的 `{s}` */
+        /** 子域轮询列表；当前不支持非空数组 */
         readonly subdomains?: string[];
-        /** TMS 风格 Y 轴翻转（相对 XYZ） */
+        /** TMS 风格 Y 轴翻转；当前仅支持 `false` 或省略 */
         readonly tmsFlipY?: boolean;
         /** 最大 zoom，防止请求不存在级别 */
         readonly maximumLevel?: number;
+        /** 影像不透明度 [0,1] */
+        readonly alpha?: number;
     };
 
     /** `false` 关闭大气 pass；默认 `true` */
     readonly atmosphere?: boolean;
-    /** 阴影（预留）；默认 `false` */
+    /** 阴影。当前仅支持 `false`；`true` 会抛出 FEATURE_NOT_IMPLEMENTED。 */
     readonly shadows?: boolean;
     /** `false` 不渲染天穹全屏背景；默认 `true` */
     readonly skybox?: boolean;
@@ -82,13 +84,13 @@ export interface Globe3DOptions {
          */
         readonly southTextureUrl?: string;
     };
-    /** 雾效（预留）；默认 `true` */
+    /** 雾效。当前仅支持 `false` 或省略；`true` 会抛出 FEATURE_NOT_IMPLEMENTED。 */
     readonly fog?: boolean;
-    /** 无影像时的地球底色 RGBA，默认深蓝 */
+    /** 无影像时的地球底色；当前自定义值尚不支持，显式提供会抛错 */
     readonly baseColor?: [number, number, number, number];
-    /** 目标帧率提示（预留）；当前帧循环未严格限频 */
+    /** 目标帧率限制。当前不支持；显式提供会抛出 FEATURE_NOT_IMPLEMENTED。 */
     readonly targetFrameRate?: number;
-    /** MSAA 等（预留） */
+    /** MSAA。当前仅支持 `false` 或省略；`true` 会抛出 FEATURE_NOT_IMPLEMENTED。 */
     readonly antialias?: boolean;
     /** 画布 `devicePixelRatio` 上限，减轻 4K/5K 下像素填充压力 */
     readonly maxPixelRatio?: number;
@@ -116,7 +118,7 @@ export interface Globe3DOptions {
 
 /**
  * 场景中一个可渲染实体（模型 / 广告牌 / 标签）的描述。
- * 当前 {@link import('./globe-3d.ts').Globe3D} 仅存储元数据，渲染管线可后续接入。
+ * 当前稳定 Globe3D 路径不支持实体渲染，`addEntity` 会显式抛错。
  */
 export interface EntitySpec {
     /** 业务唯一 id；省略时由引擎生成 */
@@ -141,34 +143,16 @@ export interface ImageryLayerRecord {
     readonly url: string;
     /** 协议类型字符串 */
     readonly type: string;
+    /** 瓦片矩阵投影方案 */
+    readonly scheme: 'webmercator' | 'geographic';
+    /** 数据源最高原生层级 */
+    readonly maximumLevel: number;
     /** 不透明度 [0,1] */
     alpha: number;
 }
 
 /**
- * `add3DTileset` 占位记录；3D Tiles 渲染未接引擎前仅存配置。
- */
-export interface TilesetRecord {
-    readonly id: string;
-    readonly url: string;
-    /** 屏幕空间误差阈值（像素） */
-    maximumScreenSpaceError: number;
-    show: boolean;
-}
-
-/**
- * `addGeoJSON` 占位记录。
- */
-export interface GeoJsonRecord {
-    readonly id: string;
-    data: unknown;
-    options: unknown;
-}
-
-/**
  * 单个瓦片在 CPU/GPU 侧的缓存项：纹理、bind group、加载状态。
- *
- * **地形占位**：`demReady` / `demData` 为后续 DEM 接入预留；当前平面瓦片 `demReady === false`。
  */
 export interface CachedTile {
     /** GPU 纹理；加载中或失败时为 `null` */
@@ -188,10 +172,6 @@ export interface CachedTile {
     retryCount: number;
     /** 下次允许重试的时间戳（performance.now() + backoff_ms），仅 loadError=true 时有意义 */
     retryAfter: number;
-    /** DEM 是否已解析；未就绪时按 z=0 平面渲染 */
-    demReady: boolean;
-    /** 高程栅格；`null` 表示平面 */
-    demData: Float32Array | null;
 }
 
 /**
@@ -204,6 +184,10 @@ export interface CachedMesh {
     indexBuffer: GPUBuffer;
     /** RTE 交错顶点（每顶点 8×float32），每帧 `writeBuffer` 更新，不每帧 `createBuffer` */
     vertexBuffer: GPUBuffer;
+    /** 此网格独占的 UV 参数 uniform，避免一帧多 draw 共享写入造成参数串扰 */
+    tileParamsBuffer: GPUBuffer;
+    /** 预绑定 {@link tileParamsBuffer} 的 group(2) */
+    tileParamsBindGroup: GPUBindGroup;
 }
 
 /**
@@ -439,6 +423,8 @@ export interface TileManagerState {
     tileUrlTemplate: string;
     /** 是否启用瓦片影像加载。`false` 时 `loadTileTexture` 整个跳过，零网络/CPU 开销 */
     imageryEnabled: boolean;
+    /** 切换/清空影像源时递增，使旧异步请求不能写回新缓存。 */
+    requestGeneration: number;
     /**
      * 待销毁纹理列表（两阶段淘汰）。
      *

@@ -81,7 +81,7 @@ export interface DecodedTerrainTile {
    *   posXY (z=0 mercator px，相对瓦片中心)
    *   height (米)
    *   normal xyz (世界空间)
-   *   uv (OSM drape 纹理 UV，已裁到 osmTile 局部 [0,1])
+   *   uv (OSM drape 图集归一化 UV)
    */
   readonly vertices: Float32Array;
   /** 顶点索引 */
@@ -100,10 +100,19 @@ export interface DecodedTerrainTile {
   readonly tileCenterMercatorPxZ0: readonly [number, number];
   /** 瓦片中心 (lng,lat) 度 */
   readonly tileCenterLngLat: readonly [number, number];
-  /** 用于 drape 的 OSM 瓦片坐标（XYZ 墨卡托）— 该瓦片完整包含地形 bbox */
-  readonly drapeOsm: { readonly z: number; readonly x: number; readonly y: number };
+  /** 用于 drape 的 OSM XYZ 瓦片图集覆盖范围 */
+  readonly drapeOsm: DrapeTileCoverage;
   /** 原始字节数（用于 LRU 计费） */
   readonly byteSize: number;
+}
+
+/** Web-Mercator XYZ tiles packed into one terrain drape texture atlas. */
+export interface DrapeTileCoverage {
+  readonly z: number;
+  readonly xMin: number;
+  readonly yMin: number;
+  readonly xMax: number;
+  readonly yMax: number;
 }
 
 /** Provider 元数据（layer.json 解析后） */
@@ -114,6 +123,8 @@ export interface CesiumTerrainMetadata {
   readonly tileUrlTemplates: readonly string[];
   readonly attribution: string;
   readonly version: string;
+  /** URL 中 y 坐标的约定；内部调度始终使用 Geographic TMS。 */
+  readonly scheme: 'tms' | 'xyz';
   /** available[z] = rectangle list，标识该层哪些 (x,y) 有瓦片 */
   readonly available: ReadonlyArray<ReadonlyArray<{
     readonly startX: number;
@@ -139,8 +150,8 @@ export interface TerrainCacheEntry {
   drapeLoaded: boolean;
   /** 该瓦片完整 bind group（uniform + sampler + texture） */
   tileBindGroup: GPUBindGroup | null;
-  /** 与 drape 纹理对应的 OSM 瓦片坐标 */
-  drapeOsm: { z: number; x: number; y: number } | null;
+  /** 与 drape 图集纹理对应的 OSM 瓦片覆盖范围 */
+  drapeOsm: DrapeTileCoverage | null;
   byteSize: number;
   errorCount: number;
   prev: TerrainCacheEntry | null;

@@ -8,9 +8,8 @@ import type { BBox2D } from '../../core/src/math/bbox.ts';
 import type { Feature } from '../../core/src/types/feature.ts';
 import type { FilterExpression, StyleSpec } from '../../core/src/types/style-spec.ts';
 import type { PickResult, CameraState } from '../../core/src/types/viewport.ts';
-import type { Layer } from '../../scene/src/scene-graph.ts';
-import type { RasterTileLayer } from '../../layer-tile-raster/src/RasterTileLayer.ts';
-import { createRasterTileLayer } from '../../layer-tile-raster/src/RasterTileLayer.ts';
+import type { Layer } from '../../scene/src/index.ts';
+import { createRasterTileLayer, type RasterTileLayer } from '../../layer-tile-raster/src/index.ts';
 import { createCesiumTerrainLayer } from '../../layer-cesium-terrain/src/index.ts';
 import { createTerrainDrapeLayer } from '../../layer-terrain-drape/src/index.ts';
 
@@ -104,6 +103,8 @@ export const GeoForgeErrorCode = {
     CONFIG_NOT_FOUND: 'CONFIG_NOT_FOUND',
     /** 地图实例已销毁仍被调用。 */
     MAP_DESTROYED: 'MAP_DESTROYED',
+    /** 调用了尚未接入稳定渲染链路的公开能力。 */
+    FEATURE_NOT_IMPLEMENTED: 'FEATURE_NOT_IMPLEMENTED',
 } as const;
 
 /**
@@ -904,7 +905,16 @@ export class Map2D {
             }
 
             // 监听设备丢失
+            this._device.addEventListener('uncapturederror', (event) => {
+                devError('[Map2D] uncaptured WebGPU error:', event.error.message);
+            });
             this._device.lost.then((info) => {
+                // 主动 remove() 会触发 reason=destroyed；这是正常生命周期，
+                // 不应作为运行时故障上报。检查 _removing 还能覆盖 destroy()
+                // 与最终 _destroyed=true 之间的微任务窗口。
+                if (info.reason === 'destroyed' || this._destroyed || this._removing) {
+                    return;
+                }
                 devError('[Map2D] GPU device lost:', info.message);
                 this._device = null;
                 this._gpuContext = null;

@@ -30,8 +30,8 @@
 import {
     tessellateGlobePolarCap,
     meshToRTE,
-} from '../../globe/src/globe-tile-mesh.ts';
-import type { GlobeTileMesh, GlobeCamera } from '../../globe/src/globe-tile-mesh.ts';
+} from '../../globe/src/index.ts';
+import type { GlobeTileMesh, GlobeCamera } from '../../globe/src/index.ts';
 import type { GlobeGPURefs, PolarCapState } from './globe-types.ts';
 import { _tileParamsData } from './globe-buffers.ts';
 import {
@@ -720,6 +720,10 @@ export function renderPolarCaps(
     _tileParamsData[1] = 0;
     _tileParamsData[2] = 1;
     _tileParamsData[3] = 1;
+    _tileParamsData[4] = 1;
+    _tileParamsData[5] = 0;
+    _tileParamsData[6] = 0;
+    _tileParamsData[7] = 0;
     device.queue.writeBuffer(refs.tileParamsBuffer!, 0, _tileParamsData);
 
     let drawCalls = 0;

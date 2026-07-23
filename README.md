@@ -70,7 +70,7 @@ L1 GPU层     DeviceManager / BufferPool / TextureManager / GPUUploader / ...
 L0 基础层    math/ geo/ algorithm/ index/ precision/ types/ infra/
 ```
 
-依赖方向：L6 → L5 → L4 → L3 → L2 → L1 → L0，禁止反向或跨层。
+依赖方向：L1～L5 仅允许同层、向下一层或直接引用 L0，禁止反向与跨层；L6 是组合根，可通过各包公开入口组装 L0～L5 能力。
 
 ## 包清单
 

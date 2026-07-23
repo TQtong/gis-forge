@@ -1785,8 +1785,9 @@ class Camera25DImpl implements Camera25D {
         }
 
         // 交点的 Mercator 像素坐标
-        const worldPxX = _tempVec3A[0] + t * dirX;
-        const worldPxY = _tempVec3A[1] + t * dirY;
+        lngLatToPixel(_pxA, this._cx, this._cy, this._zoom);
+        const worldPxX = _pxA[0] + _tempVec3A[0] + t * dirX;
+        const worldPxY = _pxA[1] + _tempVec3A[1] + t * dirY;
 
         if (!Number.isFinite(worldPxX) || !Number.isFinite(worldPxY)) {
             return null;
@@ -1816,7 +1817,8 @@ class Camera25DImpl implements Camera25D {
         lngLatToPixel(_pxA, lon, lat, this._zoom);
 
         // Mercator 像素 → 裁剪空间（地面 z=0）
-        vec3.set(_tempVec3A, _pxA[0], _pxA[1], 0);
+        lngLatToPixel(_pxB, this._cx, this._cy, this._zoom);
+        vec3.set(_tempVec3A, _pxA[0] - _pxB[0], _pxA[1] - _pxB[1], 0);
         vec3.transformMat4(_tempVec3A, _tempVec3A, this._mutable.vpMatrix);
 
         const vpW = this._lastViewportWidth;
@@ -2761,6 +2763,11 @@ class Camera25DImpl implements Camera25D {
             }
 
             // VP = P × V
+            // Web Mercator screen coordinates (east +X, south +Y, elevation +Z)
+            // are left-handed. Fold the handedness adapter into the public
+            // projection so every consumer observes east on screen-right.
+            this._mutable.projectionMatrix[0] = -this._mutable.projectionMatrix[0];
+
             mat4.multiply(
                 this._mutable.vpMatrix,
                 this._mutable.projectionMatrix,

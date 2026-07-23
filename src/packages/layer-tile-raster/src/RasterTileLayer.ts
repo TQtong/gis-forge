@@ -314,6 +314,29 @@ fn hueRotateRGB(color: vec3<f32>, angle: f32) -> vec3<f32> {
 }
 `;
 
+/** 逐级缩小 raster 纹理的全屏三角形 shader。 */
+const RASTER_MIPMAP_WGSL = /* wgsl */ `
+@group(0) @binding(0) var mipSampler: sampler;
+@group(0) @binding(1) var mipSource: texture_2d<f32>;
+
+struct MipVsOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex fn mip_vs(@builtin(vertex_index) i: u32) -> MipVsOut {
+  let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  var out: MipVsOut;
+  out.position = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+  out.uv = uv;
+  return out;
+}
+
+@fragment fn mip_fs(in: MipVsOut) -> @location(0) vec4<f32> {
+  return textureSample(mipSource, mipSampler, in.uv);
+}
+`;
+
 // ---------------------------------------------------------------------------
 // 内部类型定义
 // ---------------------------------------------------------------------------
@@ -687,10 +710,13 @@ class TileCache {
    * @param bindGroup - 纹理 BindGroup
    * @param byteSize - 纹理字节大小
    */
-  setReady(key: string, texture: GPUTexture, bindGroup: GPUBindGroup, byteSize: number): void {
+  setReady(key: string, texture: GPUTexture, bindGroup: GPUBindGroup, byteSize: number): boolean {
     const entry = this.map.get(key);
     if (entry === undefined) {
-      return;
+      // The loading entry may have been evicted while the network/decode work was in flight.
+      // Ownership cannot be transferred to the cache, so release the just-created texture.
+      texture.destroy();
+      return false;
     }
     // 如果旧纹理存在且不同，先销毁旧的
     if (entry.texture !== null && entry.texture !== texture) {
@@ -711,6 +737,7 @@ class TileCache {
     this.moveToTail(entry);
     // 填入新数据后检查是否需要淘汰
     this.evictUntilFit();
+    return true;
   }
 
   /** 检查键是否存在 */
@@ -1158,7 +1185,7 @@ function screenToHorizonRel(
  * @param maxZoom      - 图层最大缩放级别（数据源最大级别）
  * @returns 需要的瓦片坐标列表，按距中心排序
  */
-function computeCoveringTiles(
+export function computeRasterCoveringTiles(
   camera: CameraState,
   canvasWidth: number,
   canvasHeight: number,
@@ -1240,23 +1267,31 @@ function computeCoveringTiles(
   }
 
   const tileSizePx = worldSize / n;
-  const minTileX = Math.max(0, Math.floor(minAbsX / tileSizePx));
-  const minTileY = Math.max(0, Math.floor(minAbsY / tileSizePx));
-  const maxTileX = Math.min(n - 1, Math.ceil(maxAbsX / tileSizePx));
-  const maxTileY = Math.min(n - 1, Math.ceil(maxAbsY / tileSizePx));
+  let minTileX = Math.max(0, Math.floor(minAbsX / tileSizePx));
+  let minTileY = Math.max(0, Math.floor(minAbsY / tileSizePx));
+  let maxTileX = Math.min(n - 1, Math.ceil(maxAbsX / tileSizePx));
+  let maxTileY = Math.min(n - 1, Math.ceil(maxAbsY / tileSizePx));
 
   // 安全检查：如果估算瓦片数量过大（可能由精度问题导致），截断范围
   const estTileCount = (maxTileX - minTileX + 1) * (maxTileY - minTileY + 1);
   if (estTileCount > MAX_COVERING_TILES * 4 || estTileCount < 0) {
-    // 回退到以中心为基准的保守范围
-    const halfRange = Math.ceil(Math.sqrt(MAX_COVERING_TILES) / 2);
+    // 高 pitch 的地平线 BBox 可能很大。旧逻辑退化成单个中心瓦片，直接
+    // 造成整片空洞；这里按原 BBox 长宽比裁出一个包含中心的预算窗口。
+    const requestedW = Math.max(1, maxTileX - minTileX + 1);
+    const requestedH = Math.max(1, maxTileY - minTileY + 1);
+    const targetW = Math.max(1, Math.min(
+      requestedW,
+      Math.floor(Math.sqrt(MAX_COVERING_TILES * requestedW / requestedH)),
+    ));
+    const targetH = Math.max(1, Math.min(requestedH, Math.floor(MAX_COVERING_TILES / targetW)));
     const cTileX = Math.floor(cx / tileSizePx);
     const cTileY = Math.floor(cy / tileSizePx);
-    return [{
-      x: Math.max(0, Math.min(n - 1, cTileX)),
-      y: Math.max(0, Math.min(n - 1, cTileY)),
-      z: tileZ,
-    }];
+    const startX = Math.max(minTileX, Math.min(maxTileX - targetW + 1, cTileX - Math.floor(targetW / 2)));
+    const startY = Math.max(minTileY, Math.min(maxTileY - targetH + 1, cTileY - Math.floor(targetH / 2)));
+    minTileX = startX;
+    minTileY = startY;
+    maxTileX = startX + targetW - 1;
+    maxTileY = startY + targetH - 1;
   }
 
   // ═══ 步骤 3：枚举 + 按距中心排序 + 截断 ═══
@@ -1790,7 +1825,7 @@ function coveringTilesWithOverzoom(
   config: OverzoomConfig,
 ): ResolvedTile[] {
   // 计算 display zoom 下的覆盖瓦片（允许超过 maxNativeZoom）
-  const displayTiles = computeCoveringTiles(camera, canvasWidth, canvasHeight, minZoom, maxDisplayZoom);
+  const displayTiles = computeRasterCoveringTiles(camera, canvasWidth, canvasHeight, minZoom, maxDisplayZoom);
   const resolved: ResolvedTile[] = [];
   // 按 displayKey 去重——同一个显示位置不重复
   const seen = new Set<string>();
@@ -2352,7 +2387,6 @@ function parseStyleUniforms(paint: Record<string, unknown> | undefined, baseOpac
 export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileLayer {
   // ── 1. 校验并规范化选项 ──
   const cfg = validateOptions(opts);
-  const tileByteSize = cfg.tileSize * cfg.tileSize * BYTES_PER_PIXEL_RGBA8;
 
   // ── 2. 内部状态 ──
   const cache = new TileCache(CACHE_MAX_ENTRIES, CACHE_MAX_BYTES);
@@ -2398,6 +2432,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
   const inflightRequests = new Map<string, AbortController>();
   let concurrentCount = 0;
   const pendingQueue: Array<{ key: string; z: number; x: number; y: number; priority: number }> = [];
+  const pendingKeys = new Set<string>();
 
   // 当前帧可见瓦片
   let currentVisibleTiles: VisibleTile[] = [];
@@ -2464,6 +2499,9 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
   let styleBindGroupLayout: GPUBindGroupLayout | null = null;
   let textureBindGroupLayout: GPUBindGroupLayout | null = null;
   let pipelineLayout: GPUPipelineLayout | null = null;
+  let mipmapPipeline: GPURenderPipeline | null = null;
+  let mipmapSampler: GPUSampler | null = null;
+  let mipmapBindGroupLayout: GPUBindGroupLayout | null = null;
 
   // ── 4. GPU 资源初始化 ──
 
@@ -2483,8 +2521,35 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     sampler = dev.createSampler({
       magFilter: 'linear',
       minFilter: 'linear',
+      mipmapFilter: 'linear',
       addressModeU: 'clamp-to-edge',
       addressModeV: 'clamp-to-edge',
+    });
+
+    mipmapSampler = dev.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
+    });
+
+    mipmapBindGroupLayout = dev.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+      ],
+    });
+
+    const mipmapShaderModule = dev.createShaderModule({ code: RASTER_MIPMAP_WGSL });
+    mipmapPipeline = dev.createRenderPipeline({
+      layout: dev.createPipelineLayout({ bindGroupLayouts: [mipmapBindGroupLayout] }),
+      vertex: { module: mipmapShaderModule, entryPoint: 'mip_vs' },
+      fragment: {
+        module: mipmapShaderModule,
+        entryPoint: 'mip_fs',
+        targets: [{ format: 'rgba8unorm' }],
+      },
+      primitive: { topology: 'triangle-list' },
     });
 
     // BindGroup 布局定义
@@ -2625,6 +2690,57 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
    * @param x - 列号
    * @param y - 行号
    */
+  /** Generate lower-resolution levels after level 0 has been uploaded. */
+  function generateTextureMipmaps(texture: GPUTexture, mipLevelCount: number): void {
+    if (
+      device === null
+      || mipmapPipeline === null
+      || mipmapSampler === null
+      || mipmapBindGroupLayout === null
+      || mipLevelCount <= 1
+    ) {
+      return;
+    }
+
+    const encoder = device.createCommandEncoder({ label: 'raster-mipmap-encoder' });
+    for (let level = 1; level < mipLevelCount; level++) {
+      const bindGroup = device.createBindGroup({
+        layout: mipmapBindGroupLayout,
+        entries: [
+          { binding: 0, resource: mipmapSampler },
+          {
+            binding: 1,
+            resource: texture.createView({
+              baseMipLevel: level - 1,
+              mipLevelCount: 1,
+            }),
+          },
+        ],
+      });
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: texture.createView({ baseMipLevel: level, mipLevelCount: 1 }),
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        }],
+      });
+      pass.setPipeline(mipmapPipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3);
+      pass.end();
+    }
+    device.queue.submit([encoder.finish()]);
+  }
+
+  function textureByteSize(width: number, height: number, mipLevelCount: number): number {
+    let bytes = 0;
+    for (let level = 0; level < mipLevelCount; level++) {
+      bytes += Math.max(1, width >> level) * Math.max(1, height >> level) * BYTES_PER_PIXEL_RGBA8;
+    }
+    return bytes;
+  }
+
   async function loadTile(key: string, z: number, x: number, y: number): Promise<void> {
     if (device === null || urlTemplates.length === 0) {
       return;
@@ -2641,6 +2757,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     inflightRequests.set(key, controller);
     concurrentCount++;
     idlePendingCount++;
+    let texture: GPUTexture | null = null;
 
     try {
       // 网络请求
@@ -2663,9 +2780,13 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       }
 
       // 创建 GPU 纹理
-      const texture = device.createTexture({
-        size: [bitmap.width, bitmap.height],
+      const textureWidth = bitmap.width;
+      const textureHeight = bitmap.height;
+      const mipLevelCount = Math.floor(Math.log2(Math.max(textureWidth, textureHeight))) + 1;
+      texture = device.createTexture({
+        size: [textureWidth, textureHeight],
         format: 'rgba8unorm',
+        mipLevelCount,
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
       });
 
@@ -2673,18 +2794,30 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       device.queue.copyExternalImageToTexture(
         { source: bitmap },
         { texture },
-        [bitmap.width, bitmap.height],
+        [textureWidth, textureHeight],
       );
       bitmap.close();
+      generateTextureMipmaps(texture, mipLevelCount);
 
       // 创建 BindGroup 并存入缓存
       const bindGroup = createTileBindGroup(texture);
-      cache.setReady(key, texture, bindGroup, tileByteSize);
+      const cached = cache.setReady(
+        key,
+        texture,
+        bindGroup,
+        textureByteSize(textureWidth, textureHeight, mipLevelCount),
+      );
+      // setReady owns (or destroys) the texture from this point onward.
+      texture = null;
+      if (!cached) {
+        return;
+      }
 
       // ── Overzoom §二：标记瓦片有数据 ──
       prober.markExists(z, x, y);
 
     } catch (err: unknown) {
+      texture?.destroy();
       // 错误分类与处理
       const errType = classifyError(err);
       if (errType === 'ignore') {
@@ -2734,8 +2867,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
    * @param priority - 优先级（越大越优先）
    */
   function scheduleTileLoad(key: string, z: number, x: number, y: number, priority: number): void {
-    // 已在加载中 → 忽略
-    if (inflightRequests.has(key)) {
+    // 已在加载中或已排队 → 忽略，防止每帧重复插入同一瓦片。
+    if (inflightRequests.has(key) || pendingKeys.has(key)) {
       return;
     }
 
@@ -2745,6 +2878,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     } else {
       // 入队等待
       pendingQueue.push({ key, z, x, y, priority });
+      pendingKeys.add(key);
       // 按优先级降序排列
       pendingQueue.sort((a, b) => b.priority - a.priority);
     }
@@ -2756,6 +2890,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
   function flushPendingQueue(): void {
     while (concurrentCount < MAX_CONCURRENT_REQUESTS && pendingQueue.length > 0) {
       const req = pendingQueue.shift()!;
+      pendingKeys.delete(req.key);
       // 检查该瓦片是否仍然需要
       if (lastNeededKeys.has(req.key)) {
         void loadTile(req.key, req.z, req.x, req.y);
@@ -2773,13 +2908,13 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     for (const [key, controller] of inflightRequests) {
       if (!neededKeys.has(key)) {
         controller.abort();
-        inflightRequests.delete(key);
-        concurrentCount--;
+        // Map 删除和并发计数只由 loadTile.finally 负责，避免双重递减。
       }
     }
     // 清理队列中过期的请求
     for (let i = pendingQueue.length - 1; i >= 0; i--) {
       if (!neededKeys.has(pendingQueue[i].key)) {
+        pendingKeys.delete(pendingQueue[i].key);
         pendingQueue.splice(i, 1);
       }
     }
@@ -2792,9 +2927,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     for (const controller of inflightRequests.values()) {
       controller.abort();
     }
-    inflightRequests.clear();
-    concurrentCount = 0;
     pendingQueue.length = 0;
+    pendingKeys.clear();
   }
 
   // ── 6. 释放 GPU 资源 ──
@@ -2813,6 +2947,9 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     indexBuffer = null;
     pipeline = null;
     sampler = null;
+    mipmapPipeline = null;
+    mipmapSampler = null;
+    mipmapBindGroupLayout = null;
     cameraBindGroup = null;
     styleBindGroup = null;
     cameraBindGroupLayout = null;

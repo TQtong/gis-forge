@@ -13,8 +13,8 @@ import type { CameraState, Viewport } from '../../core/src/types/viewport.ts';
 import { geodeticToECEF } from '../../core/src/geo/ellipsoid.ts';
 import * as mat4d from '../../core/src/math/mat4d.ts';
 import * as vec3d from '../../core/src/math/vec3d.ts';
-import type { Camera3D } from '../../camera-3d/src/Camera3D.ts';
-import type { GlobeCamera } from '../../globe/src/globe-tile-mesh.ts';
+import type { Camera3D } from '../../camera-3d/src/index.ts';
+import type { GlobeCamera } from '../../globe/src/index.ts';
 import {
     _cameraUniformData,
     _ecefCam64,
@@ -35,7 +35,7 @@ import {
     RAD2DEG,
     TWO_PI,
 } from './globe-constants.ts';
-import { computeSunDirectionECEF } from '../../globe/src/sun.ts';
+import { computeSunDirectionECEF } from '../../globe/src/index.ts';
 import { computeHorizonDist } from './globe-utils.ts';
 import type { GlobeGPURefs } from './globe-types.ts';
 

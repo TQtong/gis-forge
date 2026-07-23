@@ -10,7 +10,7 @@
  */
 
 import { WGS84_A } from '../../core/src/geo/ellipsoid.ts';
-import type { GlobeTileMesh } from '../../globe/src/globe-tile-mesh.ts';
+import type { GlobeTileMesh } from '../../globe/src/index.ts';
 import {
     ATMO_RADIUS_FACTOR,
     ATMO_SPHERE_SEGMENTS,

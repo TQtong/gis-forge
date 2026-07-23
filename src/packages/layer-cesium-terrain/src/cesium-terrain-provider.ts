@@ -48,6 +48,7 @@ export class CesiumTerrainProvider {
   private _meta: CesiumTerrainMetadata | null = null;
   private _readyPromise: Promise<CesiumTerrainMetadata> | null = null;
   private _inflight = new Map<string, AbortController>();
+  private _requests = new Map<string, Promise<QuantizedMeshRaw>>();
   private _concurrent = 0;
   private _pending: Array<{ z: number; x: number; y: number; resolve: (v: QuantizedMeshRaw) => void; reject: (e: Error) => void }> = [];
 
@@ -110,6 +111,7 @@ export class CesiumTerrainProvider {
         tileUrlTemplates: tiles,
         attribution: json.attribution ?? '',
         version: json.version ?? '1.0.0',
+        scheme: json.scheme ?? 'tms',
         available,
       };
       this._meta = meta;
@@ -125,7 +127,19 @@ export class CesiumTerrainProvider {
     if (this._meta === null) { return false; }
     if (z < this._meta.minZoom || z > this._meta.maxZoom) { return false; }
     const level = this._meta.available[z];
-    if (level === undefined) { return false; }
+    if (level === undefined) {
+      // `available` 可省略；矩阵完全缺失表示 bounds 内连续覆盖，而不是空数据源。
+      if (this._meta.available.length !== 0) { return false; }
+      const tilesX = 2 * Math.pow(2, z);
+      const tilesY = Math.pow(2, z);
+      if (x < 0 || x >= tilesX || y < 0 || y >= tilesY) { return false; }
+      const west = -180 + x * (360 / tilesX);
+      const east = west + 360 / tilesX;
+      const south = -90 + y * (180 / tilesY);
+      const north = south + 180 / tilesY;
+      const bounds = this._meta.bounds;
+      return east > bounds[0] && west < bounds[2] && north > bounds[1] && south < bounds[3];
+    }
     for (let i = 0; i < level.length; i++) {
       const r = level[i];
       if (x >= r.startX && x <= r.endX && y >= r.startY && y <= r.endY) {
@@ -138,16 +152,17 @@ export class CesiumTerrainProvider {
   /** 请求并解码单个瓦片（内部维护 6 并发） */
   loadTile(z: number, x: number, y: number): Promise<QuantizedMeshRaw> {
     const key = `${z}/${x}/${y}`;
-    if (this._inflight.has(key)) {
-      // 已在请求中 → 返回新的 Promise 包装，实际复用单次结果
-      return new Promise((resolve, reject) => {
-        this._pending.push({ z, x, y, resolve, reject });
-      });
-    }
-    return new Promise((resolve, reject) => {
+    const existing = this._requests.get(key);
+    if (existing !== undefined) { return existing; }
+    const request = new Promise<QuantizedMeshRaw>((resolve, reject) => {
       this._pending.push({ z, x, y, resolve, reject });
       this._drain();
     });
+    const tracked = request.finally(() => {
+      if (this._requests.get(key) === tracked) { this._requests.delete(key); }
+    });
+    this._requests.set(key, tracked);
+    return tracked;
   }
 
   abortAll(): void {
@@ -155,8 +170,9 @@ export class CesiumTerrainProvider {
       try { c.abort(); } catch { /* ignore */ }
     }
     this._inflight.clear();
+    const aborted = new Error('[TERRAIN_TILE_ABORTED]');
+    for (const job of this._pending) { job.reject(aborted); }
     this._pending.length = 0;
-    this._concurrent = 0;
     this._ensuring.clear();
   }
 
@@ -470,10 +486,13 @@ export class CesiumTerrainProvider {
       }
       const meta = this._meta!;
       const tmpl = meta.tileUrlTemplates[0];
+      const requestY = meta.scheme === 'xyz'
+        ? Math.pow(2, z) - 1 - y
+        : y;
       const url = tmpl
         .replace('{z}', String(z))
         .replace('{x}', String(x))
-        .replace('{y}', String(y));
+        .replace('{y}', String(requestY));
 
       const resp = await fetch(url, {
         signal: controller.signal,

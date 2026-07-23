@@ -10,11 +10,13 @@
 import {
     getSegments,
     tessellateGlobeTile,
-} from '../../globe/src/globe-tile-mesh.ts';
+} from '../../globe/src/index.ts';
+import type { TilingScheme } from '../../core/src/geo/tiling-scheme.ts';
 import {
     MAX_CONCURRENT_TILE_FETCHES,
     MAX_MESH_CACHE_SIZE,
     MAX_TILE_CACHE_SIZE,
+    TILE_PARAMS_SIZE,
 } from './globe-constants.ts';
 import type { CachedMesh, CachedTile, GlobeGPURefs, TileManagerState } from './globe-types.ts';
 import { devWarn } from './globe-utils.ts';
@@ -124,8 +126,6 @@ export function loadTileTexture(
             textureReady: false,
             retryCount: 0,
             retryAfter: 0,
-            demReady: false,
-            demData: null,
         });
         tileState.tileLRU.push(key);
         evictTileCache(tileState);
@@ -135,11 +135,19 @@ export function loadTileTexture(
         .replace('{z}', String(z))
         .replace('{x}', String(x))
         .replace('{y}', String(y));
+    const requestGeneration = tileState.requestGeneration;
 
-    scheduleTileFetch(() =>
-        fetchTileImage(url)
+    scheduleTileFetch(() => {
+        if (isDestroyed() || requestGeneration !== tileState.requestGeneration) {
+            return Promise.resolve();
+        }
+        return fetchTileImage(url)
             .then((bitmap) => {
-                if (isDestroyed() || !tileState.tileCache.has(key)) {
+                if (
+                    isDestroyed()
+                    || requestGeneration !== tileState.requestGeneration
+                    || !tileState.tileCache.has(key)
+                ) {
                     bitmap.close();
                     return;
                 }
@@ -182,6 +190,9 @@ export function loadTileTexture(
                 }
             })
             .catch((err) => {
+                if (isDestroyed() || requestGeneration !== tileState.requestGeneration) {
+                    return;
+                }
                 devWarn(`[Globe3D] Failed to load tile ${key} (retry ${
                     tileState.tileCache.get(key)?.retryCount ?? 0
                 }/${MAX_TILE_RETRIES}):`, err);
@@ -192,8 +203,8 @@ export function loadTileTexture(
                     // 安排下一次重试时间（指数退避）
                     cached.retryAfter = performance.now() + _computeBackoff(cached.retryCount);
                 }
-            }),
-    );
+            });
+    });
 }
 
 /**
@@ -244,9 +255,11 @@ export function getOrCreateTileMesh(
     x: number,
     y: number,
     meshCache: Map<string, CachedMesh>,
+    scheme: TilingScheme,
+    tileParamsBindGroupLayout: GPUBindGroupLayout,
     pendingDestroyBuffers?: GPUBuffer[],
 ): CachedMesh | null {
-    const key = `${z}/${x}/${y}`;
+    const key = `${scheme.id}:${z}/${x}/${y}`;
 
     const existing = meshCache.get(key);
     if (existing) { return existing; }
@@ -264,17 +277,19 @@ export function getOrCreateTileMesh(
             if (pendingDestroyBuffers) {
                 pendingDestroyBuffers.push(evicted.indexBuffer);
                 pendingDestroyBuffers.push(evicted.vertexBuffer);
+                pendingDestroyBuffers.push(evicted.tileParamsBuffer);
             } else {
                 // 后向兼容：destroy 立即生效（仅用于 clearMeshCache 等非渲染路径）
                 evicted.indexBuffer.destroy();
                 evicted.vertexBuffer.destroy();
+                evicted.tileParamsBuffer.destroy();
             }
         }
         meshCache.delete(oldestKey);
     }
 
     const segments = getSegments(z);
-    const mesh = tessellateGlobeTile(z, x, y, segments);
+    const mesh = tessellateGlobeTile(z, x, y, segments, undefined, scheme);
 
     const indexBuffer = device.createBuffer({
         size: mesh.indices.byteLength,
@@ -290,7 +305,24 @@ export function getOrCreateTileMesh(
         label: `Globe3D:vertBuf:${key}`,
     });
 
-    const entry: CachedMesh = { mesh, indexBuffer, vertexBuffer };
+    const tileParamsBuffer = device.createBuffer({
+        size: TILE_PARAMS_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        label: `Globe3D:tileParams:${key}`,
+    });
+    const tileParamsBindGroup = device.createBindGroup({
+        layout: tileParamsBindGroupLayout,
+        entries: [{ binding: 0, resource: { buffer: tileParamsBuffer } }],
+        label: `Globe3D:tileParamsBG:${key}`,
+    });
+
+    const entry: CachedMesh = {
+        mesh,
+        indexBuffer,
+        vertexBuffer,
+        tileParamsBuffer,
+        tileParamsBindGroup,
+    };
     meshCache.set(key, entry);
 
     return entry;
@@ -361,6 +393,7 @@ export function flushPendingDestroys(tileState: TileManagerState): void {
  * @param tileState - 目标状态
  */
 export function clearTileCache(tileState: TileManagerState): void {
+    tileState.requestGeneration++;
     // 先 flush 上一帧 pending（避免泄漏），再销毁 cache 自身的纹理
     flushPendingDestroys(tileState);
     for (const cached of tileState.tileCache.values()) {
@@ -381,6 +414,7 @@ export function clearMeshCache(meshCache: Map<string, CachedMesh>): void {
     for (const entry of meshCache.values()) {
         entry.indexBuffer.destroy();
         entry.vertexBuffer.destroy();
+        entry.tileParamsBuffer.destroy();
     }
     meshCache.clear();
 }

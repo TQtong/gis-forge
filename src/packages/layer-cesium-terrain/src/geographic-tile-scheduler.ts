@@ -37,6 +37,7 @@ export interface GeographicScheduleOptions {
   readonly viewportHeight: number;
   readonly minZoom: number;
   readonly maxZoom: number;
+  readonly maxScreenSpaceError?: number;
 }
 
 /** Cesium 地理瓦片：经纬度 → (x, y)（浮点） */
@@ -67,7 +68,11 @@ export function computeGeographicCoveringTiles(
 
   // Mercator renderZoom → Cesium zoom（差 1，因为 Cesium 根层 2×1 而
   // Mercator 根层 1×1）
-  let cesiumZ = Math.round(camera.zoom) - 1;
+  const requestedSSE = opts.maxScreenSpaceError ?? 4;
+  const lodBias = Number.isFinite(requestedSSE) && requestedSSE > 0
+    ? Math.log2(4 / requestedSSE)
+    : 0;
+  let cesiumZ = Math.round(camera.zoom + lodBias) - 1;
   if (cesiumZ < minZ) { cesiumZ = minZ; }
   if (cesiumZ > maxZ) { cesiumZ = maxZ; }
 

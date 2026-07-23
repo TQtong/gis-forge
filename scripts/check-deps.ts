@@ -3,8 +3,9 @@
  *
  * Scans TypeScript sources, maps each file and resolved import to architecture layers L0–L6,
  * and reports violations of GIS-Forge layering: no **upward** imports, and no **skip-layer**
- * downward jumps (e.g. L6→L4). Direct imports to **L0 (`core`)** are always allowed so shared
- * types/math can live in L0 without forcing every package through intermediate layers.
+ * downward jumps inside L1-L5. Direct imports to **L0 (`core`)** are always allowed so shared
+ * types/math can live in L0 without forcing every package through intermediate layers. L6 presets
+ * are composition roots, so they may compose any lower layer through that package's public API.
  *
  * Bare module specifiers (`react`, `zod`, etc.) and `node:` builtins are ignored.
  */
@@ -109,7 +110,8 @@ function getLayerForFile(absFile: string): number | null {
  * - Same-layer imports are allowed.
  * - One-step downward (`targetLayer === sourceLayer - 1`) is allowed.
  * - Any import into **L0** (`targetLayer === 0`) is allowed (shared types / math).
- * - Other multi-step downward imports (skip-layer) are forbidden (e.g. L6→L4).
+ * - L6 presets are composition roots and may import any lower layer.
+ * - Other multi-step downward imports are forbidden.
  *
  * @param sourceLayer - Layer of the importing module.
  * @param targetLayer - Layer of the resolved target module.
@@ -119,6 +121,9 @@ function isAllowedLayerEdge(sourceLayer: number, targetLayer: number): boolean {
     return false;
   }
   if (targetLayer === sourceLayer) {
+    return true;
+  }
+  if (sourceLayer === 6) {
     return true;
   }
   if (targetLayer === 0) {

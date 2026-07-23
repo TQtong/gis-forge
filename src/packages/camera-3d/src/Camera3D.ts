@@ -467,6 +467,10 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
     // 惯性（简化：3D 交互由 globe-interaction 驱动，惯性在那里处理）
     let _inertiaEnabled = true;
 
+    // nadir 时 direction 的水平投影退化为零，bearing 无法从向量唯一恢复。
+    // 保留最后一次有效值，避免 atan2(浮点噪声, 浮点噪声) 产生随机方位角。
+    let _lastValidBearing = opts.bearing ?? 0;
+
     // 最新 CameraState 缓存
     let _cachedState: CameraState = _makeState({ width: 1, height: 1, physicalWidth: 1, physicalHeight: 1, pixelRatio: 1 });
 
@@ -508,13 +512,16 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         if (Math.abs(pitch + HALF_PI) > 0.001) {
             // 当前是正下方（-π/2），需要旋转到目标 pitch
             const rotateDelta = -(HALF_PI + pitch); // 负号因为从正下方往水平方向旋转
-            _applyRotate(_right, rotateDelta);
+            _look(_right, rotateDelta);
         }
 
-        // 应用 bearing: 绕 constrainedAxis 旋转
+        // 应用 bearing：只旋转姿态，不移动相机位置。
+        // heading/bearing 是局部 ENU 中绕地表法线的 look 旋转；
+        // _applyRotate 会连 position 一起绕地心旋转，不能用于设置姿态。
         if (Math.abs(bearing) > 0.001) {
-            _applyRotate(_constrainedAxis ?? _defaultAxis, -bearing);
+            _look(_normalUp, bearing);
         }
+        _lastValidBearing = bearing;
     }
 
     const initPos = opts.position ?? { lon: 0, lat: 0, alt: 1e7 };
@@ -634,6 +641,34 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         v3Normalize(_up, _up);
     }
 
+    /**
+     * 从当前 ECEF 姿态读取 GIS 语义的 bearing/pitch。
+     *
+     * pitch 定义为 direction 与局部地表切平面的夹角：
+     *   -π/2 = nadir，0 = horizon，+π/2 = zenith。
+     * nadir/zenith 没有唯一 bearing，此时返回最后一次有效 bearing。
+     */
+    function _readOrientation(): { bearing: number; pitch: number } {
+        ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
+        surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
+
+        v3Cross(_tmpA, _constrainedAxis ?? _defaultAxis, _normalUp);
+        const eastLen = v3Length(_tmpA);
+        if (eastLen > 1e-10) {
+            v3Normalize(_tmpA, _tmpA);
+            v3Cross(_tmpB, _normalUp, _tmpA);
+            v3Normalize(_tmpB, _tmpB);
+            const de = v3Dot(_direction, _tmpA);
+            const dn = v3Dot(_direction, _tmpB);
+            if (Math.hypot(de, dn) > 1e-10) {
+                _lastValidBearing = Math.atan2(de, dn);
+            }
+        }
+
+        const pitch = Math.asin(clamp(v3Dot(_direction, _normalUp), -1, 1));
+        return { bearing: _lastValidBearing, pitch };
+    }
+
     // ─── 高度约束 ─────────────────────────────────────
     //
     // 设计：position 原语只做"硬上界"和退化兜底，**不做几何拒入**。
@@ -687,33 +722,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
 
         const zoom = zoomFromAlt(alt);
 
-        // bearing: direction 在水平面上的方位角
-        // 在地表法线坐标系中，east = cross([0,0,1], normal), north = cross(normal, east)
-        surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
-
-        // east = cross(constrainedAxis, normalUp)... 但更准确的做法：
-        // 投影 direction 到水平面，计算与北方的角度
-        // north = 沿经线方向 = cross(normalUp, east_approx)
-        // 简化计算 bearing
-        const _axisForBearing = _constrainedAxis ?? _defaultAxis;
-        v3Cross(_tmpA, _axisForBearing, _normalUp); // east_ish
-        const eastLen = v3Length(_tmpA);
-        let bearing = 0;
-        if (eastLen > 1e-10) {
-            v3Normalize(_tmpA, _tmpA); // east
-            v3Cross(_tmpB, _normalUp, _tmpA); // north
-            v3Normalize(_tmpB, _tmpB);
-            // project direction onto horizontal plane
-            const de = v3Dot(_direction, _tmpA); // east component
-            const dn = v3Dot(_direction, _tmpB); // north component
-            bearing = Math.atan2(de, dn); // 0=north, π/2=east
-        }
-
-        // pitch: angle between direction and surface normal
-        // pitch = acos(-dot(direction, normalUp)) - π/2
-        // dot(dir, -normalUp) = cos(angle_from_nadir)
-        const dotDN = -v3Dot(_direction, _normalUp);
-        const pitch = Math.asin(clamp(dotDN, -1, 1)) - HALF_PI;
+        const { bearing, pitch } = _readOrientation();
 
         // 构建矩阵（Float32 精度 for GPU）
         const w = Math.max(1, vp.width);
@@ -989,8 +998,9 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
                 _look(_right, rotateDelta);
             }
             if (Math.abs(heading) > 0.001) {
-                _look(_constrainedAxis ?? _defaultAxis, -heading);
+                _look(_normalUp, heading);
             }
+            _lastValidBearing = heading;
         },
 
         lookAt(target: [number, number, number], offset?: { heading?: number; bearing?: number; pitch?: number; range?: number }) {
@@ -1033,26 +1043,7 @@ export function createCamera3D(opts: Camera3DOptions): Camera3D {
         },
 
         getOrientation() {
-            ecefToGeodetic(_geodetic, _position[0], _position[1], _position[2]);
-            surfaceNormal(_normalUp, _geodetic[0], _geodetic[1]);
-
-            // bearing
-            v3Cross(_tmpA, _constrainedAxis ?? _defaultAxis, _normalUp);
-            const eastLen = v3Length(_tmpA);
-            let bearing = 0;
-            if (eastLen > 1e-10) {
-                v3Normalize(_tmpA, _tmpA); // east
-                v3Cross(_tmpB, _normalUp, _tmpA); // north
-                v3Normalize(_tmpB, _tmpB);
-                const de = v3Dot(_direction, _tmpA);
-                const dn = v3Dot(_direction, _tmpB);
-                bearing = Math.atan2(de, dn);
-            }
-
-            // pitch
-            const dotDN = -v3Dot(_direction, _normalUp);
-            const pitch = Math.asin(clamp(dotDN, -1, 1)) - HALF_PI;
-
+            const { bearing, pitch } = _readOrientation();
             return { bearing, pitch, roll: 0 };
         },
 

@@ -44,6 +44,7 @@ export class TerrainLRUCache {
     if (existing !== undefined) {
       this._bytes -= existing.byteSize;
       this._detach(existing);
+      this._onEvict(existing);
     }
     this._map.set(key, entry);
     this._bytes += entry.byteSize;
@@ -57,6 +58,7 @@ export class TerrainLRUCache {
     this._bytes -= e.byteSize;
     this._detach(e);
     this._map.delete(key);
+    this._onEvict(e);
     return true;
   }
 
@@ -76,6 +78,7 @@ export class TerrainLRUCache {
     this._head = null;
     this._tail = null;
     this._bytes = 0;
+    this._pinned.clear();
   }
 
   values(): IterableIterator<TerrainCacheEntry> { return this._map.values(); }

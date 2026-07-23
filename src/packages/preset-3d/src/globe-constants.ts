@@ -88,7 +88,7 @@ export const DEFAULT_ALTITUDE = 20_000_000;
 export const CAMERA_UNIFORM_SIZE = 96;
 
 /** `TileParams`（vec4）16 bytes */
-export const TILE_PARAMS_SIZE = 16;
+export const TILE_PARAMS_SIZE = 32;
 
 /** `SkyUniforms`：mat4 + f32 + pad → 96 bytes */
 export const SKY_UNIFORM_SIZE = 96;

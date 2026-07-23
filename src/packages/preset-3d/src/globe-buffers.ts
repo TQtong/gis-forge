@@ -82,7 +82,7 @@ export const _skyUniformData = new Float32Array(24);
 /**
  * 瓦片 UV 变换 `TileParams`：uvOffset.xy + uvScale.xy，共 4 float。
  */
-export const _tileParamsData = new Float32Array(4);
+export const _tileParamsData = new Float32Array(8);
 
 /**
  * 跨 scheme 纹理投影参数 `DrapingParams`：imgWest + imgEast + latToV_scale + latToV_offset，共 4 float。

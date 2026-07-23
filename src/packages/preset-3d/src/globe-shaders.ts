@@ -33,6 +33,10 @@ struct CameraUniforms {
 struct TileParams {
   uvOffset: vec2<f32>,
   uvScale: vec2<f32>,
+  opacity: f32,
+  _padding0: f32,
+  _padding1: f32,
+  _padding2: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
@@ -84,7 +88,7 @@ struct VsOut {
   let ambient = 0.3;
   let diffuse = nDotL * 0.7;
   let lighting = ambient + diffuse;
-  return vec4<f32>(color.rgb * lighting, color.a);
+  return vec4<f32>(color.rgb * lighting, color.a * tile.opacity);
 }
 `;
 

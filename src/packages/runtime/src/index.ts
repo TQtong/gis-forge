@@ -62,8 +62,8 @@ export { createFrameScheduler } from './frame-scheduler.ts';
 export type { CameraType, CameraConstraints, CameraAnimation, CameraController } from './camera-controller.ts';
 export { createCamera2D } from './camera-controller.ts';
 
-export type { Camera3DOptions, Camera3D } from './camera-3d.ts';
-export { createCamera3D } from './camera-3d.ts';
+// Camera3D 的唯一公共入口是 @gis-forge/camera-3d；runtime 中的旧轨道实现
+// 保留为迁移参考，但不再从 barrel 暴露，避免两套同名 API 产生不同姿态语义。
 
 export type { ViewMode, ViewMorphOptions, ViewMorphAnimation, ViewMorph } from './view-morph.ts';
 export { createViewMorph } from './view-morph.ts';

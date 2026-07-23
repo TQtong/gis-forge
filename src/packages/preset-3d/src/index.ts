@@ -31,7 +31,7 @@ export {
 export type {
     /** 构造 {@link Globe3D} 时的选项（容器、影像、交互、初始相机） */
     Globe3DOptions,
-    /** 预留：模型 / 标牌 / 标签实体描述 */
+    /** 模型 / 标牌 / 标签实体描述；当前 addEntity 会显式返回未实现错误 */
     EntitySpec,
     /** 上一帧瓦片数、缓存量、draw call、帧时间 */
     GlobeRendererStats,

@@ -13,12 +13,12 @@
 import type { LightSpec } from '../../core/src/types/style-spec.ts';
 import type { CameraState, Viewport } from '../../core/src/types/viewport.ts';
 import * as mat4 from '../../core/src/math/mat4.ts';
-import { createCamera25D, type Camera25D } from '../../camera-25d/src/Camera25D.ts';
+import { createCamera25D, type Camera25D } from '../../camera-25d/src/index.ts';
 
 import { GeoForgeError, GeoForgeErrorCode, Map2D } from '../../preset-2d/src/map-2d.ts';
 import type { AnimationOptions, Map2DOptions } from '../../preset-2d/src/map-2d.ts';
-import type { LayerSpec } from '../../scene/src/layer-manager.ts';
-import type { RasterTileLayer } from '../../layer-tile-raster/src/RasterTileLayer.ts';
+import type { LayerSpec } from '../../scene/src/index.ts';
+import type { RasterTileLayer } from '../../layer-tile-raster/src/index.ts';
 
 // --- 从 L0 再导出光照类型（与 StyleSpec.light 一致） ---
 export type { LightSpec } from '../../core/src/types/style-spec.ts';
@@ -227,6 +227,9 @@ export class Map25D extends Map2D {
   /** 中键拖拽事件监听器清理函数（remove 时调用）。 */
   private _pitchDragCleanup: (() => void) | null = null;
 
+  /** 防止异步 ready 回调在实例已销毁后重新安装交互。 */
+  private _removed25D = false;
+
   /**
    * @param options - 2D + 2.5D 选项
    *
@@ -276,7 +279,9 @@ export class Map25D extends Map2D {
 
     // GPU 初始化完成后安装 2.5D 专属交互（中键拖拽 pitch/bearing）
     void this.ready().then(() => {
-      this._install25DInteractions();
+      if (!this._removed25D) {
+        this._install25DInteractions();
+      }
     });
   }
 
@@ -373,6 +378,41 @@ export class Map25D extends Map2D {
   // 场景下必须用 inverseVPMatrix 做真正的屏幕射线与地面平面的相交，
   // 否则拖拽时屏幕 Y 方向像素变化对应的 lat 变化会被严重低估，造成
   // "只能左右拖不能上下拖"的假象。
+
+  public override project(lngLat: [number, number]): [number, number] {
+    const camera = this._cameraState;
+    if (camera === null) {
+      return super.project(lngLat);
+    }
+
+    const rect = this._canvas.getBoundingClientRect();
+    const width = Math.max(1, rect.width);
+    const height = Math.max(1, rect.height);
+    const worldSize = 512 * Math.pow(2, camera.zoom);
+    const toWorldPixel = (lng: number, lat: number): [number, number] => {
+      const clampedLat = Math.max(-85.05, Math.min(85.05, lat));
+      const latRad = clampedLat * DEG2RAD;
+      return [
+        ((lng + 180) / 360) * worldSize,
+        (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * worldSize,
+      ];
+    };
+    const [px, py] = toWorldPixel(lngLat[0], lngLat[1]);
+    const [cx, cy] = toWorldPixel(camera.center[0], camera.center[1]);
+    const matrix = camera.vpMatrix;
+    const relX = px - cx;
+    const relY = py - cy;
+    const clipX = matrix[0] * relX + matrix[4] * relY + matrix[12];
+    const clipY = matrix[1] * relX + matrix[5] * relY + matrix[13];
+    const clipW = matrix[3] * relX + matrix[7] * relY + matrix[15];
+    if (!Number.isFinite(clipW) || Math.abs(clipW) < 1e-9) {
+      return super.project(lngLat);
+    }
+    return [
+      (clipX / clipW + 1) * 0.5 * width,
+      (1 - clipY / clipW) * 0.5 * height,
+    ];
+  }
 
   public override unproject(point: [number, number]): [number, number] {
     const camera = this._cameraState;
@@ -472,6 +512,7 @@ export class Map25D extends Map2D {
   }
 
   public override remove(): void {
+    this._removed25D = true;
     // 清理 2.5D 专属交互监听器
     if (this._pitchDragCleanup !== null) {
       this._pitchDragCleanup();
@@ -491,9 +532,8 @@ export class Map25D extends Map2D {
    * 流程：
    * 1. 从 Map2D 公共 API 读取当前 center/zoom/bearing/pitch
    * 2. 通过 Camera25D.jumpTo 同步状态
-   * 3. Camera25D.update 生成绝对世界像素空间的透视 VP 矩阵
-   * 4. 后乘平移矩阵 T(centerPx, centerPy, 0)，将 VP 适配到
-   *    RasterTileLayer 使用的相机相对顶点坐标
+   * 3. Camera25D.update 生成相机相对世界像素空间的透视 VP 矩阵
+   * 4. 将该矩阵直接交给使用相机相对顶点坐标的图层
    *
    * @returns CameraState 快照（vpMatrix 为相机相对透视投影）
    */
@@ -535,16 +575,6 @@ export class Map25D extends Map2D {
     // 无需额外平移，避免了 Float32 截断大坐标导致的精度丢失。
     const vpMatrix = new Float32Array(16);
     mat4.copy(vpMatrix, absState.vpMatrix);
-
-    // --- 4b. X 轴镜像修正 ---
-    // Mercator 像素坐标系 (X=东, Y=南, Z=上) 是右手系。
-    // lookAt 在此系中将「东」映射到 clip-space 负 X（屏幕左侧），
-    // 因为 right = forward × up 沿 -X。
-    // 翻转 VP 矩阵第一行（clip_x 取反）使 screen-right = 地理东。
-    vpMatrix[0] = -vpMatrix[0];
-    vpMatrix[4] = -vpMatrix[4];
-    vpMatrix[8] = -vpMatrix[8];
-    vpMatrix[12] = -vpMatrix[12];
 
     // 逆 VP 矩阵（屏幕反投影用）
     const inverseVPMatrix = new Float32Array(16);

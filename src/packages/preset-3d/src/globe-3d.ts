@@ -21,16 +21,16 @@ import {
     WGS84_A,
 } from '../../core/src/geo/ellipsoid.ts';
 import type { Vec3d } from '../../core/src/geo/ellipsoid.ts';
-import { createCamera3D } from '../../camera-3d/src/Camera3D.ts';
-import type { Camera3D } from '../../camera-3d/src/Camera3D.ts';
+import { createCamera3D, type Camera3D } from '../../camera-3d/src/index.ts';
 import {
     coveringTilesGlobe,
     screenToGlobe,
-} from '../../globe/src/globe-tile-mesh.ts';
+} from '../../globe/src/index.ts';
 import type {
     GlobeCamera,
-} from '../../globe/src/globe-tile-mesh.ts';
-import { tileKey } from '../../core/src/geo/tiling-scheme.ts';
+} from '../../globe/src/index.ts';
+import { tileKeyAuto, type TilingScheme } from '../../core/src/geo/tiling-scheme.ts';
+import { Geographic, WebMercator } from '../../core/src/geo/index.ts';
 
 import { _ecefTmp } from './globe-buffers.ts';
 import {
@@ -41,7 +41,6 @@ import {
     DEFAULT_CLOCK_MULTIPLIER,
     DEFAULT_FLIGHT_DURATION_MS,
     DEFAULT_FOV,
-    DEFAULT_TERRAIN_EXAGGERATION,
     DEG2RAD,
     DEPTH_CLEAR_VALUE,
     MAX_DEFAULT_PIXEL_RATIO,
@@ -78,7 +77,6 @@ import {
 } from './globe-tiles.ts';
 import type {
     EntitySpec,
-    GeoJsonRecord,
     Globe3DOptions,
     GlobeGPURefs,
     GlobeInteractionState,
@@ -87,7 +85,6 @@ import type {
     MorphState,
     PolarCapState,
     TileManagerState,
-    TilesetRecord,
 } from './globe-types.ts';
 import { createEmptyGlobeGPURefs, createEmptyPolarCapState } from './globe-types.ts';
 import { devError, requestGpuAdapterWithFallback } from './globe-utils.ts';
@@ -98,12 +95,72 @@ import {
     renderPolarCaps,
 } from './globe-polar-cap.ts';
 
+function normalizeImageryMaximumLevel(value: number | undefined): number {
+    return Number.isFinite(value) ? Math.max(0, Math.min(24, Math.floor(value!))) : 24;
+}
+
+function normalizeImageryOpacity(value: number | undefined): number {
+    return Number.isFinite(value) ? Math.max(0, Math.min(1, value!)) : 1;
+}
+
+/** Fail explicitly for facade capabilities that do not yet have a render path. */
+export function throwUnsupportedGlobeFeature(api: string, feature: string): never {
+    throw new GeoForgeError(
+        GeoForgeErrorCode.FEATURE_NOT_IMPLEMENTED,
+        `${api} is not implemented in the stable Globe3D render path.`,
+        { api, feature },
+    );
+}
+
+/** Reject explicitly requested constructor features that would otherwise be silently ignored. */
+export function assertSupportedGlobeOptions(options: Globe3DOptions): void {
+    if (options.terrain !== undefined) {
+        throwUnsupportedGlobeFeature('Globe3D constructor option "terrain"', '3d-terrain');
+    }
+    if (options.shadows === true) {
+        throwUnsupportedGlobeFeature('Globe3D constructor option "shadows"', 'shadows');
+    }
+    if (options.fog === true) {
+        throwUnsupportedGlobeFeature('Globe3D constructor option "fog"', 'fog');
+    }
+    if (options.targetFrameRate !== undefined) {
+        throwUnsupportedGlobeFeature(
+            'Globe3D constructor option "targetFrameRate"',
+            'frame-rate-limiting',
+        );
+    }
+    if (options.antialias === true) {
+        throwUnsupportedGlobeFeature('Globe3D constructor option "antialias"', 'msaa');
+    }
+    if (options.baseColor !== undefined) {
+        throwUnsupportedGlobeFeature('Globe3D constructor option "baseColor"', 'custom-base-color');
+    }
+    if (options.imagery?.type !== undefined && options.imagery.type !== 'xyz') {
+        throwUnsupportedGlobeFeature(
+            'Globe3D constructor option "imagery.type"',
+            `imagery-${options.imagery.type}`,
+        );
+    }
+    if ((options.imagery?.subdomains?.length ?? 0) > 0) {
+        throwUnsupportedGlobeFeature(
+            'Globe3D constructor option "imagery.subdomains"',
+            'imagery-subdomains',
+        );
+    }
+    if (options.imagery?.tmsFlipY === true) {
+        throwUnsupportedGlobeFeature(
+            'Globe3D constructor option "imagery.tmsFlipY"',
+            'tms-y-flip',
+        );
+    }
+}
+
 export type { EntitySpec, Globe3DOptions, GlobeRendererStats } from './globe-types.ts';
 export { computeLogDepthBufFC } from './globe-utils.ts';
 export { LOG_DEPTH_WGSL } from './globe-shaders.ts';
 
 /**
- * 3D 数字地球宿主：DOM + WebGPU + 相机 + 瓦片与可选图层/实体占位。
+ * 3D 数字地球宿主：DOM + WebGPU + 相机、影像瓦片、天空与大气。
  * 生命周期：`constructor` → 异步 `_bootstrapAsync` → `ready()`；`remove()` 释放 GPU 与监听。
  */
 export class Globe3D {
@@ -145,9 +202,19 @@ export class Globe3D {
         // imagery.url 时不发起任何网络请求——纯色地球 / 离线场景适用。
         tileUrlTemplate: '',
         imageryEnabled: false,
+        requestGeneration: 0,
         pendingDestroyTextures: [],
         pendingDestroyBuffers: [],
     };
+
+    /** 当前影像源的瓦片矩阵；控制覆盖、网格经纬范围与缓存键。 */
+    private _imageryScheme: TilingScheme = WebMercator;
+
+    /** 当前影像源最高原生层级，防止对不存在层级持续请求。 */
+    private _imageryMaximumLevel = 24;
+
+    /** 当前单影像层不透明度。 */
+    private _imageryOpacity = 1;
 
     // ─── 极地冰盖（见 globe-polar-cap）────────────────────
 
@@ -206,19 +273,10 @@ export class Globe3D {
         rotatingZoom: false,
     };
 
-    // ─── 图层与实体（占位）───────────────────────────────────
+    // ─── 影像图层 ────────────────────────────────────────────
 
     /** `addImageryLayer` 注册的底图列表 */
     private readonly _imageryLayers: Map<string, ImageryLayerRecord> = new Map();
-
-    /** `add3DTileset` 预留记录 */
-    private readonly _tilesets: Map<string, TilesetRecord> = new Map();
-
-    /** `addGeoJSON` 预留记录 */
-    private readonly _geoJsonLayers: Map<string, GeoJsonRecord> = new Map();
-
-    /** `addEntity` 实体表 */
-    private readonly _entities: Map<string, EntitySpec> = new Map();
 
     // ─── 生命周期与事件 ─────────────────────────────────────
 
@@ -240,6 +298,9 @@ export class Globe3D {
     /** `ready()` resolve；bootstrap 结束后置 `null` */
     private _readyResolve: (() => void) | null = null;
 
+    /** `ready()` reject；WebGPU 初始化失败时向调用方传播原因。 */
+    private _readyReject: ((reason?: unknown) => void) | null = null;
+
     /** 构造时创建，供 `ready()` 返回 */
     private readonly _readyPromise: Promise<void>;
 
@@ -251,23 +312,14 @@ export class Globe3D {
     /** 大气 pass 是否执行 */
     private _atmosphere: boolean;
 
-    /** 阴影（预留） */
-    private _shadows: boolean;
-
     /** 天穹 pass 是否执行 */
     private _skybox: boolean;
-
-    /** 雾效（预留） */
-    private _fog: boolean;
 
     /** 仿真时间，影响太阳方向 uniform */
     private _dateTime: Date;
 
     /** 每帧推进时间的倍率 */
     private _clockMultiplier: number;
-
-    /** DEM 夸大（预留） */
-    private _terrainExaggeration: number;
 
     /** `resize` 时 `devicePixelRatio` 上限 */
     private readonly _maxPixelRatio: number;
@@ -355,6 +407,8 @@ export class Globe3D {
      * await globe.ready();
      */
     constructor(options: Globe3DOptions) {
+        assertSupportedGlobeOptions(options);
+
         // ── 解析容器 DOM ──
         this._container = this._resolveContainer(options.container);
 
@@ -389,12 +443,9 @@ export class Globe3D {
 
         // ── 渲染选项 ──
         this._atmosphere = options.atmosphere !== false;
-        this._shadows = options.shadows === true;
         this._skybox = options.skybox !== false;
-        this._fog = options.fog !== false;
         this._dateTime = new Date();
         this._clockMultiplier = DEFAULT_CLOCK_MULTIPLIER;
-        this._terrainExaggeration = options.terrain?.exaggeration ?? DEFAULT_TERRAIN_EXAGGERATION;
 
         // ── 极地冰盖选项 ──
         // 默认关闭：瓦片网格已延伸到 ±90°（UV clamp 拉伸边缘像素），无需独立极地纹理。
@@ -413,6 +464,9 @@ export class Globe3D {
             this._tileState.tileUrlTemplate = '';
             this._tileState.imageryEnabled = false;
         }
+        this._imageryScheme = options.imagery?.scheme === 'geographic' ? Geographic : WebMercator;
+        this._imageryMaximumLevel = normalizeImageryMaximumLevel(options.imagery?.maximumLevel);
+        this._imageryOpacity = normalizeImageryOpacity(options.imagery?.alpha);
 
         // ── 交互选项 ──
         this._enableRotate = options.enableRotate !== false;
@@ -468,8 +522,9 @@ export class Globe3D {
         this._resizeObserver.observe(this._container);
 
         // ── ready promise ──
-        this._readyPromise = new Promise<void>((resolve) => {
+        this._readyPromise = new Promise<void>((resolve, reject) => {
             this._readyResolve = resolve;
+            this._readyReject = reject;
         });
 
         // ── 异步启动 WebGPU ──
@@ -865,8 +920,17 @@ export class Globe3D {
         type?: string;
         alpha?: number;
         id?: string;
+        scheme?: 'webmercator' | 'geographic';
+        maximumLevel?: number;
     }): string {
         this._ensureAlive();
+
+        if (options.type !== undefined && options.type !== 'xyz') {
+            return throwUnsupportedGlobeFeature(
+                'Globe3D.addImageryLayer option "type"',
+                `imagery-${options.type}`,
+            );
+        }
 
         const id = options.id ?? uniqueId('imagery');
 
@@ -883,12 +947,17 @@ export class Globe3D {
             id,
             url: options.url,
             type: options.type ?? 'xyz',
-            alpha: options.alpha ?? 1.0,
+            scheme: options.scheme ?? 'webmercator',
+            maximumLevel: normalizeImageryMaximumLevel(options.maximumLevel),
+            alpha: normalizeImageryOpacity(options.alpha),
         });
 
         // 切换瓦片 URL 模板为最新添加的图层 + 启用影像加载
         this._tileState.tileUrlTemplate = options.url;
         this._tileState.imageryEnabled = true;
+        this._imageryScheme = options.scheme === 'geographic' ? Geographic : WebMercator;
+        this._imageryMaximumLevel = normalizeImageryMaximumLevel(options.maximumLevel);
+        this._imageryOpacity = normalizeImageryOpacity(options.alpha);
 
         // 清空缓存以加载新瓦片
         clearTileCache(this._tileState);
@@ -923,9 +992,13 @@ export class Globe3D {
             const last = Array.from(this._imageryLayers.values()).pop()!;
             this._tileState.tileUrlTemplate = last.url;
             this._tileState.imageryEnabled = true;
+            this._imageryScheme = last.scheme === 'geographic' ? Geographic : WebMercator;
+            this._imageryMaximumLevel = last.maximumLevel;
+            this._imageryOpacity = last.alpha;
         } else {
             this._tileState.tileUrlTemplate = '';
             this._tileState.imageryEnabled = false;
+            this._imageryOpacity = 1;
         }
 
         clearTileCache(this._tileState);
@@ -948,26 +1021,7 @@ export class Globe3D {
         id?: string;
     }): string {
         this._ensureAlive();
-
-        const id = options.id ?? uniqueId('tileset');
-
-        if (this._tilesets.has(id)) {
-            throw new GeoForgeError(
-                GeoForgeErrorCode.CONFIG_INVALID_ID,
-                `3D Tileset id "${id}" already exists`,
-                { id },
-            );
-        }
-
-        this._tilesets.set(id, {
-            id,
-            url: options.url,
-            maximumScreenSpaceError: options.maximumScreenSpaceError ?? 16,
-            show: options.show !== false,
-        });
-
-        this._emit('tileset:added', { id });
-        return id;
+        return throwUnsupportedGlobeFeature('Globe3D.add3DTileset', '3d-tiles');
     }
 
     /**
@@ -980,17 +1034,7 @@ export class Globe3D {
      */
     public remove3DTileset(id: string): void {
         this._ensureAlive();
-
-        if (!this._tilesets.has(id)) {
-            throw new GeoForgeError(
-                GeoForgeErrorCode.CONFIG_NOT_FOUND,
-                `3D Tileset "${id}" not found`,
-                { id },
-            );
-        }
-
-        this._tilesets.delete(id);
-        this._emit('tileset:removed', { id });
+        throwUnsupportedGlobeFeature('Globe3D.remove3DTileset', '3d-tiles');
     }
 
     /**
@@ -1005,21 +1049,7 @@ export class Globe3D {
      */
     public addGeoJSON(data: unknown, options?: { id?: string; [key: string]: unknown }): string {
         this._ensureAlive();
-
-        const id = options?.id as string ?? uniqueId('geojson');
-
-        if (this._geoJsonLayers.has(id)) {
-            throw new GeoForgeError(
-                GeoForgeErrorCode.CONFIG_INVALID_ID,
-                `GeoJSON layer id "${id}" already exists`,
-                { id },
-            );
-        }
-
-        this._geoJsonLayers.set(id, { id, data, options });
-
-        this._emit('geojson:added', { id });
-        return id;
+        return throwUnsupportedGlobeFeature('Globe3D.addGeoJSON', 'globe-geojson');
     }
 
     /**
@@ -1032,17 +1062,7 @@ export class Globe3D {
      */
     public removeGeoJSON(id: string): void {
         this._ensureAlive();
-
-        if (!this._geoJsonLayers.has(id)) {
-            throw new GeoForgeError(
-                GeoForgeErrorCode.CONFIG_NOT_FOUND,
-                `GeoJSON layer "${id}" not found`,
-                { id },
-            );
-        }
-
-        this._geoJsonLayers.delete(id);
-        this._emit('geojson:removed', { id });
+        throwUnsupportedGlobeFeature('Globe3D.removeGeoJSON', 'globe-geojson');
     }
 
     /**
@@ -1056,21 +1076,7 @@ export class Globe3D {
      */
     public addEntity(entity: EntitySpec): string {
         this._ensureAlive();
-
-        const id = entity.id ?? uniqueId('entity');
-        const spec: EntitySpec = { ...entity, id };
-
-        if (this._entities.has(id)) {
-            throw new GeoForgeError(
-                GeoForgeErrorCode.CONFIG_INVALID_ID,
-                `Entity id "${id}" already exists`,
-                { id },
-            );
-        }
-
-        this._entities.set(id, spec);
-        this._emit('entity:added', { id });
-        return id;
+        return throwUnsupportedGlobeFeature('Globe3D.addEntity', 'globe-entities');
     }
 
     /**
@@ -1083,17 +1089,7 @@ export class Globe3D {
      */
     public removeEntity(id: string): void {
         this._ensureAlive();
-
-        if (!this._entities.has(id)) {
-            throw new GeoForgeError(
-                GeoForgeErrorCode.CONFIG_NOT_FOUND,
-                `Entity "${id}" not found`,
-                { id },
-            );
-        }
-
-        this._entities.delete(id);
-        this._emit('entity:removed', { id });
+        throwUnsupportedGlobeFeature('Globe3D.removeEntity', 'globe-entities');
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1115,9 +1111,10 @@ export class Globe3D {
         options?: { layers?: string[] },
     ): Promise<Feature[]> {
         this._ensureAlive();
-
-        // 当前 MVP 阶段返回空数组，后续接入 PickingEngine
-        return [];
+        return throwUnsupportedGlobeFeature(
+            'Globe3D.queryRenderedFeatures',
+            'feature-picking',
+        );
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1134,8 +1131,7 @@ export class Globe3D {
      */
     public setTerrainExaggeration(value: number): void {
         this._ensureAlive();
-        this._validatePositive(value, 'terrainExaggeration');
-        this._terrainExaggeration = value;
+        throwUnsupportedGlobeFeature('Globe3D.setTerrainExaggeration', '3d-terrain');
     }
 
     /**
@@ -1150,14 +1146,7 @@ export class Globe3D {
      */
     public async getTerrainHeight(lon: number, lat: number): Promise<number> {
         this._ensureAlive();
-
-        // 通过 Camera3D 的地形查询接口
-        try {
-            return await this._camera3D.queryTerrainHeight(lon, lat);
-        } catch {
-            // 无地形数据时回退 0
-            return 0;
-        }
+        return throwUnsupportedGlobeFeature('Globe3D.getTerrainHeight', '3d-terrain');
     }
 
     /**
@@ -1205,7 +1194,9 @@ export class Globe3D {
      */
     public setShadowsEnabled(enabled: boolean): void {
         this._ensureAlive();
-        this._shadows = enabled;
+        if (enabled) {
+            throwUnsupportedGlobeFeature('Globe3D.setShadowsEnabled', 'shadows');
+        }
     }
 
     /**
@@ -1231,7 +1222,9 @@ export class Globe3D {
      */
     public setFogEnabled(enabled: boolean): void {
         this._ensureAlive();
-        this._fog = enabled;
+        if (enabled) {
+            throwUnsupportedGlobeFeature('Globe3D.setFogEnabled', 'fog');
+        }
     }
 
     /**
@@ -1531,7 +1524,7 @@ export class Globe3D {
      */
     public morphTo2D(options?: { duration?: number }): void {
         this._ensureAlive();
-        runMorph(this._morphState, '2d', options?.duration ?? MORPH_DEFAULT_DURATION_MS, (t, p) => this._emit(t, p), () => this._destroyed);
+        throwUnsupportedGlobeFeature('Globe3D.morphTo2D', '2d-3d-morph');
     }
 
     /**
@@ -1544,7 +1537,7 @@ export class Globe3D {
      */
     public morphTo25D(options?: { duration?: number }): void {
         this._ensureAlive();
-        runMorph(this._morphState, '25d', options?.duration ?? MORPH_DEFAULT_DURATION_MS, (t, p) => this._emit(t, p), () => this._destroyed);
+        throwUnsupportedGlobeFeature('Globe3D.morphTo25D', '25d-3d-morph');
     }
 
     /**
@@ -1718,6 +1711,9 @@ export class Globe3D {
             this._gpuRefs.device = device;
 
             // 监听设备丢失
+            device.addEventListener('uncapturederror', (event) => {
+                devError('[Globe3D] uncaptured WebGPU error:', event.error.message);
+            });
             device.lost.then((info) => {
                 devError('[Globe3D] GPU device lost:', info.message);
                 this._emit('device:lost', { message: info.message });
@@ -1785,15 +1781,16 @@ export class Globe3D {
             if (this._readyResolve) {
                 this._readyResolve();
                 this._readyResolve = null;
+                this._readyReject = null;
             }
 
             this._emit('load', undefined);
 
         } catch (err) {
             devError('[Globe3D] _bootstrapAsync error:', err);
-            // 依然 resolve ready，让调用方可以检查状态
-            if (this._readyResolve) {
-                this._readyResolve();
+            if (this._readyReject) {
+                this._readyReject(err);
+                this._readyReject = null;
                 this._readyResolve = null;
             }
             throw err;
@@ -1888,7 +1885,10 @@ export class Globe3D {
         const depthView = this._gpuRefs.depthTexture!.createView();
 
         // ── 计算可见瓦片 ──
-        let tiles = coveringTilesGlobe(globeCam);
+        const tileCamera = this._imageryMaximumLevel < globeCam.zoom
+            ? { ...globeCam, zoom: this._imageryMaximumLevel }
+            : globeCam;
+        let tiles = coveringTilesGlobe(tileCamera, this._imageryScheme);
 
         // ── B 阶段：基于本帧最粗 LOD 的弦割下沉量动态推送相机的最小安全高度 ──
         const minSafeAlt = computeMinSafeAltitudeFromTiles(tiles);
@@ -1900,18 +1900,23 @@ export class Globe3D {
         // ⚠ 必须**封顶 fallbackZoom**：否则 numFallback = 1<<fallbackZoom 在 zoom>=10 时
         // 立即变成百万级 push 循环，浏览器秒爆。fallbackZoom=2 → 16 个 root 瓦片足以画出地球。
         if (tiles.length === 0) {
-            const fallbackZoom = Math.min(2, Math.max(0, Math.floor(globeCam.zoom)));
-            const numFallback = 1 << fallbackZoom;
+            const fallbackZoom = Math.min(
+                2,
+                this._imageryMaximumLevel,
+                Math.max(0, Math.floor(globeCam.zoom)),
+            );
+            const numFallbackX = this._imageryScheme.numX(fallbackZoom);
+            const numFallbackY = this._imageryScheme.numY(fallbackZoom);
             tiles = [];
-            for (let y = 0; y < numFallback; y++) {
-                for (let x = 0; x < numFallback; x++) {
+            for (let y = 0; y < numFallbackY; y++) {
+                for (let x = 0; x < numFallbackX; x++) {
                     tiles.push({
                         z: fallbackZoom,
                         x,
                         y,
-                        key: tileKey(0, fallbackZoom, x, y),
+                        key: tileKeyAuto(this._imageryScheme.id, fallbackZoom, x, y),
                         distToCamera: 0,
-                        schemeId: 0,
+                        schemeId: this._imageryScheme.id,
                     });
                 }
             }
@@ -1956,6 +1961,8 @@ export class Globe3D {
             tiles,
             this._gpuRefs,
             this._tileState,
+            this._imageryScheme,
+            this._imageryOpacity,
             () => this._destroyed,
         );
         tilesRendered = tileResult.tilesRendered;

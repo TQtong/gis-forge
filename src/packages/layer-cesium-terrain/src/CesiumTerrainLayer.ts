@@ -24,21 +24,34 @@ import {
 } from './types.ts';
 import {
   cesiumTileToGeographic,
+  computeOsmTileCoverage,
   lngLatToMercatorPixel,
+  lngLatToOsmAtlasUv,
   pixelsPerMeter,
-  pickCoveringOsmTile,
-  lngLatToOsmTileUv,
   buildOsmTileUrl,
 } from './mercator.ts';
 import { CesiumTerrainProvider } from './cesium-terrain-provider.ts';
 import { TerrainLRUCache } from './terrain-lru-cache.ts';
-import { octDecodeNormal, type QuantizedMeshRaw } from './quantized-mesh-decoder.ts';
+import type { QuantizedMeshRaw } from './quantized-mesh-decoder.ts';
 import {
   computeGeographicCoveringTiles,
   type GeographicScheduledTile,
 } from './geographic-tile-scheduler.ts';
 
-const SKIRT_METERS = 2000;
+const MIN_SKIRT_METERS = 10;
+const MAX_SKIRT_METERS = 200;
+
+/** Keep skirts large enough to cover edge quantization without exposing kilometre-high walls. */
+export function computeTerrainSkirtDepth(
+  minimumHeight: number,
+  maximumHeight: number,
+): number {
+  const heightRange = Math.max(0, maximumHeight - minimumHeight);
+  return Math.max(
+    MIN_SKIRT_METERS,
+    Math.min(MAX_SKIRT_METERS, heightRange * 0.05),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // WGSL 着色器
@@ -52,8 +65,8 @@ const SKIRT_METERS = 2000;
 // 高度 z：以米储存，shader 端乘 ppmCurrent 得到像素尺度。
 // 这样一份顶点缓冲在任何 zoom 下都能正确渲染，消除 builtWorldZoom 漂移。
 //
-// Drape 贴图：每瓦片单独 fetch 一张 OSM 栅格瓦片（尽量深、完整包含地形 bbox），
-// CPU 端按经纬度算出每顶点 UV，shader 直接 textureSample。
+// Drape 贴图：每个 Geographic 地形瓦片使用固定层级的 OSM 多瓦片图集，
+// CPU 端按经纬度计算连续 atlas UV，shader 直接 textureSample。
 
 const TERRAIN_WGSL = /* wgsl */ `
 struct CameraUniforms {
@@ -116,7 +129,9 @@ struct VsOut {
 
 @fragment fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let uvClamped = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
-  let base = textureSample(drapeTex, drapeSampler, uvClamped).rgb;
+  let baseSample = textureSample(drapeTex, drapeSampler, uvClamped);
+  if (baseSample.a < 0.001) { discard; }
+  let base = baseSample.rgb;
 
   // Hillshade：以「平坦地形」作为零偏移基准。对于 normal=(0,0,1) 的平坦
   // 区域，shadeFactor 恒等于 1（贴图完全不变色），只有真正有坡度的地方
@@ -129,7 +144,29 @@ struct VsOut {
   let strength = clamp(style.lightAndAmbient.w, 0.0, 1.0);
   let shadeFactor = 1.0 + (ndl - ndlFlat) * strength;
   let shaded = clamp(base * shadeFactor, vec3<f32>(0.0), vec3<f32>(1.0));
-  return vec4<f32>(shaded, style.misc.x);
+  return vec4<f32>(shaded, style.misc.x * baseSample.a);
+}
+`;
+
+const TERRAIN_MIPMAP_WGSL = /* wgsl */ `
+@group(0) @binding(0) var mipSampler: sampler;
+@group(0) @binding(1) var mipSource: texture_2d<f32>;
+
+struct MipVsOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex fn mip_vs(@builtin(vertex_index) i: u32) -> MipVsOut {
+  let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  var out: MipVsOut;
+  out.position = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+  out.uv = uv;
+  return out;
+}
+
+@fragment fn mip_fs(in: MipVsOut) -> @location(0) vec4<f32> {
+  return textureSample(mipSource, mipSampler, in.uv);
 }
 `;
 
@@ -140,21 +177,103 @@ struct VsOut {
 const DEFAULT_DRAPE_TEMPLATE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const DEFAULT_DRAPE_MAX_ZOOM = 18;
 
+/** 面积加权法线；输入坐标轴为 east / south / up，并统一朝向地表上方。 */
+export function computeTerrainVertexNormals(
+  positions: Float32Array,
+  indices: Uint16Array | Uint32Array,
+  out: Float32Array,
+): void {
+  out.fill(0);
+  const triCount = Math.floor(indices.length / 3);
+  for (let t = 0; t < triCount; t++) {
+    const ia = indices[t * 3 + 0];
+    const ib = indices[t * 3 + 1];
+    const ic = indices[t * 3 + 2];
+    const ax = positions[ia * 3 + 0], ay = positions[ia * 3 + 1], az = positions[ia * 3 + 2];
+    const bx = positions[ib * 3 + 0], by = positions[ib * 3 + 1], bz = positions[ib * 3 + 2];
+    const cx = positions[ic * 3 + 0], cy = positions[ic * 3 + 1], cz = positions[ic * 3 + 2];
+    const ux = bx - ax, uy = by - ay, uz = bz - az;
+    const vx = cx - ax, vy = cy - ay, vz = cz - az;
+    let nx = uy * vz - uz * vy;
+    let ny = uz * vx - ux * vz;
+    let nz = ux * vy - uy * vx;
+    // Quantized-mesh uses geographic v=north while Mercator y points south,
+    // so its winding may be inverted after reprojection.
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    out[ia * 3 + 0] += nx; out[ia * 3 + 1] += ny; out[ia * 3 + 2] += nz;
+    out[ib * 3 + 0] += nx; out[ib * 3 + 1] += ny; out[ib * 3 + 2] += nz;
+    out[ic * 3 + 0] += nx; out[ic * 3 + 1] += ny; out[ic * 3 + 2] += nz;
+  }
+  const vertexCount = Math.floor(out.length / 3);
+  for (let i = 0; i < vertexCount; i++) {
+    const nx = out[i * 3 + 0];
+    const ny = out[i * 3 + 1];
+    const nz = out[i * 3 + 2];
+    const len = Math.hypot(nx, ny, nz);
+    if (len > 1e-10) {
+      out[i * 3 + 0] = nx / len;
+      out[i * 3 + 1] = ny / len;
+      out[i * 3 + 2] = nz / len;
+    } else {
+      out[i * 3 + 0] = 0;
+      out[i * 3 + 1] = 0;
+      out[i * 3 + 2] = 1;
+    }
+  }
+}
+
+/** 在已解码三角网格上对指定经纬度做重心插值。 */
+export function sampleDecodedTerrainElevation(
+  tile: DecodedTerrainTile,
+  lng: number,
+  lat: number,
+): number | null {
+  if (lng < tile.bbox[0] || lng > tile.bbox[2] || lat < tile.bbox[1] || lat > tile.bbox[3]) {
+    return null;
+  }
+  const [worldX, worldY] = lngLatToMercatorPixel(lng, lat, TILE_PIXEL_SIZE);
+  const px = worldX - tile.tileCenterMercatorPxZ0[0];
+  const py = worldY - tile.tileCenterMercatorPxZ0[1];
+  const vertices = tile.vertices;
+  const indices = tile.indices;
+  for (let i = 0; i + 2 < tile.mainIndexCount; i += 3) {
+    const ia = indices[i] * FLOATS_PER_VERTEX;
+    const ib = indices[i + 1] * FLOATS_PER_VERTEX;
+    const ic = indices[i + 2] * FLOATS_PER_VERTEX;
+    const ax = vertices[ia], ay = vertices[ia + 1];
+    const bx = vertices[ib], by = vertices[ib + 1];
+    const cx = vertices[ic], cy = vertices[ic + 1];
+    const denom = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (Math.abs(denom) < 1e-14) { continue; }
+    const wa = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / denom;
+    const wb = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / denom;
+    const wc = 1 - wa - wb;
+    if (wa >= -1e-6 && wb >= -1e-6 && wc >= -1e-6) {
+      return wa * vertices[ia + 2] + wb * vertices[ib + 2] + wc * vertices[ic + 2];
+    }
+  }
+  return null;
+}
+
 export function createCesiumTerrainLayer(
   opts: CesiumTerrainLayerOptions,
 ): Layer & {
   readonly provider: CesiumTerrainProvider;
   queryTerrainElevation(lng: number, lat: number): number | null;
 } {
-  const exaggeration = opts.exaggeration ?? 1.5;
-  const opacity = opts.opacity ?? 1;
-  const maxSSE = opts.maxScreenSpaceError ?? DEFAULT_MAX_SCREEN_SPACE_ERROR;
-  const lightDir = opts.lightDirection ?? [-0.5, -0.7, 1.0];
+  let exaggeration = Number.isFinite(opts.exaggeration) && opts.exaggeration! > 0
+    ? opts.exaggeration! : 1.5;
+  let opacity = Number.isFinite(opts.opacity)
+    ? Math.max(0, Math.min(1, opts.opacity!)) : 1;
+  let maxSSE = Number.isFinite(opts.maxScreenSpaceError) && opts.maxScreenSpaceError! > 0
+    ? opts.maxScreenSpaceError! : DEFAULT_MAX_SCREEN_SPACE_ERROR;
+  let lightDir: readonly [number, number, number] = opts.lightDirection ?? [-0.5, -0.7, 1.0];
   // 在新 shader 中此值被当作 hillshade 强度（±比例）：
   //   0   = 无阴影（贴图保持原色）
   //   0.1 = 坡面 ±10% 微弱明暗（推荐，与 2D 底图无缝）
   //   1.0 = 坡面 100% 黑/200% 亮（几乎不用）
-  const ambient = opts.ambient ?? 0.1;
+  let ambient = Number.isFinite(opts.ambient)
+    ? Math.max(0, Math.min(1, opts.ambient!)) : 0.1;
   const drapeTemplate = opts.drapeUrlTemplate ?? DEFAULT_DRAPE_TEMPLATE;
   const drapeMaxZoom = opts.drapeMaxZoom ?? DEFAULT_DRAPE_MAX_ZOOM;
 
@@ -169,32 +288,44 @@ export function createCesiumTerrainLayer(
   let cameraUB: GPUBuffer | null = null;
   let styleUB: GPUBuffer | null = null;
   let sampler: GPUSampler | null = null;
+  let mipmapPipeline: GPURenderPipeline | null = null;
+  let mipmapSampler: GPUSampler | null = null;
+  let mipmapLayout: GPUBindGroupLayout | null = null;
   // 每个瓦片一个 TileUniform buffer（小且固定）
   let cameraBG: GPUBindGroup | null = null;
   let styleBG: GPUBindGroup | null = null;
-  /** 1×1 白色占位纹理：drape 未加载时让瓦片仍可渲染（纯白底） */
+  /** 1×1 透明占位纹理：drape 未加载时由下方 raster 平面托底。 */
   let placeholderTex: GPUTexture | null = null;
+
+  // 每瓦片的 uniform buffer（随缓存条目销毁）
+  const tileUBByKey = new Map<string, GPUBuffer>();
 
   // 缓存
   const cache = new TerrainLRUCache((e) => {
     e.vertexBuffer?.destroy();
     e.indexBuffer?.destroy();
     e.drapeTexture?.destroy();
+    tileUBByKey.get(e.key)?.destroy();
+    tileUBByKey.delete(e.key);
     // bindgroup 无需手动释放
   });
-
-  // 每瓦片的 uniform buffer（随缓存条目销毁）
-  const tileUBByKey = new Map<string, GPUBuffer>();
 
   // 本帧调度
   let scheduledThisFrame: GeographicScheduledTile[] = [];
   let layerContext: LayerContext | null = null;
   let mounted = false;
   let canvasSize: readonly [number, number] = [1024, 768];
-  let rootPreloadStarted = false;
 
   // 正在进行的贴图 fetch（避免重复）
   const drapeFetchInflight = new Set<string>();
+
+  function writeStyleUniforms(): void {
+    if (device === null || styleUB === null) { return; }
+    const data = new Float32Array(8);
+    data[0] = lightDir[0]; data[1] = lightDir[1]; data[2] = lightDir[2]; data[3] = ambient;
+    data[4] = opacity;
+    device.queue.writeBuffer(styleUB, 0, data);
+  }
 
   // layer.json 初始化
   let providerReady = false;
@@ -279,15 +410,13 @@ export function createCesiumTerrainLayer(
         frontFace: 'ccw',
         cullMode: 'none',
       },
-      // 地形场景：使用画家算法，不参与深度缓冲。
-      //   • 相邻同 LOD 瓦片不物理重叠，不需要 depth 解决遮挡
-      //   • 父/子 LOD 瓦片会重叠（祖先兜底），此时按 LOD 粗到细顺序绘制，
-      //     细瓦片视觉覆盖粗瓦片，靠绘制顺序正确显示
-      //   • 消除同深度 fragment 的 z-fighting / 交叉渲染
+      // Camera25D 使用 reversed-Z：近处深度更大。地形必须写入深度，
+      // 否则山体自遮挡、裙边以及后续 3D 图层都会退化成画家算法。
+      // greater-equal 允许后绘制的同面子瓦片覆盖祖先兜底瓦片。
       depthStencil: {
         format: 'depth24plus',
-        depthWriteEnabled: false,
-        depthCompare: 'always',
+        depthWriteEnabled: true,
+        depthCompare: 'greater-equal',
       },
     });
 
@@ -314,13 +443,32 @@ export function createCesiumTerrainLayer(
       addressModeV: 'clamp-to-edge',
     });
 
-    // 初始 style uniform
-    const sd = new Float32Array(8);
-    sd[0] = lightDir[0]; sd[1] = lightDir[1]; sd[2] = lightDir[2]; sd[3] = ambient;
-    sd[4] = opacity; sd[5] = 0; sd[6] = 0; sd[7] = 0;
-    dev.queue.writeBuffer(styleUB, 0, sd);
+    mipmapSampler = dev.createSampler({
+      magFilter: 'linear', minFilter: 'linear',
+      addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+    });
+    mipmapLayout = dev.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+      ],
+    });
+    const mipmapModule = dev.createShaderModule({ code: TERRAIN_MIPMAP_WGSL });
+    mipmapPipeline = dev.createRenderPipeline({
+      layout: dev.createPipelineLayout({ bindGroupLayouts: [mipmapLayout] }),
+      vertex: { module: mipmapModule, entryPoint: 'mip_vs' },
+      fragment: {
+        module: mipmapModule,
+        entryPoint: 'mip_fs',
+        targets: [{ format: 'rgba8unorm' }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
 
-    // 1×1 白色占位纹理
+    // 初始 style uniform
+    writeStyleUniforms();
+
+    // 1×1 透明占位纹理
     placeholderTex = dev.createTexture({
       size: [1, 1, 1],
       format: 'rgba8unorm',
@@ -328,7 +476,7 @@ export function createCesiumTerrainLayer(
     });
     dev.queue.writeTexture(
       { texture: placeholderTex },
-      new Uint8Array([255, 255, 255, 255]),
+      new Uint8Array([255, 255, 255, 0]),
       { bytesPerRow: 4 },
       { width: 1, height: 1, depthOrArrayLayers: 1 },
     );
@@ -389,45 +537,131 @@ export function createCesiumTerrainLayer(
   // "Destroyed texture used in a submit" WebGPU 校验错误。
   // ---------------------------------------------------------------------
 
+  function generateDrapeMipmaps(texture: GPUTexture, mipLevelCount: number): void {
+    if (
+      device === null || mipmapPipeline === null || mipmapSampler === null
+      || mipmapLayout === null || mipLevelCount <= 1
+    ) { return; }
+
+    const commandEncoder = device.createCommandEncoder({ label: 'terrain-drape-mipmap-encoder' });
+    for (let level = 1; level < mipLevelCount; level++) {
+      const bindGroup = device.createBindGroup({
+        layout: mipmapLayout,
+        entries: [
+          { binding: 0, resource: mipmapSampler },
+          {
+            binding: 1,
+            resource: texture.createView({ baseMipLevel: level - 1, mipLevelCount: 1 }),
+          },
+        ],
+      });
+      const pass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+          view: texture.createView({ baseMipLevel: level, mipLevelCount: 1 }),
+          loadOp: 'clear', storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        }],
+      });
+      pass.setPipeline(mipmapPipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3);
+      pass.end();
+    }
+    device.queue.submit([commandEncoder.finish()]);
+  }
+
+  function drapeTextureByteSize(width: number, height: number, mipLevelCount: number): number {
+    let bytes = 0;
+    for (let level = 0; level < mipLevelCount; level++) {
+      bytes += Math.max(1, width >> level) * Math.max(1, height >> level) * 4;
+    }
+    return bytes;
+  }
+
   async function loadDrapeTexture(
     entry: TerrainCacheEntry, attempt: number = 0,
   ): Promise<void> {
     if (device === null) { return; }
     const dec = entry.decoded;
     if (dec === null) { return; }
-    const { z, x, y } = dec.drapeOsm;
+    const coverage = dec.drapeOsm;
     if (drapeFetchInflight.has(entry.key)) { return; }
     drapeFetchInflight.add(entry.key);
+    const bitmaps: Array<{
+      bitmap: ImageBitmap;
+      column: number;
+      row: number;
+    }> = [];
 
     try {
-      const url = buildOsmTileUrl(drapeTemplate, z, x, y);
-      const resp = await fetch(url, { mode: 'cors' });
-      if (!resp.ok) { throw new Error(`HTTP ${resp.status}`); }
-      const blob = await resp.blob();
-      const bitmap = await createImageBitmap(blob, {
-        premultiplyAlpha: 'none',
-        colorSpaceConversion: 'none',
-      });
-      if (!mounted || device === null) { bitmap.close(); return; }
-      // entry 已被 LRU 驱逐：放弃
-      if (!cache.has(entry.key)) { bitmap.close(); return; }
+      const requests: Array<Promise<Blob>> = [];
+      for (let tileY = coverage.yMin; tileY <= coverage.yMax; tileY++) {
+        for (let tileX = coverage.xMin; tileX <= coverage.xMax; tileX++) {
+          const url = buildOsmTileUrl(drapeTemplate, coverage.z, tileX, tileY);
+          requests.push(fetch(url, { mode: 'cors' }).then(async (response) => {
+            if (!response.ok) { throw new Error(`HTTP ${response.status}: ${url}`); }
+            return response.blob();
+          }));
+        }
+      }
 
+      const blobs = await Promise.all(requests);
+      let blobIndex = 0;
+      for (let tileY = coverage.yMin; tileY <= coverage.yMax; tileY++) {
+        for (let tileX = coverage.xMin; tileX <= coverage.xMax; tileX++) {
+          const bitmap = await createImageBitmap(blobs[blobIndex++], {
+            premultiplyAlpha: 'none',
+            colorSpaceConversion: 'none',
+          });
+          bitmaps.push({
+            bitmap,
+            column: tileX - coverage.xMin,
+            row: tileY - coverage.yMin,
+          });
+        }
+      }
+      if (!mounted || device === null) { return; }
+      // entry 已被 LRU 驱逐：放弃
+      if (!cache.has(entry.key)) { return; }
+
+      const firstBitmap = bitmaps[0]?.bitmap;
+      if (firstBitmap === undefined) { throw new Error('Empty drape tile coverage'); }
+      const tileWidth = firstBitmap.width;
+      const tileHeight = firstBitmap.height;
+      if (bitmaps.some(({ bitmap }) => (
+        bitmap.width !== tileWidth || bitmap.height !== tileHeight
+      ))) {
+        throw new Error('Drape atlas tiles have inconsistent dimensions');
+      }
+      const texW = tileWidth * (coverage.xMax - coverage.xMin + 1);
+      const texH = tileHeight * (coverage.yMax - coverage.yMin + 1);
+      if (
+        texW > device.limits.maxTextureDimension2D
+        || texH > device.limits.maxTextureDimension2D
+      ) {
+        throw new Error(`Drape atlas ${texW}x${texH} exceeds GPU texture limits`);
+      }
+      const mipLevelCount = Math.floor(Math.log2(Math.max(texW, texH))) + 1;
       const tex = device.createTexture({
-        size: [bitmap.width, bitmap.height, 1],
+        size: [texW, texH, 1],
         format: 'rgba8unorm',
+        mipLevelCount,
         usage:
           GPUTextureUsage.TEXTURE_BINDING |
           GPUTextureUsage.COPY_DST |
           GPUTextureUsage.RENDER_ATTACHMENT,
       });
-      device.queue.copyExternalImageToTexture(
-        { source: bitmap },
-        { texture: tex },
-        [bitmap.width, bitmap.height, 1],
-      );
-      const texW = bitmap.width;
-      const texH = bitmap.height;
-      bitmap.close();
+      for (const { bitmap, column, row } of bitmaps) {
+        device.queue.copyExternalImageToTexture(
+          { source: bitmap },
+          {
+            texture: tex,
+            origin: { x: column * tileWidth, y: row * tileHeight },
+          },
+          [tileWidth, tileHeight, 1],
+        );
+      }
+      generateDrapeMipmaps(tex, mipLevelCount);
 
       // 释放之前的真实纹理（占位符不销毁，供其它瓦片继续使用）
       if (entry.drapeTexture !== null && entry.drapeTexture !== placeholderTex) {
@@ -436,7 +670,10 @@ export function createCesiumTerrainLayer(
       entry.drapeTexture = tex;
       entry.drapeLoaded = true;
       ensureTileBindGroup(entry, tex);
-      cache.updateBytes(entry.key, entry.byteSize + texW * texH * 4);
+      cache.updateBytes(
+        entry.key,
+        entry.byteSize + drapeTextureByteSize(texW, texH, mipLevelCount),
+      );
     } catch {
       // 指数退避重试：1s → 2s → 4s，最多 3 次
       if (attempt < 3 && mounted) {
@@ -452,6 +689,7 @@ export function createCesiumTerrainLayer(
       }
       // 放弃：保留占位符渲染
     } finally {
+      for (const { bitmap } of bitmaps) { bitmap.close(); }
       drapeFetchInflight.delete(entry.key);
     }
   }
@@ -476,8 +714,8 @@ export function createCesiumTerrainLayer(
       centerLng, centerLat, worldSizeZ0,
     );
 
-    // 选一张覆盖 bbox 的 OSM 瓦片作为 drape 纹理源
-    const osm = pickCoveringOsmTile(
+    // 计算覆盖 bbox 的同层级 OSM 瓦片图集，避免回退祖先纹理后被整体拉伸。
+    const osm = computeOsmTileCoverage(
       geo.west, geo.south, geo.east, geo.north,
       Math.min(drapeMaxZoom, z + 1),
     );
@@ -486,6 +724,7 @@ export function createCesiumTerrainLayer(
     const hMin = raw.header.minimumHeight;
     const hMax = raw.header.maximumHeight;
     const hRange = Math.max(1e-3, hMax - hMin);
+    const skirtDepth = computeTerrainSkirtDepth(hMin, hMax);
 
     // 临时数组：位置(z=0 px)、真实高度(米)、UV
     const tmpPosXY = new Float32Array(vc * 2);
@@ -511,7 +750,7 @@ export function createCesiumTerrainLayer(
       tmpHeight[i] = heightM;
 
       // UV: (lng,lat) → OSM 瓦片局部 [0,1]
-      const [uu, vv] = lngLatToOsmTileUv(lng, lat, osm.z, osm.x, osm.y);
+      const [uu, vv] = lngLatToOsmAtlasUv(lng, lat, osm);
       tmpUV[i * 2 + 0] = uu;
       tmpUV[i * 2 + 1] = vv;
 
@@ -520,15 +759,10 @@ export function createCesiumTerrainLayer(
       normalPos[i * 3 + 2] = heightM * ppmZ0 * exaggeration;
     }
 
-    // 法线：优先 oct-encoded，否则 CPU 面积加权
+    // 法线必须位于渲染使用的 east/south/up 空间，并反映 exaggeration。
+    // quantized-mesh 的 oct normals 位于 ECEF 空间，不能直接送入该 shader。
     const normals = new Float32Array(vc * 3);
-    if (raw.octNormals !== null && raw.octNormals.length >= vc * 2) {
-      for (let i = 0; i < vc; i++) {
-        octDecodeNormal(raw.octNormals[i * 2], raw.octNormals[i * 2 + 1], normals, i * 3);
-      }
-    } else {
-      computeVertexNormals(normalPos, raw.triangleIndices, normals);
-    }
+    computeTerrainVertexNormals(normalPos, raw.triangleIndices, normals);
 
     // 裙边：沿西/南/东/北 4 条边下沉 SKIRT_METERS
     const edgeArrays = [raw.westIndices, raw.southIndices, raw.eastIndices, raw.northIndices];
@@ -561,7 +795,7 @@ export function createCesiumTerrainLayer(
         const dst = skirtVi * FLOATS_PER_VERTEX;
         vertData[dst + 0] = tmpPosXY[src * 2 + 0];
         vertData[dst + 1] = tmpPosXY[src * 2 + 1];
-        vertData[dst + 2] = tmpHeight[src] - SKIRT_METERS;
+        vertData[dst + 2] = tmpHeight[src] - skirtDepth;
         vertData[dst + 3] = 0;
         vertData[dst + 4] = 0;
         vertData[dst + 5] = -1;
@@ -615,46 +849,6 @@ export function createCesiumTerrainLayer(
       drapeOsm: osm,
       byteSize,
     };
-  }
-
-  /** 面积加权法线（以 z=0 px 尺度的位置） */
-  function computeVertexNormals(
-    positions: Float32Array,
-    indices: Uint16Array | Uint32Array,
-    out: Float32Array,
-  ): void {
-    out.fill(0);
-    const triCount = indices.length / 3;
-    for (let t = 0; t < triCount; t++) {
-      const ia = indices[t * 3 + 0];
-      const ib = indices[t * 3 + 1];
-      const ic = indices[t * 3 + 2];
-      const ax = positions[ia * 3 + 0], ay = positions[ia * 3 + 1], az = positions[ia * 3 + 2];
-      const bx = positions[ib * 3 + 0], by = positions[ib * 3 + 1], bz = positions[ib * 3 + 2];
-      const cx = positions[ic * 3 + 0], cy = positions[ic * 3 + 1], cz = positions[ic * 3 + 2];
-      const ux = bx - ax, uy = by - ay, uz = bz - az;
-      const vx = cx - ax, vy = cy - ay, vz = cz - az;
-      const nx = uy * vz - uz * vy;
-      const ny = uz * vx - ux * vz;
-      const nz = ux * vy - uy * vx;
-      out[ia * 3 + 0] += nx; out[ia * 3 + 1] += ny; out[ia * 3 + 2] += nz;
-      out[ib * 3 + 0] += nx; out[ib * 3 + 1] += ny; out[ib * 3 + 2] += nz;
-      out[ic * 3 + 0] += nx; out[ic * 3 + 1] += ny; out[ic * 3 + 2] += nz;
-    }
-    const vc = out.length / 3;
-    for (let i = 0; i < vc; i++) {
-      const nx = out[i * 3 + 0];
-      const ny = out[i * 3 + 1];
-      const nz = out[i * 3 + 2];
-      const len = Math.hypot(nx, ny, nz);
-      if (len > 1e-10) {
-        out[i * 3 + 0] = nx / len;
-        out[i * 3 + 1] = ny / len;
-        out[i * 3 + 2] = nz / len;
-      } else {
-        out[i * 3 + 2] = 1;
-      }
-    }
   }
 
   async function loadTile(z: number, x: number, y: number): Promise<void> {
@@ -737,38 +931,13 @@ export function createCesiumTerrainLayer(
       indexSource.byteOffset, paddedIndexBytes,
     );
 
-    // 立即找一个 drape-ready 的祖先瓦片，借用其纹理 + UV 子区域作为
-    // 初始 bind group，这样瓦片加载瞬间就有真实 OSM 颜色，不会显示白色。
-    // 真实 drape 到达后 ensureTileBindGroup 会用 identity transform 替换。
+    // 不借用祖先 GPUTexture：祖先可能被 LRU 淘汰并销毁，遗留 bind group
+    // 会引用无效资源。透明占位期间由平面 raster 托底，自己的 drape 到达
+    // 后再用 identity UV 替换。
     let initialTex: GPUTexture = placeholderTex !== null
       ? placeholderTex : (null as unknown as GPUTexture);
-    let uvScale = 1, uvOffsetX = 0, uvOffsetY = 0;
-    {
-      let az = z - 1, ax = x >>> 1, ay = y >>> 1;
-      while (az >= 0) {
-        const ak = `${az}/${ax}/${ay}`;
-        const ae = cache.peek(ak);
-        if (ae !== undefined && ae.drapeTexture !== null && ae.drapeLoaded) {
-          initialTex = ae.drapeTexture;
-          const dz = z - az;
-          const shift = dz;
-          const n2 = 1 << shift;
-          // 本瓦片 (x,y) 在祖先内的局部坐标
-          const ix = x - (ax << shift);
-          const iy = y - (ay << shift);
-          uvScale = 1 / n2;
-          uvOffsetX = ix / n2;
-          uvOffsetY = iy / n2;
-          break;
-        }
-        if (az === 0) { break; }
-        az--;
-        ax >>>= 1;
-        ay >>>= 1;
-      }
-    }
     if (initialTex !== null) {
-      ensureTileBindGroup(entry, initialTex, uvScale, uvScale, uvOffsetX, uvOffsetY);
+      ensureTileBindGroup(entry, initialTex);
     }
     entry.state = 'ready';
     cache.updateBytes(key, decoded.byteSize);
@@ -783,6 +952,12 @@ export function createCesiumTerrainLayer(
 
   const paintProps = new Map<string, unknown>();
   const layoutProps = new Map<string, unknown>();
+  if (opts.paint) {
+    for (const [name, value] of Object.entries(opts.paint)) { paintProps.set(name, value); }
+  }
+  if (opts.layout) {
+    for (const [name, value] of Object.entries(opts.layout)) { layoutProps.set(name, value); }
+  }
 
   const layer: Layer & {
     readonly provider: CesiumTerrainProvider;
@@ -812,11 +987,7 @@ export function createCesiumTerrainLayer(
     onRemove(): void {
       mounted = false;
       provider.abortAll();
-      for (const e of cache.values()) {
-        e.vertexBuffer?.destroy();
-        e.indexBuffer?.destroy();
-        e.drapeTexture?.destroy();
-      }
+      // cache owns per-tile GPU resources; its eviction callback releases them once.
       cache.clear();
       for (const b of tileUBByKey.values()) { b.destroy(); }
       tileUBByKey.clear();
@@ -824,6 +995,9 @@ export function createCesiumTerrainLayer(
       styleUB?.destroy(); styleUB = null;
       placeholderTex?.destroy(); placeholderTex = null;
       pipeline = null;
+      mipmapPipeline = null;
+      mipmapSampler = null;
+      mipmapLayout = null;
       device = null;
     },
 
@@ -831,9 +1005,6 @@ export function createCesiumTerrainLayer(
       if (device === null) { return; }
       if (!providerReady) { return; }
       if (layerContext?.canvasSize) { canvasSize = layerContext.canvasSize; }
-      void maxSSE;
-      void rootPreloadStarted;
-
       // Cesium 地理 TMS 调度（只会返回 available 矩阵内的瓦片，所以在
       // 非 DEM 区域如美国/非洲，调度结果为空，由底图 RasterTileLayer 兜底）
       scheduledThisFrame = computeGeographicCoveringTiles(camera, provider, {
@@ -841,6 +1012,7 @@ export function createCesiumTerrainLayer(
         viewportHeight: canvasSize[1],
         minZoom: opts.minZoom ?? 0,
         maxZoom: opts.maxZoom ?? 14,
+        maxScreenSpaceError: maxSSE,
       });
 
       // Touch 已存在的 scheduled 到 LRU 尾部（最远→最近）
@@ -954,16 +1126,27 @@ export function createCesiumTerrainLayer(
 
     setPaintProperty(name: string, value: unknown): void {
       paintProps.set(name, value);
-      if (device !== null && styleUB !== null) {
-        const sd = new Float32Array(8);
-        sd[0] = lightDir[0]; sd[1] = lightDir[1]; sd[2] = lightDir[2]; sd[3] = ambient;
-        sd[4] = opacity; sd[5] = 0; sd[6] = 0; sd[7] = 0;
-        device.queue.writeBuffer(styleUB, 0, sd);
+      if (name === 'terrain-exaggeration' && typeof value === 'number' && Number.isFinite(value) && value > 0) {
+        exaggeration = value;
+      } else if (name === 'terrain-opacity' && typeof value === 'number' && Number.isFinite(value)) {
+        opacity = Math.max(0, Math.min(1, value));
+        layer.opacity = opacity;
+      } else if (name === 'terrain-ambient' && typeof value === 'number' && Number.isFinite(value)) {
+        ambient = Math.max(0, Math.min(1, value));
+      } else if (
+        name === 'terrain-light-direction' && Array.isArray(value) && value.length === 3 &&
+        value.every((component) => typeof component === 'number' && Number.isFinite(component))
+      ) {
+        lightDir = [value[0] as number, value[1] as number, value[2] as number];
       }
+      writeStyleUniforms();
     },
     setLayoutProperty(name: string, value: unknown): void {
       layoutProps.set(name, value);
       if (name === 'visibility') { layer.visible = value === 'visible'; }
+      if (name === 'terrain-max-screen-space-error' && typeof value === 'number' && Number.isFinite(value) && value > 0) {
+        maxSSE = value;
+      }
     },
     getPaintProperty(name: string): unknown { return paintProps.get(name); },
     getLayoutProperty(name: string): unknown { return layoutProps.get(name); },
@@ -991,8 +1174,7 @@ export function createCesiumTerrainLayer(
         if (best === null || e.coord.z > best.coord.z) { best = e; }
       }
       if (best === null || best.decoded === null) { return null; }
-      const [mn, mx] = best.decoded.heightRange;
-      return (mn + mx) * 0.5;
+      return sampleDecodedTerrainElevation(best.decoded, lng, lat);
     },
   };
 

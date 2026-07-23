@@ -5,8 +5,7 @@
 //       中键 tilt3D（对标 Cesium MIDDLE_DRAG）、morph 动画。
 // ============================================================
 
-import type { Camera3D } from '../../camera-3d/src/Camera3D.ts';
-import { eastNorthUpToFixedFrame } from '../../camera-3d/src/Camera3D.ts';
+import { eastNorthUpToFixedFrame, type Camera3D } from '../../camera-3d/src/index.ts';
 import type { GlobeInteractionState, MorphState } from './globe-types.ts';
 import {
     _panEast, _panPlaneNormal, _panRejA, _panRejB,

@@ -117,7 +117,7 @@ export function createGlobeGPUResources(device: GPUDevice, refs: GlobeGPURefs): 
         label: 'Globe3D:tileParamsLayout',
         entries: [{
             binding: 0,
-            visibility: GPUShaderStage.VERTEX,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
             buffer: { type: 'uniform' },
         }],
     });
@@ -208,7 +208,13 @@ export function createGlobePipeline(device: GPUDevice, format: GPUTextureFormat,
         fragment: {
             module: shaderModule,
             entryPoint: 'globe_fs',
-            targets: [{ format }],
+            targets: [{
+                format,
+                blend: {
+                    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                    alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                },
+            }],
         },
         primitive: {
             topology: 'triangle-list',

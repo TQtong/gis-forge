@@ -28,7 +28,7 @@ import {
     tileBoundsInto,
     tileCenterInto,
     touchesPole,
-    tileKey,
+    tileKeyAuto,
 } from '../../core/src/geo/tiling-scheme.ts';
 import { WebMercator } from '../../core/src/geo/web-mercator-tiling-scheme.ts';
 
@@ -190,7 +190,7 @@ export interface GlobeTileMesh {
 
 /**
  * 3D Globe 瓦片标识——渲染调度用的完整标识。
- * v3 变更：key 从 string 改为 number（{@link tileKey} 编码），新增 schemeId。
+ * v3 变更：常规层级使用数值键，高层级自动回退字符串键，并新增 schemeId。
  */
 export interface GlobeTileID {
     /** 瓦片 zoom 级别 */
@@ -199,8 +199,8 @@ export interface GlobeTileID {
     readonly x: number;
     /** 瓦片行号 */
     readonly y: number;
-    /** 数值缓存键，由 {@link tileKey} 生成（v3：从 string 改为 number） */
-    readonly key: number;
+    /** 安全缓存键；zoom≤17 为 number，更高 zoom 自动回退为 string。 */
+    readonly key: number | string;
     /** 与相机注视点的大圆距离（米），用于排序 */
     readonly distToCamera: number;
     /** 方案 ID，轻量引用而非完整 TilingScheme 对象 */
@@ -1651,14 +1651,21 @@ const _camEcefTuple: [number, number, number] = [0, 0, 0];
 // 对于 WebMercator scheme，几何误差只取决于 (z, y)（相同纬度行的瓦片大小相同），
 // 但为了支持 Geographic / 自定义 scheme，我们仍按 (schemeId, z, x, y) 缓存。
 // 用 Map<number, number> 比 Map<string, number> 更快。
-/** 几何误差缓存：key = encode(schemeId, z, x, y) → meters */
-const _geomErrorCache = new Map<number, number>();
+/** 几何误差缓存：精确字符串键 `(schemeId,z,x,y)` → meters。 */
+const _geomErrorCache = new Map<string, number>();
 /** 缓存命中阈值：超过这个值就清空（防止极端缩放下无限增长） */
 const GEOM_ERROR_CACHE_LIMIT = 65536;
 
-function _geomErrorKey(schemeId: number, z: number, x: number, y: number): number {
-    // 4-bit scheme + 5-bit z + 24-bit x + 24-bit y → 57 bits, fits in JS number
-    return (schemeId * 0x20 + z) * 0x1000000 * 0x1000000 + x * 0x1000000 + y;
+function _geomErrorKey(
+    schemeId: number,
+    z: number,
+    x: number,
+    y: number,
+    ellipsoid: Ellipsoid,
+): string {
+    // 旧 57-bit Number 编码超过 JS 的 53-bit 安全整数范围，在高 zoom 会碰撞。
+    // 椭球参数也必须参与缓存键，否则地球缓存会污染月球/火星等自定义椭球。
+    return `${schemeId}:${ellipsoid.a}:${ellipsoid.b}:${ellipsoid.e2}:${z}/${x}/${y}`;
 }
 
 function _getOrComputeGeomError(
@@ -1666,7 +1673,7 @@ function _getOrComputeGeomError(
     z: number, x: number, y: number,
     ell: Ellipsoid,
 ): number {
-    const key = _geomErrorKey(scheme.id, z, x, y);
+    const key = _geomErrorKey(scheme.id, z, x, y, ell);
     const cached = _geomErrorCache.get(key);
     if (cached !== undefined) return cached;
 
@@ -1711,7 +1718,7 @@ function _tileBoundingSphere(
     outCenter: [number, number, number],
 ): number {
     // 检查缓存
-    const cacheKey = _geomErrorKey(scheme.id, z, x, y);
+    const cacheKey = _geomErrorKey(scheme.id, z, x, y, ell);
     const cachedBS = _bsCache.get(cacheKey);
     if (cachedBS !== undefined) {
         outCenter[0] = cachedBS[0];
@@ -1762,7 +1769,7 @@ function _tileBoundingSphere(
 }
 
 /** 包围球缓存：key 编码同 _geomErrorCache，值 = Float64Array[4] = [cx, cy, cz, radius] */
-const _bsCache = new Map<number, Float64Array>();
+const _bsCache = new Map<string, Float64Array>();
 
 /**
  * 把 Float64 vpMatrix 截断为 Float32（写入模块级 _vpF32 缓冲）。
@@ -1926,7 +1933,7 @@ function _emitTile(
     );
     result.push({
         z, x, y,
-        key: tileKey(scheme.id, z, x, y),
+        key: tileKeyAuto(scheme.id, z, x, y),
         distToCamera: dist,
         schemeId: scheme.id,
     });
