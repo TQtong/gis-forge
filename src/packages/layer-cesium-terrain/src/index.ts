@@ -4,6 +4,7 @@
 
 export {
   createCesiumTerrainLayer,
+  getTerrainSurfaceIndexCount,
   computeTerrainVertexNormals,
   sampleDecodedTerrainElevation,
 } from './CesiumTerrainLayer.ts';

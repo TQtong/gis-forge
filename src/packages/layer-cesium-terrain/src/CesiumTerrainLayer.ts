@@ -53,6 +53,18 @@ export function computeTerrainSkirtDepth(
   );
 }
 
+/**
+ * 常规地形绘制只提交主表面索引。
+ *
+ * quantized-mesh 的边缘条带是用于特定 LOD 接缝的可选几何；若每个瓦片都
+ * 无条件绘制，缺失邻瓦片或祖先兜底期间会把条带暴露成竖直纹理墙。
+ */
+export function getTerrainSurfaceIndexCount(
+  tile: Pick<DecodedTerrainTile, 'indexCount' | 'mainIndexCount'>,
+): number {
+  return Math.min(tile.indexCount, tile.mainIndexCount);
+}
+
 // ---------------------------------------------------------------------------
 // WGSL 着色器
 // ---------------------------------------------------------------------------
@@ -1082,7 +1094,7 @@ export function createCesiumTerrainLayer(
         encoder.setBindGroup(2, e.tileBindGroup!);
         encoder.setVertexBuffer(0, e.vertexBuffer!);
         encoder.setIndexBuffer(e.indexBuffer!, e.indexFormat);
-        encoder.drawIndexed(e.decoded!.indexCount);
+        encoder.drawIndexed(getTerrainSurfaceIndexCount(e.decoded!));
       };
 
       // 直接 QM 渲染：不再自己构建网格，所以 mesh 质量由服务器原生三角网

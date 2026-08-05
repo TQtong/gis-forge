@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   computeTerrainSkirtDepth,
   computeTerrainVertexNormals,
+  getTerrainSurfaceIndexCount,
   sampleDecodedTerrainElevation,
 } from '../../src/packages/layer-cesium-terrain/src/CesiumTerrainLayer.ts';
 import { lngLatToMercatorPixel } from '../../src/packages/layer-cesium-terrain/src/mercator.ts';
@@ -13,6 +14,13 @@ describe('terrain geometry helpers', () => {
     expect(computeTerrainSkirtDepth(100, 200)).toBe(10);
     expect(computeTerrainSkirtDepth(-500, 1500)).toBe(100);
     expect(computeTerrainSkirtDepth(-1000, 9000)).toBe(200);
+  });
+
+  it('excludes optional skirt triangles from the normal terrain draw', () => {
+    expect(getTerrainSurfaceIndexCount({
+      indexCount: 30,
+      mainIndexCount: 18,
+    })).toBe(18);
   });
 
   it('orients reprojected mesh normals toward local up', () => {

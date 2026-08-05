@@ -88,7 +88,7 @@ export interface DecodedTerrainTile {
   readonly indices: Uint16Array | Uint32Array;
   /** 顶点总数（含裙边） */
   readonly vertexCount: number;
-  /** 索引总数（主网格 + 裙边） */
+  /** 索引总数（主网格 + 可选裙边；常规绘制不提交裙边） */
   readonly indexCount: number;
   /** 主网格索引数（前 mainIndexCount 个索引） */
   readonly mainIndexCount: number;
