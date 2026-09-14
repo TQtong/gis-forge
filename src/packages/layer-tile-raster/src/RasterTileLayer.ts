@@ -13,6 +13,9 @@ import type { Feature } from '../../core/src/types/feature.ts';
 import type { FilterExpression } from '../../core/src/types/style-spec.ts';
 import type { Layer } from '../../scene/src/scene-graph.ts';
 import type { LayerContext } from '../../scene/src/layer-manager.ts';
+import { RasterTerrainSurface } from './raster-terrain-surface.ts';
+import type { TerrainSurfaceSource } from '../../scene/src/terrain-surface.ts';
+import { computePerspectiveTileCover } from '../../core/src/geo/perspective-tile-cover.ts';
 
 // ---------------------------------------------------------------------------
 // __DEV__ 全局标记声明（生产构建定义为 false 以便 tree-shake 剥离调试代码）
@@ -155,9 +158,6 @@ const VERTS_PER_TILE = 4;
 
 /** 每个瓦片 6 个索引 */
 const INDICES_PER_TILE = 6;
-
-/** 重试最大次数 */
-const MAX_RETRY_COUNT = 3;
 
 /** 重试基础延迟 (ms) */
 const RETRY_BASE_DELAY_MS = 1000;
@@ -358,6 +358,7 @@ interface CacheEntry {
   byteSize: number;
   /** 瓦片当前状态 */
   state: 'loading' | 'ready' | 'error-transient' | 'error-permanent';
+  retryAt?: number;
   /** 连续错误次数（用于指数退避） */
   errorCount: number;
   /** 渐显进度 [0, 1]，0=刚加载完（透明），1=完全不透明 */
@@ -618,9 +619,13 @@ export interface RasterTileLayer extends Layer {
 
   /**
    * 启/停该图层的绘制编码。保留瓦片下载 / 缓存等所有能力，仅禁用 `encode` 的实际 draw call。
-   * 用于 2.5D 模式：地形层接管底图渲染时，平面 raster 层需停绘，但缓存继续供地形层 drape 使用。
+   * 停绘期间仍可访问缓存。2.5D 统一地表通过 setTerrainSource 配置。
    */
   setRenderEnabled(enabled: boolean): void;
+  /** Switch to the unified ground mesh, using zero height when the source has no data. */
+  setTerrainSource(source: (() => TerrainSurfaceSource | null) | null): void;
+  /** Rendered elevation in metres, including the current geometry transition. */
+  querySurfaceElevation(lng: number, lat: number): number | null;
 
   /**
    * 同步读取已就绪瓦片的 GPU 纹理（若存在）。
@@ -1191,7 +1196,17 @@ export function computeRasterCoveringTiles(
   canvasHeight: number,
   minZoom: number,
   maxZoom: number,
+  previousTiles?: readonly TileCoord[],
 ): TileCoord[] {
+  if (camera.projectionMatrix[15] === 0) {
+    return computePerspectiveTileCover(camera, {
+      scheme: 'mercator', minZoom, maxZoom: Math.min(maxZoom, Math.ceil(camera.zoom) + 1),
+      maxTiles: MAX_COVERING_TILES, viewportHeight: canvasHeight,
+      previousTiles,
+      minElevation: camera.terrainElevationRange?.[0] ?? (camera.targetElevation === undefined ? 0 : -500),
+      maxElevation: camera.terrainElevationRange?.[1] ?? (camera.targetElevation === undefined ? 0 : Math.max(18000, camera.targetElevation)),
+    });
+  }
   const zoom = camera.zoom;
   // 瓦片 zoom 级别：取整数，限制在图层范围内
   const tileZ = Math.min(Math.max(Math.floor(zoom), minZoom), maxZoom);
@@ -1823,9 +1838,11 @@ function coveringTilesWithOverzoom(
   maxDisplayZoom: number,
   source: TileSourceZoomRange,
   config: OverzoomConfig,
+  previousTiles: readonly ResolvedTile[],
 ): ResolvedTile[] {
   // 计算 display zoom 下的覆盖瓦片（允许超过 maxNativeZoom）
-  const displayTiles = computeRasterCoveringTiles(camera, canvasWidth, canvasHeight, minZoom, maxDisplayZoom);
+  const displayTiles = computeRasterCoveringTiles(camera, canvasWidth, canvasHeight, minZoom, maxDisplayZoom,
+    previousTiles.map(t => ({ z: t.displayZ, x: t.displayX, y: t.displayY })));
   const resolved: ResolvedTile[] = [];
   // 按 displayKey 去重——同一个显示位置不重复
   const seen = new Set<string>();
@@ -1906,6 +1923,7 @@ function resolveVisibleTilesFromResolved(
   resolved: ResolvedTile[],
   cache: TileCache,
   maxSourceZoom: number,
+  allowChildComposite: boolean = true,
 ): VisibleTile[] {
   const result: VisibleTile[] = [];
 
@@ -1923,7 +1941,7 @@ function resolveVisibleTilesFromResolved(
     }
 
     // ② 非 overzoom 时尝试子瓦片逐格拼合（zoom-out 场景：父格缺失但子格可用）
-    if (!r.isOverzoomed) {
+    if (allowChildComposite && !r.isOverzoomed) {
       const composite = resolveChildrenOrAncestors(
         { z: r.displayZ, x: r.displayX, y: r.displayY },
         cache,
@@ -2395,6 +2413,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
   let mounted = false;
   /** 是否编码实际 draw call（2.5D 下地形接管底图时可关闭） */
   let renderEnabled = true;
+  let terrainSource: (() => TerrainSurfaceSource | null) | null = null;
+  let terrainSurface: RasterTerrainSurface | null = null;
   let styleDirty = true;
   const paintProps = new Map<string, unknown>();
   const layoutProps = new Map<string, unknown>();
@@ -2441,6 +2461,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
   // ── 方案五 TileScheduler：IoU 节流 ──
   /** 上次计算 coveringTiles 时的整数 tileZ */
   let schedLastTileZ = -1;
+  let schedLastView = '';
   /** 上次计算时的世界像素视口 AABB */
   let schedLastBBox: [number, number, number, number] | null = null;
   /** 上次 coveringTilesWithOverzoom 的缓存（节流期内复用） */
@@ -2483,6 +2504,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
 
   // 画布尺寸（由 onAdd 注入或 onUpdate 推断）
   let canvasWidth = 800;
+  let layerContext: LayerContext | null = null;
   let canvasHeight = 600;
 
   // ── 3. GPU 资源 ──
@@ -2745,6 +2767,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
     if (device === null || urlTemplates.length === 0) {
       return;
     }
+    const loadingEntry = cache.get(key);
+    if (loadingEntry) { loadingEntry.state = 'loading'; }
 
     // 选择 URL 模板（多个模板时随机选择以分散请求）
     const templateIdx = urlTemplates.length > 1
@@ -2776,6 +2800,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       // 检查取消（可能在解码过程中被 abort）
       if (controller.signal.aborted) {
         bitmap.close();
+        const cancelled = cache.get(key);
+        if (cancelled?.state === 'loading') { cancelled.state = 'error-transient'; cancelled.retryAt = 0; }
         return;
       }
 
@@ -2821,6 +2847,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       // 错误分类与处理
       const errType = classifyError(err);
       if (errType === 'ignore') {
+        const cancelled = cache.get(key);
+        if (cancelled?.state === 'loading') { cancelled.state = 'error-transient'; cancelled.retryAt = 0; }
         return;
       }
 
@@ -2833,18 +2861,14 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         } else {
           entry.errorCount++;
           entry.state = 'error-transient';
-          // 超过最大重试次数则标记为永久错误
-          if (entry.errorCount > MAX_RETRY_COUNT) {
-            entry.state = 'error-permanent';
-          } else {
-            // 指数退避重试
-            const delay = RETRY_BASE_DELAY_MS * Math.pow(2, entry.errorCount - 1);
-            setTimeout(() => {
-              if (mounted && !controller.signal.aborted) {
-                scheduleTileLoad(key, z, x, y, 0);
-              }
-            }, delay);
-          }
+          // Temporary outages must not leave a visible tile permanently missing.
+          const delay = Math.min(30000, RETRY_BASE_DELAY_MS * 2 ** Math.min(entry.errorCount - 1, 5));
+          entry.retryAt = performance.now() + delay;
+          setTimeout(() => {
+            if (mounted && lastNeededKeys.has(key) && !controller.signal.aborted) {
+              scheduleTileLoad(key, z, x, y, 0);
+            }
+          }, delay);
         }
       }
     } finally {
@@ -2867,6 +2891,8 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
    * @param priority - 优先级（越大越优先）
    */
   function scheduleTileLoad(key: string, z: number, x: number, y: number, priority: number): void {
+    const entry = cache.get(key);
+    if (entry?.state === 'ready' || (entry?.retryAt ?? 0) > performance.now()) { return; }
     // 已在加载中或已排队 → 忽略，防止每帧重复插入同一瓦片。
     if (inflightRequests.has(key) || pendingKeys.has(key)) {
       return;
@@ -2937,6 +2963,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
    * 销毁所有 GPU 资源。
    */
   function destroyGPUResources(): void {
+    terrainSurface?.destroy(); terrainSurface = null;
     cameraUniformBuffer?.destroy();
     styleUniformBuffer?.destroy();
     vertexBuffer?.destroy();
@@ -3009,6 +3036,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
 
     onAdd(context: LayerContext): void {
       mounted = true;
+      layerContext = context;
 
       // 尝试从 LayerContext 获取 GPU 设备
       const dev = context.gpuDevice ?? null;
@@ -3079,6 +3107,11 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         currentVisibleTiles = [];
         return;
       }
+      if (layerContext?.canvasSize) {
+        const [width, height] = layerContext.canvasSize;
+        if (width !== canvasWidth || height !== canvasHeight) { schedLastBBox = null; }
+        canvasWidth = width; canvasHeight = height;
+      }
 
       // ════════════════════════════════════════════════════
       // Overzoom §四：Zoom fade——alpha=0 的图层直接跳过全部逻辑
@@ -3106,9 +3139,12 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         maxDisplayZoom,
       );
       const viewBBox = computeViewBBox(camera, canvasWidth, canvasHeight);
+      const perspectiveView = camera.projectionMatrix[15] === 0
+        ? `${camera.center}/${camera.bearing}/${camera.pitch}/${camera.targetElevation ?? 0}/${camera.zoom}/${camera.terrainElevationRange}/${camera.projectionMatrix[0]}/${camera.projectionMatrix[10]}/${camera.projectionMatrix[14]}` : '';
       schedFrameCount++;
 
       const shouldRecalc =
+        schedLastView !== perspectiveView ||
         schedLastTileZ !== idealTileZ ||
         schedLastBBox === null ||
         bboxIoU(schedLastBBox, viewBBox) < SCHEDULE_IOU_THRESHOLD ||
@@ -3118,9 +3154,10 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         // ── Overzoom §一 + §五统一：按 maxDisplayZoom 计算覆盖瓦片，然后 resolveTile ──
         schedCachedResolved = coveringTilesWithOverzoom(
           camera, canvasWidth, canvasHeight, cfg.minzoom, maxDisplayZoom,
-          sourceZoomRange, overzoomConfig,
+          sourceZoomRange, overzoomConfig, schedCachedResolved,
         );
         schedLastTileZ = idealTileZ;
+        schedLastView = perspectiveView;
         schedLastBBox = viewBBox;
         schedFrameCount = 0;
       }
@@ -3142,7 +3179,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
 
       // 非 overzoom 瓦片：如果 request 瓦片未就绪，添加 z+1 子瓦片辅助加载（zoom-out 拼合）
       for (const r of resolved) {
-        if (r.isOverzoomed) { continue; }
+        if (terrainSource !== null || r.isOverzoomed) { continue; }
         const pe = cache.get(r.requestKey);
         const parentReady = pe !== undefined && pe.state === 'ready' && pe.texture !== null;
         if (!parentReady && r.requestZ < sourceZoomRange.maxNativeZoom) {
@@ -3225,7 +3262,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         } else if (
           entry.state !== 'ready' &&
           entry.state !== 'error-permanent' &&
-          entry.state !== 'loading'
+          (entry.state !== 'loading' || (!inflightRequests.has(lr.key) && !pendingKeys.has(lr.key)))
         ) {
           if (urlTemplates.length > 0) {
             scheduleTileLoad(lr.key, lr.z, lr.x, lr.y, priority);
@@ -3265,7 +3302,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       //   ③ 兜底 → 在缓存中搜索 display 坐标的最近祖先
       // ════════════════════════════════════════════════════
       const newVisible = resolveVisibleTilesFromResolved(
-        resolved, cache, sourceZoomRange.maxNativeZoom,
+        resolved, cache, sourceZoomRange.maxNativeZoom, terrainSource === null,
       );
 
       // 统计新帧覆盖情况（按 displayKey 维度）
@@ -3298,7 +3335,7 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         gapCount++;
       }
 
-      if (gapCount === 0 || retainedVisibleTiles.length === 0) {
+      if (terrainSource !== null || gapCount === 0 || retainedVisibleTiles.length === 0) {
         currentVisibleTiles = newVisible;
         retainedVisibleTiles = newVisible.slice();
       } else {
@@ -3370,6 +3407,12 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
         ]);
         device.queue.writeBuffer(styleUniformBuffer, 0, styleData);
         styleDirty = false;
+      }
+
+      if (terrainSource !== null) {
+        terrainSurface ??= new RasterTerrainSurface(device, [cameraBindGroupLayout!, styleBindGroupLayout!, textureBindGroupLayout!]);
+        terrainSurface.encode(encoder, camera, currentVisibleTiles, terrainSource(), cameraBindGroup, styleBindGroup, styleUniforms.opacity);
+        return;
       }
 
       // ③ 构建所有瓦片的顶点数据（相机相对坐标 + 预计算 UV + fade alpha）
@@ -3601,6 +3644,13 @@ export function createRasterTileLayer(opts: RasterTileLayerOptions): RasterTileL
       return idlePendingCount === 0 && inflightRequests.size === 0 && pendingQueue.length === 0;
     },
 
+    setTerrainSource(source): void {
+      terrainSource = source;
+      if (source === null) { terrainSurface?.destroy(); terrainSurface = null; }
+    },
+    querySurfaceElevation(lng, lat): number | null {
+      return terrainSurface?.sampleElevation(lng, lat) ?? null;
+    },
     setRenderEnabled(enabled: boolean): void {
       renderEnabled = enabled;
     },

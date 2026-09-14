@@ -7,6 +7,35 @@ afterEach(() => {
 });
 
 describe('CesiumTerrainProvider metadata and requests', () => {
+  it('retries metadata after a temporary failure', async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(new Response(JSON.stringify({ maxzoom: 4 })));
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new CesiumTerrainProvider('https://terrain.example/');
+    await expect(provider.initialize()).rejects.toThrow('offline');
+    await expect(provider.initialize()).resolves.toMatchObject({ maxZoom: 4 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels obsolete in-flight and queued tiles so the new view can load immediately', async () => {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => {
+      if (input.endsWith('layer.json')) { return Promise.resolve(new Response(JSON.stringify({ maxzoom: 4, tiles: ['{z}/{x}/{y}.terrain'] }))); }
+      requested.push(input);
+      if (input.includes('/3/7/0.terrain')) { return Promise.resolve(new Response(new ArrayBuffer(0))); }
+      return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError'))));
+    }));
+    const provider = new CesiumTerrainProvider('https://terrain.example/');
+    await provider.initialize();
+    const requests = Array.from({ length: 8 }, (_, x) => provider.loadTile(3, x, 0));
+    const settled = Promise.allSettled(requests);
+    expect(requested).toHaveLength(6);
+    provider.retainRequests(new Set(['3/7/0']));
+    await settled;
+    expect(requested).toHaveLength(7);
+    expect(requested.some(url => url.includes('/3/6/0.terrain'))).toBe(false);
+    expect(requested.at(-1)).toContain('/3/7/0.terrain');
+  });
+
   it('treats missing available metadata as continuous coverage inside bounds', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       bounds: [0, 0, 10, 10],

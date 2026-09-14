@@ -10,6 +10,7 @@ import type { FilterExpression, StyleSpec } from '../../core/src/types/style-spe
 import type { PickResult, CameraState } from '../../core/src/types/viewport.ts';
 import type { Layer } from '../../scene/src/index.ts';
 import { createRasterTileLayer, type RasterTileLayer } from '../../layer-tile-raster/src/index.ts';
+import { createTerrainElevationLayer } from '../../layer-cesium-terrain/src/TerrainElevationLayer.ts';
 import { createCesiumTerrainLayer } from '../../layer-cesium-terrain/src/index.ts';
 import { createTerrainDrapeLayer } from '../../layer-terrain-drape/src/index.ts';
 
@@ -1009,9 +1010,13 @@ export class Map2D {
             },
         };
 
+        const canvas = this._canvas;
         return {
             gpuDevice: this._device,
-            canvasSize: [Math.max(1, rect.width), Math.max(1, rect.height)] as const,
+            get canvasSize(): readonly [number, number] {
+                const current = canvas.getBoundingClientRect();
+                return [Math.max(1, current.width), Math.max(1, current.height)];
+            },
             services: { tiles, rasterTileCache },
             map: this,
         };
@@ -2179,9 +2184,10 @@ export class Map2D {
         };
     }
 
+    protected _usesUnifiedTerrain(): boolean { return false; }
+
     /**
      * 根据 LayerSpec 创建实际的 Layer 实例。
-     * 当前支持 type='raster'，其余类型待后续 Sprint 实现。
      *
      * @param spec - 图层规格
      */
@@ -2244,7 +2250,7 @@ export class Map2D {
                     }
                 }
             }
-            const terrainLayer = createCesiumTerrainLayer({
+            const terrainLayer = (this._usesUnifiedTerrain() ? createTerrainElevationLayer : createCesiumTerrainLayer)({
                 id: spec.id,
                 source: sourceId,
                 url,
@@ -2266,8 +2272,7 @@ export class Map2D {
                 const ctx = this._buildLayerContext(spec.id);
                 terrainLayer.onAdd(ctx);
             }
-            // 保留平面 raster 底图：未加载地形的区域由其兜底显示；
-            // 地形所在区域通过 depth test 自动覆盖 raster。
+            // 2.5D uses an elevation-only service; imagery is drawn by its unified surface.
             void drapeSourceId;
         } else if (spec.type === 'terrain-drape') {
             // ── 单层地形 (Mapbox GL v3 / MapLibre 风格) ──

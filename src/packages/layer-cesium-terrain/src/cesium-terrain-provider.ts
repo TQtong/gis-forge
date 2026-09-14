@@ -117,7 +117,12 @@ export class CesiumTerrainProvider {
       this._meta = meta;
       return meta;
     })();
-    return this._readyPromise;
+    try {
+      return await this._readyPromise;
+    } catch (error) {
+      this._readyPromise = null;
+      throw error;
+    }
   }
 
   /**
@@ -174,6 +179,18 @@ export class CesiumTerrainProvider {
     for (const job of this._pending) { job.reject(aborted); }
     this._pending.length = 0;
     this._ensuring.clear();
+  }
+
+  /** Drop obsolete work during a pan/zoom instead of draining a stale FIFO first. */
+  retainRequests(keys: ReadonlySet<string>): void {
+    const aborted = new Error('[TERRAIN_TILE_ABORTED]');
+    this._pending = this._pending.filter(job => {
+      if (keys.has(`${job.z}/${job.x}/${job.y}`)) { return true; }
+      job.reject(aborted); return false;
+    });
+    for (const [key, controller] of this._inflight) {
+      if (!keys.has(key)) { controller.abort(); }
+    }
   }
 
   // ═════════════════════════════════════════════════════════════════

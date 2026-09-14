@@ -101,6 +101,10 @@ export interface Viewport {
  * };
  */
 export interface CameraState {
+  /** Elevation of the 2.5D orbit target, in rendered metres above sea level. */
+  readonly targetElevation?: number;
+  /** Conservative bounds of the unified terrain surface, after exaggeration, in metres. */
+  readonly terrainElevationRange?: readonly [number, number];
   // ===================== 地理位置参数 =====================
 
   /**

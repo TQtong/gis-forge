@@ -12,7 +12,9 @@
 
 import type { LightSpec } from '../../core/src/types/style-spec.ts';
 import type { CameraState, Viewport } from '../../core/src/types/viewport.ts';
-import * as mat4 from '../../core/src/math/mat4.ts';
+import { constrainCameraToTerrain, projectTerrainPoint, unprojectTerrainPoint } from '../../camera-25d/src/terrain-camera.ts';
+import type { TerrainElevationLayer } from '../../layer-cesium-terrain/src/TerrainElevationLayer.ts';
+import type { TerrainSurfaceSource } from '../../scene/src/terrain-surface.ts';
 import { createCamera25D, type Camera25D } from '../../camera-25d/src/index.ts';
 
 import { GeoForgeError, GeoForgeErrorCode, Map2D } from '../../preset-2d/src/map-2d.ts';
@@ -379,109 +381,55 @@ export class Map25D extends Map2D {
   // 否则拖拽时屏幕 Y 方向像素变化对应的 lat 变化会被严重低估，造成
   // "只能左右拖不能上下拖"的假象。
 
-  public override project(lngLat: [number, number]): [number, number] {
-    const camera = this._cameraState;
-    if (camera === null) {
-      return super.project(lngLat);
-    }
+  protected override _usesUnifiedTerrain(): boolean { return true; }
 
-    const rect = this._canvas.getBoundingClientRect();
-    const width = Math.max(1, rect.width);
-    const height = Math.max(1, rect.height);
-    const worldSize = 512 * Math.pow(2, camera.zoom);
-    const toWorldPixel = (lng: number, lat: number): [number, number] => {
-      const clampedLat = Math.max(-85.05, Math.min(85.05, lat));
-      const latRad = clampedLat * DEG2RAD;
-      return [
-        ((lng + 180) / 360) * worldSize,
-        (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * worldSize,
-      ];
-    };
-    const [px, py] = toWorldPixel(lngLat[0], lngLat[1]);
-    const [cx, cy] = toWorldPixel(camera.center[0], camera.center[1]);
-    const matrix = camera.vpMatrix;
-    const relX = px - cx;
-    const relY = py - cy;
-    const clipX = matrix[0] * relX + matrix[4] * relY + matrix[12];
-    const clipY = matrix[1] * relX + matrix[5] * relY + matrix[13];
-    const clipW = matrix[3] * relX + matrix[7] * relY + matrix[15];
-    if (!Number.isFinite(clipW) || Math.abs(clipW) < 1e-9) {
-      return super.project(lngLat);
+  private _terrainSource = (): TerrainSurfaceSource | null => {
+    for (const layer of this._layerInstances.values()) {
+      if (layer.type === 'cesium-terrain' && layer.visible && layer.opacity > 0) { return layer as TerrainElevationLayer; }
     }
-    return [
-      (clipX / clipW + 1) * 0.5 * width,
-      (1 - clipY / clipW) * 0.5 * height,
-    ];
+    return null;
+  };
+
+  private _sourceElevation = (lng: number, lat: number): number | null => {
+    const source = this._terrainSource();
+    const elevation = source?.sampleElevation(lng, lat);
+    return elevation == null ? null : elevation * source!.exaggeration;
+  };
+
+  private _sampleTerrain = (lng: number, lat: number): number | null => {
+    for (const layer of this._layerInstances.values()) {
+      if (layer.type !== 'raster' || !layer.visible) { continue; }
+      const rendered = (layer as RasterTileLayer).querySurfaceElevation(lng, lat);
+      if (rendered !== null) { return rendered; }
+    }
+    return this._sourceElevation(lng, lat);
+  };
+
+  private _collisionTerrain = (lng: number, lat: number): number | null => {
+    const source = this._terrainSource();
+    const actual = source?.sampleElevation(lng, lat);
+    const rendered = this._sampleTerrain(lng, lat);
+    if (actual == null) { return rendered; }
+    return Math.max(actual * source!.exaggeration, rendered ?? -Infinity);
+  };
+
+  public override project(lngLat: [number, number]): [number, number] {
+    if (!this._cameraState) { return super.project(lngLat); }
+    const rect = this._canvas.getBoundingClientRect();
+    return projectTerrainPoint(this._cameraState, Math.max(1, rect.width), Math.max(1, rect.height), lngLat, this._sampleTerrain);
   }
 
   public override unproject(point: [number, number]): [number, number] {
-    const camera = this._cameraState;
-    if (camera === null || camera.inverseVPMatrix === null) {
-      return super.unproject(point);
-    }
+    // Recompute after wheel/drag changes so cursor-anchored zoom uses the new view.
+    const camera = this._computeCameraState();
     const rect = this._canvas.getBoundingClientRect();
-    const w = Math.max(1, rect.width);
-    const h = Math.max(1, rect.height);
-
-    // 屏幕像素 → NDC（x:[-1,1] 右正，y:[-1,1] 上正）
-    const ndcX = (point[0] / w) * 2 - 1;
-    const ndcY = 1 - (point[1] / h) * 2;
-
-    // Reversed-Z：near clip.z=1，far clip.z=0；取两个端点反投影得到相机
-    // 相对的当前 zoom 世界像素空间中的射线
-    const inv = camera.inverseVPMatrix;
-    const unprojectToWorld = (nx: number, ny: number, nz: number): [number, number, number] => {
-      const x = inv[0] * nx + inv[4] * ny + inv[8] * nz + inv[12];
-      const y = inv[1] * nx + inv[5] * ny + inv[9] * nz + inv[13];
-      const z = inv[2] * nx + inv[6] * ny + inv[10] * nz + inv[14];
-      const wRec = inv[3] * nx + inv[7] * ny + inv[11] * nz + inv[15];
-      const invW = wRec === 0 ? 1 : 1 / wRec;
-      return [x * invW, y * invW, z * invW];
-    };
-
-    const near = unprojectToWorld(ndcX, ndcY, 1);
-    const far = unprojectToWorld(ndcX, ndcY, 0);
-    const dx = far[0] - near[0];
-    const dy = far[1] - near[1];
-    const dz = far[2] - near[2];
-
-    // 与地面 z=0 平面求交
-    let groundRelX: number;
-    let groundRelY: number;
-    if (Math.abs(dz) < 1e-9) {
-      // 射线与地面近乎平行（俯仰接近水平）—— 退化为中心点
-      groundRelX = near[0];
-      groundRelY = near[1];
-    } else {
-      const t = -near[2] / dz;
-      groundRelX = near[0] + t * dx;
-      groundRelY = near[1] + t * dy;
-    }
-
-    // (groundRelX, groundRelY) 为当前 zoom 下、相机中心为原点的 mercator 像素
-    // → 加回相机中心的绝对世界像素得到绝对坐标
-    const zoom = this.getZoom();
-    const center = this.getCenter();
-    const worldSize = 512 * Math.pow(2, zoom);
-    const cLat = Math.max(-85.05, Math.min(85.05, center[1]));
-    const cLatRad = (cLat * Math.PI) / 180;
-    const cxAbs = ((center[0] + 180) / 360) * worldSize;
-    const cyAbs = (1 - Math.log(Math.tan(cLatRad) + 1 / Math.cos(cLatRad)) / Math.PI) / 2 * worldSize;
-
-    const worldPx = cxAbs + groundRelX;
-    const worldPy = cyAbs + groundRelY;
-
-    const lng = (worldPx / worldSize) * 360 - 180;
-    const yNorm = 1 - (2 * worldPy) / worldSize;
-    const lat = Math.atan(Math.sinh(Math.PI * yNorm)) * (180 / Math.PI);
-    return [lng, lat];
+    return unprojectTerrainPoint(camera, Math.max(1, rect.width), Math.max(1, rect.height), point, this._sampleTerrain) ?? this.getCenter();
   }
 
   // ==================== 地形接管底图渲染 ====================
   //
-  // 参考 Mapbox GL v3 / Cesium：开启 cesium-terrain 后，所有平面 raster
-  // 图层停止 encode draw call，但保留瓦片下载/缓存能力供地形层 drape 借用。
-  // 切回 2D 模式（移除地形层）时自动恢复。
+  // 2.5D 的 raster 始终只绘制统一地表；cesium-terrain 只提供高程。
+  // 没有高程数据时，同一地表网格的高度为零。
 
   protected override _createLayerInstance(spec: LayerSpec): void {
     super._createLayerInstance(spec);
@@ -494,20 +442,10 @@ export class Map25D extends Map2D {
     return this;
   }
 
-  /**
-   * 在 2.5D + 直接 QM 渲染架构下，CesiumTerrainLayer 只覆盖 available 矩阵
-   * 内的地形瓦片（如北京局部），其它区域仍需底图 RasterTileLayer 提供
-   * 平面 OSM。因此**不再禁用 raster 层渲染**，让两层共存：
-   *   • RasterTileLayer：平面底图，全球覆盖
-   *   • CesiumTerrainLayer：局部 3D 地形，深度测试让山脊盖住同位置底图
-   */
+  /** Every raster is draped over one surface; the terrain layer only supplies heights. */
   private _syncRasterRenderState(): void {
-    // 保持所有 raster 层渲染开启（No-op）
-    for (const inst of this._layerInstances.values()) {
-      if (inst.type === 'raster') {
-        const rl = inst as RasterTileLayer;
-        rl.setRenderEnabled?.(true);
-      }
+    for (const layer of this._layerInstances.values()) {
+      if (layer.type === 'raster') { (layer as RasterTileLayer).setTerrainSource(this._terrainSource); }
     }
   }
 
@@ -566,39 +504,12 @@ export class Map25D extends Map2D {
       pixelRatio: dpr,
     };
 
-    // deltaTime=0：Camera25D 不管理动画，仅计算矩阵
-    const absState = this._cam25d.update(0, viewport);
-
-    // --- 4. 坐标适配 ---
-    // Camera25D 的 lookAt 已在相机相对坐标系中构建（eye/target 减去 center），
-    // vpMatrix 直接接受相机相对顶点 (worldPx - centerPx, worldPy - centerPy, 0)，
-    // 无需额外平移，避免了 Float32 截断大坐标导致的精度丢失。
-    const vpMatrix = new Float32Array(16);
-    mat4.copy(vpMatrix, absState.vpMatrix);
-
-    // 逆 VP 矩阵（屏幕反投影用）
-    const inverseVPMatrix = new Float32Array(16);
-    const inv = mat4.invert(inverseVPMatrix, vpMatrix);
-    if (inv === null) {
-      // 退化情况（极端缩放/pitch）：回退单位阵
-      mat4.identity(inverseVPMatrix);
-    }
-
-    // --- 5. 组装完整 CameraState（复用 Camera25D 的标量与位置） ---
-    return {
-      center: [center[0], center[1]],
-      zoom,
-      bearing: bearingRad,
-      pitch: pitchRad,
-      viewMatrix: absState.viewMatrix,
-      projectionMatrix: absState.projectionMatrix,
-      vpMatrix,
-      inverseVPMatrix,
-      position: absState.position,
-      altitude: absState.altitude,
-      fov: absState.fov,
-      roll: 0,
-    };
+    const source = this._terrainSource();
+    const elevationRange: readonly [number, number] = source
+      ? [source.elevationRange[0] * source.exaggeration, source.elevationRange[1] * source.exaggeration] : [0, 0];
+    // The orbit target follows source elevation, independent of display LOD.
+    // Collision checks still include the transitioning surface the user sees.
+    return constrainCameraToTerrain(this._cam25d.update(0, viewport), viewport, this._sourceElevation, elevationRange, this._collisionTerrain);
   }
 
   // ==================== 2.5D 公共 API ====================
